@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Quieter.ProfileService/Quieter.ProfileService.csproj" />
+  <Project Path="Quieter.ProfileService.Tests/Quieter.ProfileService.Tests.csproj" />
+</Solution>

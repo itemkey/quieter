@@ -9,11 +9,20 @@
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/
+**/[Oo]bj/
+**/[Bb]in/
 /[Bb]uild/
 /[Bb]uilds/
 /[Ll]ogs/
 /[Uu]ser[Ss]ettings/
 *.log
+
+# Deployment secrets and generated release artifacts
+/Deploy/.env
+/Deploy/secrets/*.txt
+/Deploy/secrets/*.pem
+/Deploy/releases/
+/.tools/
 
 # By default unity supports Blender asset imports, *.blend1 blender files do not need to be commited to version control.
 *.blend1
@@ -47,6 +56,7 @@ ExportedObj/
 *.unityproj
 *.sln
 *.slnx
+!Backend/Quieter.Backend.slnx
 *.suo
 *.tmp
 *.user

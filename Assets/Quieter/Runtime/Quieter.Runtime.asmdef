@@ -1,0 +1,14 @@
+{
+  "name": "Quieter.Runtime",
+  "rootNamespace": "Quieter",
+  "references": [
+    "Unity.Collections",
+    "Unity.InputSystem",
+    "Unity.Netcode.Runtime",
+    "Unity.Netcode.Transports.UTP",
+    "Unity.Networking.Transport",
+    "UnityEngine.UI",
+    "com.rlabrecque.steamworks.net"
+  ],
+  "autoReferenced": true
+}

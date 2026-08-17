@@ -1,0 +1,13 @@
+.git
+.tools
+Library
+Temp
+Logs
+UserSettings
+Backend/**/bin
+Backend/**/obj
+Builds/WindowsClient
+Deploy/.env
+Deploy/releases
+Deploy/secrets
+

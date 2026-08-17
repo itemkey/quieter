@@ -1,0 +1,148 @@
+name: quieter
+
+services:
+  postgres:
+    image: postgres:18.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quieter}
+      POSTGRES_USER: ${POSTGRES_USER:-quieter}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - quieter-internal
+
+  profile-service:
+    build:
+      context: ../Backend/Quieter.ProfileService
+    image: quieter/profile-service:${QUIETER_RELEASE:-local}
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      Postgres__Host: postgres
+      Postgres__Port: 5432
+      Postgres__Database: ${POSTGRES_DB:-quieter}
+      Postgres__Username: ${POSTGRES_USER:-quieter}
+      Postgres__PasswordFile: /run/secrets/postgres_password
+      InternalTokenFile: /run/secrets/profile_token
+    secrets:
+      - postgres_password
+      - profile_token
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - quieter-internal
+
+  game-server:
+    build:
+      context: ..
+      dockerfile: Deploy/GameServer.Dockerfile
+    image: quieter/game-server:${QUIETER_RELEASE:-local}
+    restart: unless-stopped
+    environment:
+      QUIETER_PROFILE_SERVICE_URL: http://profile-service:8080
+      QUIETER_PROFILE_SERVICE_TOKEN_FILE: /run/secrets/profile_token
+      QUIETER_DTLS_CERTIFICATE_FILE: /run/secrets/dtls_certificate
+      QUIETER_DTLS_PRIVATE_KEY_FILE: /run/secrets/dtls_private_key
+      SteamAppId: ${STEAM_APP_ID:-480}
+      SteamGameId: ${STEAM_APP_ID:-480}
+    command: ["--server", "--port", "7777"]
+    ports:
+      - "127.0.0.1:7777:7777/udp"
+    secrets:
+      - profile_token
+      - dtls_certificate
+      - dtls_private_key
+    volumes:
+      - game-data:/home/quieter/.config/unity3d
+    depends_on:
+      profile-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq QuieterServer /proc/1/cmdline"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      - quieter-internal
+      - quieter-egress
+
+  playit-agent:
+    image: ghcr.io/playit-cloud/playit-agent:1.0.5
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SECRET_KEY: ${PLAYIT_SECRET_KEY:?Set PLAYIT_SECRET_KEY in Deploy/.env}
+    depends_on:
+      game-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -r /proc/1/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  postgres-backup:
+    image: postgres:18.0
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-quieter}
+      PGUSER: ${POSTGRES_USER:-quieter}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    entrypoint: ["/bin/sh", "/opt/quieter/backup-postgres.sh"]
+    secrets:
+      - postgres_password
+    volumes:
+      - ./backup-postgres.sh:/opt/quieter/backup-postgres.sh:ro
+      - postgres-backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/quieter-backup-alive && test $$(($$(date +%s) - $$(cat /tmp/quieter-backup-alive))) -lt 90000"]
+      interval: 1h
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+    networks:
+      - quieter-internal
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  profile_token:
+    file: ./secrets/profile_token.txt
+  dtls_certificate:
+    file: ./secrets/dtls_certificate.pem
+  dtls_private_key:
+    file: ./secrets/dtls_private_key.pem
+
+volumes:
+  postgres-data:
+  postgres-backups:
+  game-data:
+
+networks:
+  quieter-internal:
+    internal: true
+  quieter-egress:

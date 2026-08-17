@@ -1,0 +1,11 @@
+{
+  "name": "Quieter.PlayModeTests",
+  "rootNamespace": "Quieter.Tests",
+  "references": [
+    "Quieter.Runtime"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "autoReferenced": false
+}
