@@ -153,12 +153,12 @@ namespace Quieter.UI
             statusText.color = new Color(0.73f, 0.76f, 0.8f);
             SetRect(statusText.rectTransform, 52f, -244f, 576f, 60f, new Vector2(0f, 1f));
 
-            headBobToggle = CreateToggle(card.transform, "Покачивание камеры");
+            headBobToggle = CreateToggle(card.transform, "Естественное покачивание камеры");
             SetRect(
                 headBobToggle.GetComponent<RectTransform>(),
                 52f,
                 195f,
-                260f,
+                270f,
                 42f,
                 Vector2.zero);
             headBobToggle.SetIsOnWithoutNotify(ClientPreferences.HeadBobEnabled);
@@ -234,7 +234,7 @@ namespace Quieter.UI
             var position = playerObject.transform.position;
             hudText.text = $"{currentStatus}\n"
                 + $"X {position.x:0.0}   Y {position.y:0.0}   Z {position.z:0.0}\n"
-                + "WASD — движение   Shift — бег   Space — прыжок   Esc — освободить мышь";
+                + "WASD — движение   Shift — бег   Ctrl — присяд   Space — прыжок   Esc — освободить мышь";
         }
 
         private async void Connect()

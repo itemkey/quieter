@@ -2,7 +2,9 @@
   "name": "Quieter.EditModeTests",
   "rootNamespace": "Quieter.Tests",
   "references": [
-    "Quieter.Runtime"
+    "Quieter.Runtime",
+    "Unity.Collections",
+    "Unity.Netcode.Runtime"
   ],
   "includePlatforms": [
     "Editor"

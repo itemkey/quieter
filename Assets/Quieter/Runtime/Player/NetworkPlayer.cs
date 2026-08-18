@@ -20,11 +20,13 @@ namespace Quieter.Player
         private const float RemoteExtrapolationSeconds = 0.05f;
         private const float SoftCorrectionLimit = 0.75f;
         private const float CorrectionHalfLife = 0.075f;
-        private const float BobFadeSpeed = 8f;
-        private const float WalkBobFrequency = 1.7f;
-        private const float SprintBobFrequency = 2.2f;
-        private const float BobHorizontalAmplitude = 0.015f;
-        private const float BobVerticalAmplitude = 0.025f;
+        private const float CameraStepHalfLife = 0.085f;
+        private const float CameraStanceResponse = 18f;
+        private const float RemoteStanceResponse = 12f;
+        private const float LandingHalfLife = 0.065f;
+        private const float MaximumLandingOffset = 0.012f;
+        private const float MaximumLandingPitch = 0.2f;
+        private const float MinimumSmoothedStepHeight = 0.045f;
 
         private readonly struct PredictedInput
         {
@@ -69,19 +71,28 @@ namespace Quieter.Player
         private Vector3 previousSimulationPosition;
         private Vector3 currentSimulationPosition;
         private Vector3 visualCorrectionOffset;
+        private PlayerCameraPose bobPose;
         private Vector3 presentationLocalPosition;
+        private Vector3 presentationLocalScale;
         private Quaternion presentationLocalRotation;
-        private float cameraEyeHeight = 1.62f;
+        private float cameraEyeHeight = PlayerMovementTuning.StandingEyeHeight;
+        private float cameraStepOffset;
+        private float pendingCameraStepOffset;
+        private float remoteCrouchBlend;
+        private float landingOffset;
+        private float landingPitch;
         private float viewYaw;
         private float pitch;
         private float bobPhase;
-        private float bobWeight;
+        private PlayerGait cameraGait;
         private uint nextInputSequence;
         private uint jumpPressId;
         private uint serverSimulationTick;
         private int missingInputTicks;
         private double latestInputReceivedAt;
         private bool sampledSprint;
+        private bool sampledJumpHeld;
+        private bool sampledCrouchHeld;
         private bool hasServerInput;
         private TextMesh nameLabel;
 
@@ -96,6 +107,7 @@ namespace Quieter.Player
             if (presentationRoot != null)
             {
                 presentationLocalPosition = presentationRoot.localPosition;
+                presentationLocalScale = presentationRoot.localScale;
                 presentationLocalRotation = presentationRoot.localRotation;
             }
 
@@ -132,12 +144,20 @@ namespace Quieter.Player
             }
 
             movementMotor.Warp(simulatedState);
+            cameraEyeHeight = simulatedState.Crouched
+                ? PlayerMovementTuning.CrouchEyeHeight
+                : PlayerMovementTuning.StandingEyeHeight;
+            remoteCrouchBlend = simulatedState.Crouched ? 1f : 0f;
             viewYaw = simulatedState.Yaw;
             previousSimulationPosition = simulatedState.Position;
             currentSimulationPosition = simulatedState.Position;
             latestServerInput.Yaw = simulatedState.Yaw;
             CreateNameLabel();
             OnDisplayNameChanged(default, displayName.Value);
+            if (nameLabel != null)
+            {
+                nameLabel.gameObject.SetActive(!IsOwner);
+            }
 
             if (IsOwner && presentationRoot != null)
             {
@@ -199,7 +219,10 @@ namespace Quieter.Player
                 return;
             }
 
+            CommitPendingCameraStep();
             previousSimulationPosition = currentSimulationPosition;
+            var wasGrounded = simulatedState.Grounded;
+            var previousVerticalVelocity = simulatedState.Velocity.y;
             var deltaTime = 1f / QuieterConstants.MovementSimulationRate;
             if (IsServer)
             {
@@ -212,6 +235,16 @@ namespace Quieter.Player
                 }
 
                 currentSimulationPosition = simulatedState.Position;
+                if (IsOwner)
+                {
+                    AccumulateCameraStep(wasGrounded, simulatedState.Grounded);
+                    AccumulateCameraMotion(
+                        wasGrounded,
+                        previousVerticalVelocity,
+                        input.Sprint,
+                        deltaTime);
+                }
+
                 return;
             }
 
@@ -229,6 +262,12 @@ namespace Quieter.Player
             }
 
             currentSimulationPosition = simulatedState.Position;
+            AccumulateCameraStep(wasGrounded, simulatedState.Grounded);
+            AccumulateCameraMotion(
+                wasGrounded,
+                previousVerticalVelocity,
+                predictedInput.Sprint,
+                deltaTime);
         }
 
         public void AssignServerIdentity(ulong steamId, string playerDisplayName, Vector3 spawnPosition)
@@ -328,6 +367,8 @@ namespace Quieter.Player
             {
                 sampledMovement = Vector2.zero;
                 sampledSprint = false;
+                sampledJumpHeld = false;
+                sampledCrouchHeld = false;
                 return;
             }
 
@@ -338,6 +379,8 @@ namespace Quieter.Player
             if (keyboard.aKey.isPressed) movement.x -= 1f;
             sampledMovement = Vector2.ClampMagnitude(movement, 1f);
             sampledSprint = keyboard.leftShiftKey.isPressed;
+            sampledJumpHeld = keyboard.spaceKey.isPressed;
+            sampledCrouchHeld = keyboard.leftCtrlKey.isPressed;
             if (keyboard.spaceKey.wasPressedThisFrame)
             {
                 jumpPressId++;
@@ -352,7 +395,9 @@ namespace Quieter.Player
                 Movement = sampledMovement,
                 Yaw = viewYaw,
                 JumpPressId = jumpPressId,
+                JumpHeld = sampledJumpHeld,
                 Sprint = sampledSprint,
+                CrouchHeld = sampledCrouchHeld,
             };
         }
 
@@ -395,6 +440,8 @@ namespace Quieter.Player
             {
                 input.Movement = Vector2.zero;
                 input.Sprint = false;
+                input.JumpHeld = false;
+                input.CrouchHeld = false;
             }
 
             return input;
@@ -529,37 +576,161 @@ namespace Quieter.Player
 
             bodyPosition += visualCorrectionOffset;
             var planarSpeed = new Vector2(simulatedState.Velocity.x, simulatedState.Velocity.z).magnitude;
-            var wantsBob = ClientPreferences.HeadBobEnabled
-                && simulatedState.Grounded
-                && planarSpeed > 0.2f;
-            bobWeight = wantsBob
-                ? Mathf.MoveTowards(bobWeight, 1f, BobFadeSpeed * Time.unscaledDeltaTime)
-                : Mathf.MoveTowards(bobWeight, 0f, BobFadeSpeed * Time.unscaledDeltaTime);
+            var headBobEnabled = ClientPreferences.HeadBobEnabled;
+            var bobTarget = PlayerCameraMotion.CalculateTarget(
+                bobPhase,
+                cameraGait,
+                PlayerCameraMotion.MovementWeight(cameraGait, planarSpeed),
+                headBobEnabled);
+            bobPose = PlayerCameraMotion.Damp(
+                bobPose,
+                bobTarget,
+                Time.unscaledDeltaTime);
 
-            if (wantsBob)
+            var eyeHeightTarget = simulatedState.Crouched
+                ? PlayerMovementTuning.CrouchEyeHeight
+                : PlayerMovementTuning.StandingEyeHeight;
+            var stanceBlend = 1f - Mathf.Exp(
+                -CameraStanceResponse * Time.unscaledDeltaTime);
+            cameraEyeHeight = Mathf.LerpUnclamped(
+                cameraEyeHeight,
+                eyeHeightTarget,
+                stanceBlend);
+
+            if (Mathf.Abs(cameraStepOffset) > 0.00001f)
             {
-                var sprintBlend = Mathf.InverseLerp(
-                    PlayerMovementTuning.WalkSpeed,
-                    PlayerMovementTuning.SprintSpeed,
-                    planarSpeed);
-                var frequency = Mathf.Lerp(WalkBobFrequency, SprintBobFrequency, sprintBlend);
-                bobPhase += Time.unscaledDeltaTime * frequency * Mathf.PI * 2f;
+                var decay = Mathf.Pow(0.5f, Time.unscaledDeltaTime / CameraStepHalfLife);
+                cameraStepOffset *= decay;
             }
-            else if (!ClientPreferences.HeadBobEnabled)
+            else
             {
-                bobPhase = 0f;
-                bobWeight = 0f;
+                cameraStepOffset = 0f;
             }
 
-            var bob = new Vector3(
-                Mathf.Sin(bobPhase) * BobHorizontalAmplitude,
-                -Mathf.Cos(bobPhase * 2f) * BobVerticalAmplitude,
-                0f) * bobWeight;
+            if (Mathf.Abs(landingOffset) > 0.00001f
+                || Mathf.Abs(landingPitch) > 0.00001f)
+            {
+                var landingDecay = Mathf.Pow(
+                    0.5f,
+                    Time.unscaledDeltaTime / LandingHalfLife);
+                landingOffset *= landingDecay;
+                landingPitch *= landingDecay;
+            }
+            else
+            {
+                landingOffset = 0f;
+                landingPitch = 0f;
+            }
+
+            var renderedStepOffset = cameraStepOffset + pendingCameraStepOffset * alpha;
             var viewRotation = Quaternion.Euler(0f, viewYaw, 0f);
             cameraPivot.position = bodyPosition
-                + Vector3.up * cameraEyeHeight
-                + viewRotation * bob;
-            cameraPivot.rotation = Quaternion.Euler(pitch, viewYaw, 0f);
+                + Vector3.up * (cameraEyeHeight + renderedStepOffset + landingOffset)
+                + viewRotation * bobPose.PositionOffset;
+            cameraPivot.rotation = Quaternion.Euler(
+                pitch + bobPose.RotationOffset.x + landingPitch,
+                viewYaw + bobPose.RotationOffset.y,
+                bobPose.RotationOffset.z);
+        }
+
+        private void CommitPendingCameraStep()
+        {
+            if (!IsOwner || Mathf.Abs(pendingCameraStepOffset) <= 0.00001f)
+            {
+                pendingCameraStepOffset = 0f;
+                return;
+            }
+
+            var maximumOffset = characterController.stepOffset
+                + PlayerMovementTuning.GroundProbeDistance;
+            cameraStepOffset = Mathf.Clamp(
+                cameraStepOffset + pendingCameraStepOffset,
+                -maximumOffset,
+                maximumOffset);
+            pendingCameraStepOffset = 0f;
+        }
+
+        private void AccumulateCameraStep(bool wasGrounded, bool isGrounded)
+        {
+            if (!IsOwner || !wasGrounded || !isGrounded)
+            {
+                return;
+            }
+
+            var verticalStep = currentSimulationPosition.y - previousSimulationPosition.y;
+            var maximumStep = characterController.stepOffset
+                + PlayerMovementTuning.GroundProbeDistance;
+            if (Mathf.Abs(verticalStep) < MinimumSmoothedStepHeight
+                || Mathf.Abs(verticalStep) > maximumStep)
+            {
+                return;
+            }
+
+            pendingCameraStepOffset = Mathf.Clamp(
+                pendingCameraStepOffset - verticalStep,
+                -maximumStep,
+                maximumStep);
+        }
+
+        private void AccumulateCameraMotion(
+            bool wasGrounded,
+            float previousVerticalVelocity,
+            bool sprintRequested,
+            float deltaTime)
+        {
+            if (!IsOwner)
+            {
+                return;
+            }
+
+            var planarSpeed = new Vector2(
+                simulatedState.Velocity.x,
+                simulatedState.Velocity.z).magnitude;
+            cameraGait = PlayerCameraMotion.ResolveGait(
+                simulatedState.Grounded,
+                simulatedState.Crouched,
+                sprintRequested && !simulatedState.Crouched,
+                planarSpeed);
+
+            if (!ClientPreferences.HeadBobEnabled)
+            {
+                bobPhase = 0f;
+                return;
+            }
+
+            if (!wasGrounded && simulatedState.Grounded && previousVerticalVelocity < -2f)
+            {
+                var landingWeight = Mathf.InverseLerp(3f, 18f, -previousVerticalVelocity);
+                landingOffset = Mathf.Min(
+                    landingOffset,
+                    -MaximumLandingOffset * landingWeight);
+                landingPitch = Mathf.Max(
+                    landingPitch,
+                    MaximumLandingPitch * landingWeight);
+            }
+
+            if (cameraGait == PlayerGait.Idle || cameraGait == PlayerGait.Airborne)
+            {
+                bobPhase = 0f;
+                return;
+            }
+
+            if (!wasGrounded || !simulatedState.Grounded)
+            {
+                return;
+            }
+
+            var displacement = currentSimulationPosition - previousSimulationPosition;
+            var groundDistance = new Vector2(displacement.x, displacement.z).magnitude;
+            var maximumExpectedDistance = PlayerMovementTuning.SprintSpeed
+                * deltaTime * 1.75f + 0.02f;
+            if (groundDistance <= maximumExpectedDistance)
+            {
+                bobPhase = PlayerCameraMotion.AdvancePhase(
+                    bobPhase,
+                    groundDistance,
+                    cameraGait);
+            }
         }
 
         private void AddSnapshot(PlayerNetworkState state)
@@ -591,11 +762,13 @@ namespace Quieter.Player
                 - RemoteInterpolationSeconds * QuieterConstants.MovementSimulationRate;
             var renderedPosition = newest.State.Position;
             var renderedYaw = newest.State.Yaw;
+            var renderedCrouched = newest.State.Crouched;
 
             if (targetTick <= snapshotHistory[0].State.ServerTick)
             {
                 renderedPosition = snapshotHistory[0].State.Position;
                 renderedYaw = snapshotHistory[0].State.Yaw;
+                renderedCrouched = snapshotHistory[0].State.Crouched;
             }
             else
             {
@@ -613,6 +786,9 @@ namespace Quieter.Player
                     var interpolation = (float)((targetTick - from.ServerTick) / tickSpan);
                     renderedPosition = Vector3.Lerp(from.Position, to.Position, interpolation);
                     renderedYaw = Mathf.LerpAngle(from.Yaw, to.Yaw, interpolation);
+                    renderedCrouched = interpolation < 0.5f
+                        ? from.Crouched
+                        : to.Crouched;
                     foundInterval = true;
                     break;
                 }
@@ -634,10 +810,37 @@ namespace Quieter.Player
                 }
             }
 
+            var stanceBlend = 1f - Mathf.Exp(
+                -RemoteStanceResponse * Time.unscaledDeltaTime);
+            remoteCrouchBlend = Mathf.LerpUnclamped(
+                remoteCrouchBlend,
+                renderedCrouched ? 1f : 0f,
+                stanceBlend);
+            var renderedHeight = Mathf.Lerp(
+                PlayerMovementTuning.StandingHeight,
+                PlayerMovementTuning.CrouchHeight,
+                remoteCrouchBlend);
+            var renderedCenterY = Mathf.Lerp(
+                PlayerMovementTuning.StandingCenterY,
+                PlayerMovementTuning.CrouchCenterY,
+                remoteCrouchBlend);
+            var stanceLocalPosition = presentationLocalPosition;
+            stanceLocalPosition.y += renderedCenterY
+                - PlayerMovementTuning.StandingCenterY;
+            var stanceLocalScale = presentationLocalScale;
+            stanceLocalScale.y = presentationLocalScale.y
+                * renderedHeight / PlayerMovementTuning.StandingHeight;
+            presentationRoot.localScale = stanceLocalScale;
+
             var rotation = Quaternion.Euler(0f, renderedYaw, 0f);
             presentationRoot.SetPositionAndRotation(
-                renderedPosition + rotation * presentationLocalPosition,
+                renderedPosition + rotation * stanceLocalPosition,
                 rotation * presentationLocalRotation);
+            if (nameLabel != null && nameLabel.gameObject.activeSelf)
+            {
+                nameLabel.transform.position = renderedPosition
+                    + Vector3.up * (renderedHeight + 0.35f);
+            }
         }
 
         private void CreateNameLabel()
@@ -648,8 +851,11 @@ namespace Quieter.Player
             }
 
             var labelObject = new GameObject("PlayerName");
-            labelObject.transform.SetParent(presentationRoot, false);
-            labelObject.transform.localPosition = new Vector3(0f, 1.5f, 0f);
+            labelObject.transform.SetParent(transform, false);
+            labelObject.transform.localPosition = new Vector3(
+                0f,
+                PlayerMovementTuning.StandingHeight + 0.35f,
+                0f);
             nameLabel = labelObject.AddComponent<TextMesh>();
             nameLabel.anchor = TextAnchor.MiddleCenter;
             nameLabel.alignment = TextAlignment.Center;

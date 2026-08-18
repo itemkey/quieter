@@ -2,7 +2,7 @@ namespace Quieter.Core
 {
     public static class QuieterConstants
     {
-        public const ushort ProtocolVersion = 2;
+        public const ushort ProtocolVersion = 4;
         public const ushort GeneratorVersion = 1;
         public const ushort DefaultGamePort = 7777;
         public const int DefaultMaxPlayers = 16;

@@ -9,7 +9,9 @@ namespace Quieter.Player
         public Vector2 Movement;
         public float Yaw;
         public uint JumpPressId;
+        public bool JumpHeld;
         public bool Sprint;
+        public bool CrouchHeld;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
@@ -17,7 +19,9 @@ namespace Quieter.Player
             serializer.SerializeValue(ref Movement);
             serializer.SerializeValue(ref Yaw);
             serializer.SerializeValue(ref JumpPressId);
+            serializer.SerializeValue(ref JumpHeld);
             serializer.SerializeValue(ref Sprint);
+            serializer.SerializeValue(ref CrouchHeld);
         }
     }
 
@@ -111,6 +115,7 @@ namespace Quieter.Player
         public byte JumpBufferTicks;
         public byte CoyoteTicks;
         public bool Grounded;
+        public bool Crouched;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
@@ -124,6 +129,7 @@ namespace Quieter.Player
             serializer.SerializeValue(ref JumpBufferTicks);
             serializer.SerializeValue(ref CoyoteTicks);
             serializer.SerializeValue(ref Grounded);
+            serializer.SerializeValue(ref Crouched);
         }
 
         public readonly bool Equals(PlayerNetworkState other)
@@ -137,7 +143,8 @@ namespace Quieter.Player
                 && Yaw.Equals(other.Yaw)
                 && JumpBufferTicks == other.JumpBufferTicks
                 && CoyoteTicks == other.CoyoteTicks
-                && Grounded == other.Grounded;
+                && Grounded == other.Grounded
+                && Crouched == other.Crouched;
         }
     }
 }
