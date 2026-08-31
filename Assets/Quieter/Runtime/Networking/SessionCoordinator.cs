@@ -1,12 +1,15 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Quieter.Core;
 using Quieter.Persistence;
 using Quieter.Player;
 using Quieter.World;
+using Quieter.Inventory;
 using Unity.Collections;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
@@ -27,6 +30,8 @@ namespace Quieter.Networking
             public ulong SteamId;
             public string DisplayName;
             public NetworkPlayer Player;
+            public PlayerInventory Inventory;
+            public PlayerResourceInteraction ResourceInteraction;
         }
 
         private readonly Dictionary<ulong, double> pendingClients = new();
@@ -39,7 +44,10 @@ namespace Quieter.Networking
         private UnityTransport transport;
         private GameObject playerPrefab;
         private WorldStreamer worldStreamer;
+        private ResourceWorldService resourceWorld;
         private WorldObjectCatalog worldObjectCatalog;
+        private ItemCatalog itemCatalog;
+        private GameObject worldItemPrefab;
         private IClientAuthenticationProvider clientAuthentication;
         private IServerAuthenticationProvider serverAuthentication;
         private IWorldRepository worldRepository;
@@ -53,6 +61,10 @@ namespace Quieter.Networking
         private bool messagesRegistered;
         private float nextPositionSaveAt;
         private string lastRejection = string.Empty;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private bool developmentLootSpawned;
+        private Task developmentHostStartTask;
+#endif
 
         public event Action<string> StatusChanged;
         public event Action<bool> GameplayStateChanged;
@@ -61,27 +73,34 @@ namespace Quieter.Networking
         public bool IsServerRunning => networkManager != null && networkManager.IsServer;
         public bool IsAuthenticationReady => clientAuthentication?.IsReady ?? false;
         public string AuthenticationStatus => clientAuthentication?.Status ?? serverAuthentication?.Status ?? string.Empty;
+        public ResourceWorldService ResourceWorld => resourceWorld;
 
         public void Configure(
             NetworkManager manager,
             UnityTransport unityTransport,
             GameObject networkPlayerPrefab,
             WorldStreamer streamer,
+            ResourceWorldService resources,
             WorldObjectCatalog catalog,
             IClientAuthenticationProvider clientAuth,
             IServerAuthenticationProvider serverAuth,
             IWorldRepository worlds,
-            IPlayerProfileRepository players)
+            IPlayerProfileRepository players,
+            ItemCatalog items,
+            GameObject networkWorldItemPrefab)
         {
             networkManager = manager;
             transport = unityTransport;
             playerPrefab = networkPlayerPrefab;
             worldStreamer = streamer;
+            resourceWorld = resources;
             worldObjectCatalog = catalog;
             clientAuthentication = clientAuth;
             serverAuthentication = serverAuth;
             worldRepository = worlds;
             playerRepository = players;
+            itemCatalog = items;
+            worldItemPrefab = networkWorldItemPrefab;
 
             networkManager.NetworkConfig.TickRate = QuieterConstants.ServerTickRate;
             networkManager.NetworkConfig.ConnectionApproval = true;
@@ -91,6 +110,7 @@ namespace Quieter.Networking
             networkManager.OnClientDisconnectCallback += OnClientDisconnected;
             networkManager.OnServerStarted += OnServerStarted;
             Application.wantsToQuit += OnWantsToQuit;
+            resourceWorld.Configure(networkManager, worldStreamer);
         }
 
         public async Task StartServerAsync(ushort port)
@@ -103,6 +123,7 @@ namespace Quieter.Networking
                     $"Server world generator {worldDefinition.GeneratorVersion} does not match build {QuieterConstants.GeneratorVersion}.");
             }
 
+            await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, false);
             transport.SetConnectionData("0.0.0.0", port, "0.0.0.0");
             if (!TransportSecurityConfigurator.ConfigureServerFromEnvironment(transport))
@@ -125,13 +146,24 @@ namespace Quieter.Networking
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-        public async Task StartDevelopmentHostAsync()
+        public Task StartDevelopmentHostAsync()
         {
             if (networkManager.IsClient || networkManager.IsServer)
             {
-                return;
+                return Task.CompletedTask;
             }
 
+            if (developmentHostStartTask != null && !developmentHostStartTask.IsCompleted)
+            {
+                return developmentHostStartTask;
+            }
+
+            developmentHostStartTask = StartDevelopmentHostCoreAsync();
+            return developmentHostStartTask;
+        }
+
+        private async Task StartDevelopmentHostCoreAsync()
+        {
             var previousClient = clientAuthentication;
             previousClient?.Dispose();
             if (serverAuthentication != null && !ReferenceEquals(previousClient, serverAuthentication))
@@ -139,11 +171,50 @@ namespace Quieter.Networking
                 serverAuthentication.Dispose();
             }
 
-            var development = new DevelopmentAuthenticationProvider();
+            var development = new DevelopmentAuthenticationProvider(
+                DevelopmentAuthenticationProvider.StableLocalHostId);
             clientAuthentication = development;
             serverAuthentication = development;
-            ChangeStatus("Запуск локального тестового мира...");
-            await StartHostAsync("127.0.0.1", QuieterConstants.DefaultGamePort);
+            var port = FindAvailableDevelopmentPort(QuieterConstants.DefaultGamePort);
+            ChangeStatus(port == QuieterConstants.DefaultGamePort
+                ? "Запуск локального тестового мира..."
+                : $"Порт {QuieterConstants.DefaultGamePort} занят. Локальный тест запустится на порту {port}...");
+            await StartHostAsync("127.0.0.1", port);
+        }
+
+        public static ushort FindAvailableDevelopmentPort(ushort preferredPort)
+        {
+            if (CanBindUdpPort(preferredPort))
+            {
+                return preferredPort;
+            }
+
+            using var socket = CreateExclusiveUdpSocket();
+            socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+            return (ushort)((IPEndPoint)socket.LocalEndPoint).Port;
+        }
+
+        private static bool CanBindUdpPort(ushort port)
+        {
+            try
+            {
+                using var socket = CreateExclusiveUdpSocket();
+                socket.Bind(new IPEndPoint(IPAddress.Any, port));
+                return true;
+            }
+            catch (SocketException)
+            {
+                return false;
+            }
+        }
+
+        private static Socket CreateExclusiveUdpSocket()
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
+            {
+                ExclusiveAddressUse = true,
+            };
+            return socket;
         }
 #endif
 
@@ -153,11 +224,13 @@ namespace Quieter.Networking
             hasPreparedClientPayload = true;
             authenticationSent = false;
             worldDefinition = await worldRepository.GetOrCreateWorldAsync(lifetime.Token);
+            await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, true);
             transport.SetConnectionData(address, port, "0.0.0.0");
             SetConnectionHello();
             if (!networkManager.StartHost())
             {
+                networkManager.Shutdown();
                 throw new InvalidOperationException("Не удалось запустить локальный хост.");
             }
 
@@ -233,7 +306,7 @@ namespace Quieter.Networking
             if (Time.unscaledTime >= nextPositionSaveAt)
             {
                 nextPositionSaveAt = Time.unscaledTime + QuieterConstants.PositionSaveIntervalSeconds;
-                _ = SaveAllPositionsAsync(lifetime.Token);
+                _ = SaveAllPlayerStateAsync(lifetime.Token);
             }
         }
 
@@ -270,6 +343,129 @@ namespace Quieter.Networking
             nextPositionSaveAt = Time.unscaledTime + QuieterConstants.PositionSaveIntervalSeconds;
             ChangeStatus($"Сервер запущен на UDP {transport.ConnectionData.Port}");
         }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private void SpawnDevelopmentLoot(Vector3 playerPosition, float playerYaw)
+        {
+            if (developmentLootSpawned || worldItemPrefab == null || itemCatalog == null
+                || !networkManager.IsServer)
+            {
+                return;
+            }
+
+            developmentLootSpawned = true;
+            var occupied = new List<Vector3>(3);
+            SpawnDevelopmentStack(1, 8, playerPosition, playerYaw, 0, occupied);
+            SpawnDevelopmentStack(2, 10, playerPosition, playerYaw, 1, occupied);
+            SpawnDevelopmentStack(3, 4, playerPosition, playerYaw, 2, occupied);
+            Debug.Log(
+                $"[Quieter] Тестовые ресурсы созданы рядом с игроком у "
+                + $"X {playerPosition.x:0.0}, Z {playerPosition.z:0.0}.");
+        }
+
+        private void SpawnDevelopmentStack(
+            ushort itemId,
+            int quantity,
+            Vector3 playerPosition,
+            float playerYaw,
+            int stackIndex,
+            List<Vector3> occupied)
+        {
+            if (!itemCatalog.TryGetItem(itemId, out _)) return;
+            var position = ResolveDevelopmentLootPosition(
+                playerPosition,
+                playerYaw,
+                stackIndex,
+                occupied);
+            occupied.Add(position);
+            var instance = Instantiate(worldItemPrefab, position, Quaternion.identity);
+            var networkObject = instance.GetComponent<NetworkObject>();
+            networkObject.Spawn(true);
+            instance.GetComponent<NetworkWorldItem>().InitializeServer(itemId, quantity);
+        }
+
+        private Vector3 ResolveDevelopmentLootPosition(
+            Vector3 playerPosition,
+            float playerYaw,
+            int stackIndex,
+            IReadOnlyList<Vector3> occupied)
+        {
+            var lastCandidate = playerPosition;
+            for (var attempt = 0; attempt < 6; attempt++)
+            {
+                var planar = GetDevelopmentLootPlanarPosition(
+                    playerPosition,
+                    playerYaw,
+                    stackIndex,
+                    attempt);
+                var terrainHeight = worldStreamer.SampleHeight(planar.x, planar.y);
+                var rayOriginY = Mathf.Max(playerPosition.y + 8f, terrainHeight + 10f);
+                var surfaceHeight = terrainHeight;
+                if (Physics.Raycast(
+                    new Vector3(planar.x, rayOriginY, planar.y),
+                    Vector3.down,
+                    out var hit,
+                    30f,
+                    Physics.DefaultRaycastLayers,
+                    QueryTriggerInteraction.Ignore))
+                {
+                    surfaceHeight = hit.point.y;
+                }
+
+                lastCandidate = new Vector3(planar.x, surfaceHeight + 0.42f, planar.y);
+                if (IsDevelopmentLootPositionClear(lastCandidate, occupied))
+                {
+                    return lastCandidate;
+                }
+            }
+
+            return lastCandidate;
+        }
+
+        private static bool IsDevelopmentLootPositionClear(
+            Vector3 position,
+            IReadOnlyList<Vector3> occupied)
+        {
+            foreach (var existing in occupied)
+            {
+                if ((existing - position).sqrMagnitude < 0.75f * 0.75f) return false;
+            }
+
+            var colliders = Physics.OverlapBox(
+                position + Vector3.up * 0.28f,
+                new Vector3(0.36f, 0.24f, 0.36f),
+                Quaternion.identity,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
+            foreach (var collider in colliders)
+            {
+                if (collider is TerrainCollider) continue;
+                if (collider is MeshCollider
+                    && collider.GetComponent<WorldChunkView>() != null) continue;
+                return false;
+            }
+
+            return true;
+        }
+
+        public static Vector2 GetDevelopmentLootPlanarPosition(
+            Vector3 playerPosition,
+            float playerYaw,
+            int stackIndex,
+            int attempt = 0)
+        {
+            var lateral = stackIndex switch
+            {
+                0 => -1.15f,
+                2 => 1.15f,
+                _ => 0f,
+            };
+            var forward = (stackIndex == 1 ? 2.65f : 2.35f) + Mathf.Max(0, attempt) * 1.05f;
+            var worldOffset = Quaternion.Euler(0f, playerYaw, 0f)
+                * new Vector3(lateral, 0f, forward);
+            return new Vector2(playerPosition.x + worldOffset.x, playerPosition.z + worldOffset.z);
+        }
+#endif
 
         private void OnClientConnected(ulong clientId)
         {
@@ -320,10 +516,7 @@ namespace Quieter.Networking
                 serverAuthentication?.EndSession(authenticated.SteamId);
                 if (authenticated.Player != null)
                 {
-                    _ = playerRepository.SavePositionAsync(
-                        authenticated.SteamId,
-                        authenticated.Player.transform.position,
-                        lifetime.Token);
+                    _ = SavePlayerStateAsync(authenticated, lifetime.Token, true);
                 }
             }
 
@@ -450,6 +643,27 @@ namespace Quieter.Networking
                 networkObject.SpawnAsPlayerObject(clientId, true);
                 var player = instance.GetComponent<NetworkPlayer>();
                 player.AssignServerIdentity(authentication.SteamId, profile.DisplayName, position);
+                var playerInventory = instance.GetComponent<PlayerInventory>();
+                if (playerInventory == null)
+                {
+                    throw new InvalidOperationException("Network player prefab has no PlayerInventory.");
+                }
+                playerInventory.InitializeServer(profile.InventorySlots, profile.SelectedHotbarIndex);
+                var resourceInteraction = instance.GetComponent<PlayerResourceInteraction>();
+                if (resourceInteraction == null)
+                {
+                    throw new InvalidOperationException(
+                        "Network player prefab has no PlayerResourceInteraction.");
+                }
+                resourceInteraction.InitializeServer(
+                    profile.DepositKnowledge,
+                    profile.MapNotes,
+                    authentication.SteamId,
+                    worldDefinition.WorldId,
+                    playerRepository);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                SpawnDevelopmentLoot(position, player.transform.eulerAngles.y);
+#endif
                 player.ServerDespawning += OnServerPlayerDespawning;
                 pendingClients.Remove(clientId);
                 authenticatedClients[clientId] = new AuthenticatedClient
@@ -458,8 +672,11 @@ namespace Quieter.Networking
                     SteamId = authentication.SteamId,
                     DisplayName = profile.DisplayName,
                     Player = player,
+                    Inventory = playerInventory,
+                    ResourceInteraction = resourceInteraction,
                 };
                 SendWorldBootstrap(clientId);
+                resourceWorld.SendSnapshot(clientId);
             }
             catch (Exception exception)
             {
@@ -510,6 +727,7 @@ namespace Quieter.Networking
             }
 
             worldDefinition = definition;
+            resourceWorld.InitializeClient(definition);
             worldStreamer.Initialize(
                 definition,
                 worldObjectCatalog,
@@ -584,7 +802,7 @@ namespace Quieter.Networking
             return requested;
         }
 
-        private async Task SaveAllPositionsAsync(CancellationToken cancellationToken)
+        private async Task SaveAllPlayerStateAsync(CancellationToken cancellationToken)
         {
             var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
             foreach (var client in clients)
@@ -593,16 +811,38 @@ namespace Quieter.Networking
                 {
                     try
                     {
-                        await playerRepository.SavePositionAsync(
-                            client.SteamId,
-                            client.Player.transform.position,
-                            cancellationToken);
+                        await SavePlayerStateAsync(client, cancellationToken, false);
                     }
                     catch (Exception exception)
                     {
                         Debug.LogWarning($"Could not save {client.SteamId}: {exception.Message}");
                     }
                 }
+            }
+        }
+
+        private async Task SavePlayerStateAsync(
+            AuthenticatedClient client,
+            CancellationToken cancellationToken,
+            bool normalizeTemporaryStorage)
+        {
+            if (client?.Player == null) return;
+            var position = client.Player.transform.position;
+            var slots = client.Inventory == null
+                ? new List<StoredInventorySlot>()
+                : normalizeTemporaryStorage
+                    ? client.Inventory.PrepareAndCreateStoredSlots()
+                    : client.Inventory.CreateStoredSlotsSnapshot();
+            var selected = client.Inventory?.GetServerSelectedHotbarIndex() ?? (byte)0;
+            await playerRepository.SavePositionAsync(client.SteamId, position, cancellationToken);
+            await playerRepository.SaveInventoryAsync(
+                client.SteamId,
+                slots,
+                selected,
+                cancellationToken);
+            if (client.ResourceInteraction != null)
+            {
+                await client.ResourceInteraction.FlushKnowledgeAsync(cancellationToken);
             }
         }
 
@@ -634,11 +874,8 @@ namespace Quieter.Networking
                 }
 
                 player.ServerDespawning -= OnServerPlayerDespawning;
+                _ = SavePlayerStateAsync(client, lifetime.Token, true);
                 client.Player = null;
-                _ = playerRepository.SavePositionAsync(
-                    client.SteamId,
-                    player.transform.position,
-                    lifetime.Token);
                 break;
             }
         }
@@ -665,7 +902,12 @@ namespace Quieter.Networking
             timeout.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                await SaveAllPositionsAsync(timeout.Token);
+                var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
+                foreach (var client in clients)
+                {
+                    await SavePlayerStateAsync(client, timeout.Token, true);
+                }
+                await resourceWorld.FlushAsync(timeout.Token);
             }
             catch (Exception exception)
             {

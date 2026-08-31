@@ -234,11 +234,17 @@ namespace Quieter.UI
             var position = playerObject.transform.position;
             hudText.text = $"{currentStatus}\n"
                 + $"X {position.x:0.0}   Y {position.y:0.0}   Z {position.z:0.0}\n"
-                + "WASD — движение   Shift — бег   Ctrl — присяд   Space — прыжок   Esc — освободить мышь";
+                + "WASD — движение   Shift — бег   Ctrl — присяд   Space — прыжок\n"
+                + "1–6/колесо — хотбар   E — подобрать   Tab — инвентарь   Q — верстак";
         }
 
         private async void Connect()
         {
+            if (busy)
+            {
+                return;
+            }
+
             busy = true;
             RefreshButtons();
             try
@@ -256,6 +262,11 @@ namespace Quieter.UI
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private async void StartLocalTest()
         {
+            if (busy)
+            {
+                return;
+            }
+
             busy = true;
             RefreshButtons();
             steamText.text = "Тестовая авторизация — Steam не требуется";

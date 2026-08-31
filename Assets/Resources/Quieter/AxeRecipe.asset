@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
+  m_Name: AxeRecipe
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
+  recipeId: 1
+  displayName: "\u041F\u0440\u0438\u043C\u0438\u0442\u0438\u0432\u043D\u044B\u0439
+    \u0442\u043E\u043F\u043E\u0440"
+  category: 0
+  ingredients:
+  - Item: {fileID: 11400000, guid: 8b5771b4673410a4c955b61d872249ea, type: 2}
+    Quantity: 3
+  - Item: {fileID: 11400000, guid: 468efe2a51d87004b89e88c05f8a9f9a, type: 2}
+    Quantity: 2
+  - Item: {fileID: 11400000, guid: 1603718286d6b3645969766e24a57a3f, type: 2}
+    Quantity: 1
+  output: {fileID: 11400000, guid: 5fc11c744fe0c0a48a7d170ce44e7ccd, type: 2}
+  outputQuantity: 1

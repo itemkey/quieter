@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System;
 using Quieter.Player;
 using Unity.Netcode;
 using UnityEngine;
@@ -17,6 +18,7 @@ namespace Quieter.World
         private readonly List<ChunkCoord> creationBuffer = new();
         private readonly Queue<ChunkCoord> creationQueue = new();
         private readonly Queue<ChunkCoord> removalQueue = new();
+        private readonly Dictionary<ulong, ResourceNodeView> resourceNodes = new();
 
         private WorldDefinition definition;
         private IChunkGenerator generator;
@@ -29,6 +31,10 @@ namespace Quieter.World
         public WorldDefinition Definition => definition;
         public bool IsInitialized => initialized;
         public int ActiveChunkCount => activeChunks.Count;
+        public event Action<ResourceNodeView> ResourceNodeAdded;
+
+        public bool TryGetResourceNode(ulong instanceId, out ResourceNodeView view) =>
+            resourceNodes.TryGetValue(instanceId, out view) && view != null;
 
         public void Initialize(
             WorldDefinition newDefinition,
@@ -49,7 +55,7 @@ namespace Quieter.World
             catalog = newCatalog;
             serverMode = isServer;
             renderVisuals = shouldRenderVisuals;
-            generator = new DeterministicChunkGenerator();
+            generator = new DeterministicChunkGenerator(catalog);
             initialized = true;
             Refresh(forceSpawnChunk: true);
             Debug.Log(
@@ -246,6 +252,7 @@ namespace Quieter.World
                 }
 
                 Destroy(chunk.gameObject);
+                UnregisterNodes(chunk);
                 return;
             }
         }
@@ -257,6 +264,20 @@ namespace Quieter.World
             var view = child.AddComponent<WorldChunkView>();
             view.Build(definition, generator.Generate(definition, coordinate), catalog, renderVisuals);
             activeChunks.Add(coordinate, view);
+            foreach (var node in view.ResourceNodes)
+            {
+                resourceNodes[node.InstanceId] = node;
+                ResourceNodeAdded?.Invoke(node);
+            }
+        }
+
+        private void UnregisterNodes(WorldChunkView chunk)
+        {
+            if (chunk == null) return;
+            foreach (var node in chunk.ResourceNodes)
+            {
+                if (node != null) resourceNodes.Remove(node.InstanceId);
+            }
         }
 
         private void Clear()
@@ -265,11 +286,13 @@ namespace Quieter.World
             {
                 if (chunk != null)
                 {
+                    UnregisterNodes(chunk);
                     Destroy(chunk.gameObject);
                 }
             }
 
             activeChunks.Clear();
+            resourceNodes.Clear();
             creationQueue.Clear();
             removalQueue.Clear();
         }

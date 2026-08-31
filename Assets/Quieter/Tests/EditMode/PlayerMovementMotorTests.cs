@@ -94,6 +94,72 @@ namespace Quieter.Tests
         }
 
         [Test]
+        public void AirControl_PreservesMostSprintMomentumDuringHalfSecondReversal()
+        {
+            var velocity = new Vector2(0f, PlayerMovementTuning.SprintSpeed);
+            for (var tick = 0; tick < 30; tick++)
+            {
+                velocity = PlayerMovementMotor.AcceleratePlanar(
+                    velocity,
+                    Vector2.down,
+                    sprint: true,
+                    grounded: false,
+                    Step);
+            }
+
+            Assert.That(velocity.y, Is.GreaterThan(PlayerMovementTuning.WalkSpeed - 0.01f));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AirControl_SoftlyLimitsExcessSprintMomentum(bool keepMoving)
+        {
+            var velocity = Vector2.up * PlayerMovementTuning.SprintSpeed;
+            var movement = keepMoving ? Vector2.up : Vector2.zero;
+            var ticksToCap = Mathf.CeilToInt(
+                (PlayerMovementTuning.SprintSpeed - PlayerMovementTuning.AirborneSpeedCap)
+                / (PlayerMovementTuning.AirAcceleration * Step));
+
+            var firstTick = PlayerMovementMotor.AcceleratePlanar(
+                velocity,
+                movement,
+                sprint: true,
+                grounded: false,
+                Step);
+            Assert.That(firstTick.magnitude, Is.LessThan(velocity.magnitude));
+            Assert.That(firstTick.magnitude, Is.GreaterThan(PlayerMovementTuning.AirborneSpeedCap));
+
+            velocity = firstTick;
+            for (var tick = 1; tick < ticksToCap; tick++)
+            {
+                velocity = PlayerMovementMotor.AcceleratePlanar(
+                    velocity,
+                    movement,
+                    sprint: true,
+                    grounded: false,
+                    Step);
+            }
+
+            Assert.That(
+                velocity.magnitude,
+                Is.EqualTo(PlayerMovementTuning.AirborneSpeedCap).Within(0.001f));
+        }
+
+        [Test]
+        public void AirControl_PreservesMomentumBelowAirborneCapWithoutInput()
+        {
+            var initial = new Vector2(2f, PlayerMovementTuning.WalkSpeed);
+            var result = PlayerMovementMotor.AcceleratePlanar(
+                initial,
+                Vector2.zero,
+                sprint: true,
+                grounded: false,
+                Step);
+
+            Assert.That(result, Is.EqualTo(initial));
+        }
+
+        [Test]
         public void GroundTurning_ChangesDirectionFasterThanOrdinaryAcceleration()
         {
             var forward = new Vector2(0f, PlayerMovementTuning.WalkSpeed);
@@ -202,6 +268,33 @@ namespace Quieter.Tests
         }
 
         [Test]
+        public void CameraJumpImpulses_ScaleWithTakeoffAndLandingSpeed()
+        {
+            var standing = PlayerCameraMotion.CalculateTakeoffImpulse(0f);
+            var sprinting = PlayerCameraMotion.CalculateTakeoffImpulse(
+                PlayerMovementTuning.SprintSpeed);
+            var softLanding = PlayerCameraMotion.CalculateLandingImpulse(2f);
+            var hardLanding = PlayerCameraMotion.CalculateLandingImpulse(10f);
+
+            Assert.That(
+                standing.PositionOffset.y,
+                Is.EqualTo(-PlayerCameraMotion.MinimumTakeoffOffset).Within(0.0001f));
+            Assert.That(
+                sprinting.PositionOffset.y,
+                Is.EqualTo(-PlayerCameraMotion.MaximumTakeoffOffset).Within(0.0001f));
+            Assert.That(
+                sprinting.RotationOffset.x,
+                Is.EqualTo(-PlayerCameraMotion.MaximumTakeoffPitch).Within(0.0001f));
+            Assert.That(softLanding, Is.EqualTo(PlayerCameraPose.Neutral));
+            Assert.That(
+                hardLanding.PositionOffset.y,
+                Is.EqualTo(-PlayerCameraMotion.MaximumLandingOffset).Within(0.0001f));
+            Assert.That(
+                hardLanding.RotationOffset.x,
+                Is.EqualTo(PlayerCameraMotion.MaximumLandingPitch).Within(0.0001f));
+        }
+
+        [Test]
         public void NetworkMovementTypes_RoundTripCrouchState()
         {
             var input = new PlayerInputFrame
@@ -210,7 +303,6 @@ namespace Quieter.Tests
                 Movement = new Vector2(0.25f, -0.75f),
                 Yaw = 123f,
                 JumpPressId = 7,
-                JumpHeld = true,
                 Sprint = true,
                 CrouchHeld = true,
             };
@@ -278,11 +370,51 @@ namespace Quieter.Tests
         }
 
         [Test]
-        public void ConfiguredJumpSpeed_ProducesRequestedApex()
+        [TestCase(0f, PlayerMovementTuning.StandingJumpHeight)]
+        [TestCase(PlayerMovementTuning.WalkSpeed, PlayerMovementTuning.WalkJumpHeight)]
+        [TestCase(PlayerMovementTuning.SprintSpeed, PlayerMovementTuning.SprintJumpHeight)]
+        public void ConfiguredJumpSpeed_ProducesRequestedApex(
+            float planarSpeed,
+            float expectedHeight)
         {
-            var apex = PlayerMovementTuning.JumpSpeed * PlayerMovementTuning.JumpSpeed
+            var jumpSpeed = PlayerMovementTuning.CalculateJumpSpeed(planarSpeed);
+            var apex = jumpSpeed * jumpSpeed
                 / (2f * PlayerMovementTuning.Gravity);
-            Assert.That(apex, Is.EqualTo(PlayerMovementTuning.JumpHeight).Within(0.0001f));
+            Assert.That(apex, Is.EqualTo(expectedHeight).Within(0.0001f));
+        }
+
+        [Test]
+        public void ConfiguredJumpProfile_HasDenseGameAirtimes()
+        {
+            var standingAirtime = 2f * PlayerMovementTuning.CalculateJumpSpeed(0f)
+                / PlayerMovementTuning.Gravity;
+            var walkingAirtime = 2f * PlayerMovementTuning.CalculateJumpSpeed(
+                    PlayerMovementTuning.WalkSpeed)
+                / PlayerMovementTuning.Gravity;
+            var sprintingAirtime = 2f * PlayerMovementTuning.CalculateJumpSpeed(
+                    PlayerMovementTuning.SprintSpeed)
+                / PlayerMovementTuning.Gravity;
+
+            Assert.That(standingAirtime, Is.EqualTo(0.542f).Within(0.002f));
+            Assert.That(walkingAirtime, Is.EqualTo(0.551f).Within(0.002f));
+            Assert.That(sprintingAirtime, Is.EqualTo(0.560f).Within(0.002f));
+        }
+
+        [Test]
+        public void JumpHeight_ChangesContinuouslyWithActualPlanarSpeed()
+        {
+            var previous = PlayerMovementTuning.CalculateJumpHeight(0f);
+            for (var speed = 0.1f; speed <= PlayerMovementTuning.SprintSpeed; speed += 0.1f)
+            {
+                var current = PlayerMovementTuning.CalculateJumpHeight(speed);
+                Assert.That(current, Is.GreaterThanOrEqualTo(previous));
+                Assert.That(current - previous, Is.LessThan(0.02f));
+                previous = current;
+            }
+
+            Assert.That(
+                PlayerMovementTuning.CalculateJumpHeight(100f),
+                Is.EqualTo(PlayerMovementTuning.SprintJumpHeight));
         }
 
         [Test]

@@ -4,6 +4,7 @@ using Quieter.Networking;
 using Quieter.Persistence;
 using Quieter.UI;
 using Quieter.World;
+using Quieter.Inventory;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
 using UnityEngine;
@@ -72,7 +73,10 @@ namespace Quieter.Core
             var steamSettings = Resources.Load<SteamSettings>("Quieter/SteamSettings");
             var catalog = Resources.Load<WorldObjectCatalog>("Quieter/WorldObjectCatalog");
             var playerPrefab = Resources.Load<GameObject>("Quieter/NetworkPlayer");
-            if (endpoint == null || steamSettings == null || catalog == null || playerPrefab == null)
+            var itemCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            var worldItemPrefab = Resources.Load<GameObject>("Quieter/NetworkWorldItem");
+            if (endpoint == null || steamSettings == null || catalog == null || playerPrefab == null
+                || itemCatalog == null || worldItemPrefab == null)
             {
                 throw new InvalidOperationException(
                     "Quieter resources are missing. Run Tools > Quieter > Configure Project.");
@@ -98,10 +102,15 @@ namespace Quieter.Core
             {
                 throw new InvalidOperationException("Netcode rejected the network player prefab.");
             }
+            if (!networkManager.NetworkConfig.Prefabs.Add(new NetworkPrefab { Prefab = worldItemPrefab }))
+            {
+                throw new InvalidOperationException("Netcode rejected the world item prefab.");
+            }
 
             var worldObject = new GameObject("ProceduralWorld");
             worldObject.transform.SetParent(transform, false);
             var worldStreamer = worldObject.AddComponent<WorldStreamer>();
+            var resourceWorld = worldObject.AddComponent<ResourceWorldService>();
 
             IWorldRepository worldRepository;
             IPlayerProfileRepository playerRepository;
@@ -133,7 +142,8 @@ namespace Quieter.Core
             }
             else if (arguments.IsHost)
             {
-                var development = new DevelopmentAuthenticationProvider();
+                var development = new DevelopmentAuthenticationProvider(
+                    DevelopmentAuthenticationProvider.StableLocalHostId);
                 clientAuthentication = development;
                 serverAuthentication = development;
             }
@@ -166,11 +176,19 @@ namespace Quieter.Core
                 transport,
                 playerPrefab,
                 worldStreamer,
+                resourceWorld,
                 catalog,
                 clientAuthentication,
                 serverAuthentication,
                 worldRepository,
-                playerRepository);
+                playerRepository,
+                itemCatalog,
+                worldItemPrefab);
+
+#if !UNITY_SERVER
+            gameObject.AddComponent<InventoryView>();
+            gameObject.AddComponent<ResourceMapView>();
+#endif
 
             if (arguments.IsServer)
             {
@@ -186,6 +204,12 @@ namespace Quieter.Core
             if (arguments.IsHost)
             {
                 await Session.StartHostAsync(endpoint);
+                return;
+            }
+
+            if (arguments.ConnectAutomatically)
+            {
+                await Session.ConnectAsync(endpoint);
                 return;
             }
 

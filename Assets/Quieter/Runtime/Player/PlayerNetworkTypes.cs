@@ -9,7 +9,6 @@ namespace Quieter.Player
         public Vector2 Movement;
         public float Yaw;
         public uint JumpPressId;
-        public bool JumpHeld;
         public bool Sprint;
         public bool CrouchHeld;
 
@@ -19,7 +18,6 @@ namespace Quieter.Player
             serializer.SerializeValue(ref Movement);
             serializer.SerializeValue(ref Yaw);
             serializer.SerializeValue(ref JumpPressId);
-            serializer.SerializeValue(ref JumpHeld);
             serializer.SerializeValue(ref Sprint);
             serializer.SerializeValue(ref CrouchHeld);
         }

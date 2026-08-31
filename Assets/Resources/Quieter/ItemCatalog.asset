@@ -1,0 +1,41 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8c63fded821a4d14cac00a20248c0f01, type: 3}
+  m_Name: ItemCatalog
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.ItemCatalog
+  items:
+  - {fileID: 11400000, guid: 468efe2a51d87004b89e88c05f8a9f9a, type: 2}
+  - {fileID: 11400000, guid: 8b5771b4673410a4c955b61d872249ea, type: 2}
+  - {fileID: 11400000, guid: 1603718286d6b3645969766e24a57a3f, type: 2}
+  - {fileID: 11400000, guid: 5fc11c744fe0c0a48a7d170ce44e7ccd, type: 2}
+  - {fileID: 11400000, guid: 022820426c7b2f445afa01ad2b62203d, type: 2}
+  - {fileID: 11400000, guid: 5c5eb82401708f44888f0cfb6d5d12d7, type: 2}
+  - {fileID: 11400000, guid: c7bcb9e75accb6046af11c867a889b83, type: 2}
+  - {fileID: 11400000, guid: 40b150230f798aa46ae8be953c11be0c, type: 2}
+  - {fileID: 11400000, guid: b19670474eec4054cafaa15e43b6fb79, type: 2}
+  - {fileID: 11400000, guid: f0f260f1aee0cfb45b0f08f51f30b8c1, type: 2}
+  - {fileID: 11400000, guid: 652aac5f0caea4e4faa8b543ca01c864, type: 2}
+  - {fileID: 11400000, guid: 96f692c7e78fe554284aaf71b637e359, type: 2}
+  - {fileID: 11400000, guid: 2e2963bcd96dace45b1b3a92ece047c2, type: 2}
+  - {fileID: 11400000, guid: 30c0d6187325f1444ad20b65f37840c6, type: 2}
+  - {fileID: 11400000, guid: d5337c9255931fb4aaed0c96e8991092, type: 2}
+  - {fileID: 11400000, guid: 6b631af1164b7dc4b9eeeebd9d9c573a, type: 2}
+  - {fileID: 11400000, guid: 640ecbbde9ab0eb488384fcf1b200157, type: 2}
+  - {fileID: 11400000, guid: 45847805ec117f64f82bc1bea4bc37b5, type: 2}
+  - {fileID: 11400000, guid: 2a16184fa574ba1479ff3098b4c82ea8, type: 2}
+  - {fileID: 11400000, guid: 654bfaae5f345684dad244902eb07273, type: 2}
+  - {fileID: 11400000, guid: 2c0146e525732434ea0c4bef0c4e4890, type: 2}
+  - {fileID: 11400000, guid: 719f48a5cb07eb64880a62b15b1090ac, type: 2}
+  recipes:
+  - {fileID: 11400000, guid: 980b49125b9841946b7b575db45264ad, type: 2}
+  - {fileID: 11400000, guid: a6ff405e88025a1499119de8eaabddbb, type: 2}
+  - {fileID: 11400000, guid: 36ddd172689fbf7459ecf71451bb15c3, type: 2}

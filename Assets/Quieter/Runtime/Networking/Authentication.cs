@@ -61,13 +61,15 @@ namespace Quieter.Networking
         IClientAuthenticationProvider,
         IServerAuthenticationProvider
     {
-        private static long nextId = 76561199000000000L;
+        public const ulong StableLocalHostId = 76561199000000001UL;
         private readonly ulong localId;
         private readonly HashSet<ulong> activeSessions = new();
 
-        public DevelopmentAuthenticationProvider()
+        public DevelopmentAuthenticationProvider(ulong fixedId = 0)
         {
-            localId = (ulong)Interlocked.Increment(ref nextId);
+            localId = fixedId != 0
+                ? fixedId
+                : 76561199100000000UL + BitConverter.ToUInt32(Guid.NewGuid().ToByteArray(), 0);
         }
 
         public bool IsReady => true;

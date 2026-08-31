@@ -54,6 +54,30 @@ app.MapGet("/internal/world/current", (
     ProfileStore store,
     CancellationToken cancellationToken) => store.GetOrCreateWorldAsync(cancellationToken));
 
+app.MapGet("/internal/worlds/{worldId:int}/resource-nodes", (
+    int worldId,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+    store.LoadResourceNodeStatesAsync(worldId, cancellationToken));
+
+app.MapPut("/internal/worlds/{worldId:int}/resource-nodes", async (
+    int worldId,
+    ResourceNodeStateListResponse request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveResourceNodeStatesAsync(worldId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
 app.MapPost("/internal/players/login", async (
     PlayerLoginRequest request,
     ProfileStore store,
@@ -78,6 +102,63 @@ app.MapPut("/internal/players/{steamId}/position", async (
     try
     {
         return await store.SavePositionAsync(steamId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/players/{steamId}/inventory", async (
+    string steamId,
+    InventoryRequest request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveInventoryAsync(steamId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/players/{steamId}/worlds/{worldId:int}/deposit-knowledge", async (
+    string steamId,
+    int worldId,
+    DepositKnowledgeListResponse request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveDepositKnowledgeAsync(
+                steamId, worldId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/players/{steamId}/worlds/{worldId:int}/map-notes", async (
+    string steamId,
+    int worldId,
+    MapNoteListResponse request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveMapNotesAsync(steamId, worldId, request, cancellationToken)
             ? Results.NoContent()
             : Results.NotFound();
     }

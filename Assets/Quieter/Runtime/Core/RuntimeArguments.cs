@@ -8,6 +8,7 @@ namespace Quieter.Core
         public bool IsServer { get; private set; }
         public bool IsHost { get; private set; }
         public bool UseDevelopmentAuthentication { get; private set; }
+        public bool ConnectAutomatically { get; private set; }
         public string Address { get; private set; } = string.Empty;
         public ushort Port { get; private set; } = QuieterConstants.DefaultGamePort;
         public string ProfileServiceUrl { get; private set; } = string.Empty;
@@ -30,6 +31,9 @@ namespace Quieter.Core
                         break;
                     case "--development-auth":
                         result.UseDevelopmentAuthentication = true;
+                        break;
+                    case "--connect":
+                        result.ConnectAutomatically = true;
                         break;
                     case "--address":
                         result.Address = Next(args, ref index, value);

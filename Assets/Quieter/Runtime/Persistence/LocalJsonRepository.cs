@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Quieter.World;
+using Quieter.Inventory;
 using UnityEngine;
 
 namespace Quieter.Persistence
@@ -16,6 +17,7 @@ namespace Quieter.Persistence
             public bool HasWorld;
             public WorldDefinition World;
             public List<StoredPlayer> Players = new();
+            public List<StoredResourceNodeState> ResourceNodes = new();
         }
 
         [Serializable]
@@ -26,6 +28,10 @@ namespace Quieter.Persistence
             public Vector3 Position;
             public string CreatedAtUtc;
             public string LastSeenAtUtc;
+            public List<StoredInventorySlot> InventorySlots = new();
+            public byte SelectedHotbarIndex;
+            public List<StoredDepositKnowledge> DepositKnowledge = new();
+            public List<StoredMapNote> MapNotes = new();
         }
 
         private readonly string path;
@@ -49,10 +55,25 @@ namespace Quieter.Persistence
                     state.HasWorld = true;
                     Save();
                 }
-                else if (state.World.WorldId == 0)
+                else
                 {
-                    state.World.WorldId = 1;
-                    Save();
+                    var changed = false;
+                    if (state.World.WorldId == 0)
+                    {
+                        state.World.WorldId = 1;
+                        changed = true;
+                    }
+
+                    if (state.World.GeneratorVersion < Core.QuieterConstants.GeneratorVersion)
+                    {
+                        state.World.GeneratorVersion = Core.QuieterConstants.GeneratorVersion;
+                        changed = true;
+                    }
+
+                    if (changed)
+                    {
+                        Save();
+                    }
                 }
 
                 return Task.FromResult(state.World);
@@ -91,6 +112,51 @@ namespace Quieter.Persistence
             }
         }
 
+        public Task<IReadOnlyList<StoredResourceNodeState>> LoadResourceNodeStatesAsync(
+            int worldId,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                return Task.FromResult<IReadOnlyList<StoredResourceNodeState>>(
+                    CloneNodeStates(state.ResourceNodes.FindAll(
+                        candidate => candidate != null && candidate.WorldId == worldId)));
+            }
+        }
+
+        public Task SaveResourceNodeStatesAsync(
+            int worldId,
+            IReadOnlyList<StoredResourceNodeState> states,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                var byId = new Dictionary<string, StoredResourceNodeState>();
+                foreach (var existing in state.ResourceNodes)
+                {
+                    if (existing != null && !string.IsNullOrWhiteSpace(existing.InstanceId))
+                    {
+                        byId[$"{existing.WorldId}:{existing.InstanceId}"] = existing;
+                    }
+                }
+                if (states != null)
+                {
+                    foreach (var updated in states)
+                    {
+                        if (updated == null || string.IsNullOrWhiteSpace(updated.InstanceId)) continue;
+                        var clone = CloneNodeState(updated);
+                        clone.WorldId = worldId;
+                        byId[$"{worldId}:{updated.InstanceId}"] = clone;
+                    }
+                }
+                state.ResourceNodes = new List<StoredResourceNodeState>(byId.Values);
+                Save();
+            }
+            return Task.CompletedTask;
+        }
+
         public Task SavePositionAsync(
             ulong steamId,
             Vector3 position,
@@ -109,6 +175,78 @@ namespace Quieter.Persistence
                 }
             }
 
+            return Task.CompletedTask;
+        }
+
+        public Task SaveInventoryAsync(
+            ulong steamId,
+            IReadOnlyList<StoredInventorySlot> slots,
+            byte selectedHotbarIndex,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                var id = steamId.ToString();
+                var player = state.Players.Find(candidate => candidate.SteamId == id);
+                if (player != null)
+                {
+                    player.InventorySlots = CloneSlots(slots);
+                    player.SelectedHotbarIndex = (byte)Math.Min(
+                        (int)selectedHotbarIndex,
+                        InventoryLayout.HotbarSlotCount - 1);
+                    player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
+                    Save();
+                }
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task SaveDepositKnowledgeAsync(
+            ulong steamId,
+            int worldId,
+            IReadOnlyList<StoredDepositKnowledge> knowledge,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                var player = state.Players.Find(candidate => candidate.SteamId == steamId.ToString());
+                if (player != null)
+                {
+                    player.DepositKnowledge.RemoveAll(entry => entry == null
+                        || entry.WorldId == worldId);
+                    var currentWorld = CloneKnowledge(knowledge);
+                    foreach (var entry in currentWorld) entry.WorldId = worldId;
+                    player.DepositKnowledge.AddRange(currentWorld);
+                    player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
+                    Save();
+                }
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task SaveMapNotesAsync(
+            ulong steamId,
+            int worldId,
+            IReadOnlyList<StoredMapNote> notes,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                var player = state.Players.Find(candidate => candidate.SteamId == steamId.ToString());
+                if (player != null)
+                {
+                    player.MapNotes.RemoveAll(entry => entry == null || entry.WorldId == worldId);
+                    var currentWorld = CloneMapNotes(notes);
+                    foreach (var entry in currentWorld) entry.WorldId = worldId;
+                    player.MapNotes.AddRange(currentWorld);
+                    player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
+                    Save();
+                }
+            }
             return Task.CompletedTask;
         }
 
@@ -133,6 +271,26 @@ namespace Quieter.Persistence
 
             state ??= new State();
             state.Players ??= new List<StoredPlayer>();
+            state.ResourceNodes ??= new List<StoredResourceNodeState>();
+            var defaultWorldId = state.World.WorldId == 0 ? 1 : state.World.WorldId;
+            foreach (var node in state.ResourceNodes)
+            {
+                if (node != null && node.WorldId == 0) node.WorldId = defaultWorldId;
+            }
+            foreach (var player in state.Players)
+            {
+                player.InventorySlots ??= new List<StoredInventorySlot>();
+                player.DepositKnowledge ??= new List<StoredDepositKnowledge>();
+                player.MapNotes ??= new List<StoredMapNote>();
+                foreach (var entry in player.DepositKnowledge)
+                {
+                    if (entry != null && entry.WorldId == 0) entry.WorldId = defaultWorldId;
+                }
+                foreach (var note in player.MapNotes)
+                {
+                    if (note != null && note.WorldId == 0) note.WorldId = defaultWorldId;
+                }
+            }
         }
 
         private void Save()
@@ -162,7 +320,35 @@ namespace Quieter.Persistence
                 Position = player.Position,
                 CreatedAtUtc = ParseDate(player.CreatedAtUtc),
                 LastSeenAtUtc = ParseDate(player.LastSeenAtUtc),
+                InventorySlots = CloneSlots(player.InventorySlots),
+                SelectedHotbarIndex = player.SelectedHotbarIndex,
+                DepositKnowledge = CloneKnowledge(player.DepositKnowledge),
+                MapNotes = CloneMapNotes(player.MapNotes),
             };
+        }
+
+        private static List<StoredInventorySlot> CloneSlots(
+            IReadOnlyList<StoredInventorySlot> slots)
+        {
+            var result = new List<StoredInventorySlot>();
+            if (slots == null) return result;
+            foreach (var slot in slots)
+            {
+                if (slot == null) continue;
+                result.Add(new StoredInventorySlot
+                {
+                    SlotIndex = slot.SlotIndex,
+                    ItemId = slot.ItemId,
+                    Quantity = slot.Quantity,
+                    Condition = slot.Condition,
+                    Quality = slot.Quality,
+                    HiddenItemId = slot.HiddenItemId,
+                    SourceNodeId = slot.SourceNodeId,
+                    RevealAtPercent = slot.RevealAtPercent,
+                });
+            }
+
+            return result;
         }
 
         private static DateTime ParseDate(string value)
@@ -170,6 +356,66 @@ namespace Quieter.Persistence
             return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
                 ? parsed
                 : DateTime.UtcNow;
+        }
+
+        private static List<StoredResourceNodeState> CloneNodeStates(
+            IReadOnlyList<StoredResourceNodeState> states)
+        {
+            var result = new List<StoredResourceNodeState>();
+            if (states == null) return result;
+            foreach (var state in states)
+            {
+                if (state != null) result.Add(CloneNodeState(state));
+            }
+            return result;
+        }
+
+        private static StoredResourceNodeState CloneNodeState(StoredResourceNodeState state) => new()
+        {
+            WorldId = state.WorldId,
+            InstanceId = state.InstanceId,
+            RemainingReserves = state.RemainingReserves,
+            AvailableAtUtc = state.AvailableAtUtc,
+        };
+
+        private static List<StoredDepositKnowledge> CloneKnowledge(
+            IReadOnlyList<StoredDepositKnowledge> knowledge)
+        {
+            var result = new List<StoredDepositKnowledge>();
+            if (knowledge == null) return result;
+            foreach (var entry in knowledge)
+            {
+                if (entry == null) continue;
+                result.Add(new StoredDepositKnowledge
+                {
+                    WorldId = entry.WorldId,
+                    InstanceId = entry.InstanceId,
+                    StudyBasisPoints = entry.StudyBasisPoints,
+                    DiscoveredAtUtc = entry.DiscoveredAtUtc,
+                });
+            }
+            return result;
+        }
+
+        private static List<StoredMapNote> CloneMapNotes(IReadOnlyList<StoredMapNote> notes)
+        {
+            var result = new List<StoredMapNote>();
+            if (notes == null) return result;
+            foreach (var note in notes)
+            {
+                if (note == null) continue;
+                result.Add(new StoredMapNote
+                {
+                    WorldId = note.WorldId,
+                    NoteId = note.NoteId,
+                    X = note.X,
+                    Z = note.Z,
+                    Text = note.Text,
+                    CreatedAtUtc = note.CreatedAtUtc,
+                    UpdatedAtUtc = note.UpdatedAtUtc,
+                });
+            }
+            return result;
         }
 
         private static string SanitizeName(string value)

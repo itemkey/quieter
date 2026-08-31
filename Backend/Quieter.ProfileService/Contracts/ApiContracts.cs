@@ -24,6 +24,52 @@ public sealed record PlayerProfileResponse(
     float PositionY,
     float PositionZ,
     DateTime CreatedAtUtc,
-    DateTime LastSeenAtUtc);
+    DateTime LastSeenAtUtc,
+    IReadOnlyList<InventorySlotResponse> InventorySlots,
+    byte SelectedHotbarIndex,
+    IReadOnlyList<DepositKnowledgeResponse> DepositKnowledge,
+    IReadOnlyList<MapNoteResponse> MapNotes);
 
 public sealed record PositionRequest(float X, float Y, float Z);
+
+public sealed record InventorySlotResponse(
+    byte SlotIndex,
+    ushort ItemId,
+    ushort Quantity,
+    ushort Condition = 0,
+    byte Quality = 0,
+    ushort HiddenItemId = 0,
+    string? SourceNodeId = null,
+    byte RevealAtPercent = 0);
+
+public sealed record InventoryRequest(
+    byte SelectedHotbarIndex,
+    IReadOnlyList<InventorySlotResponse> Slots);
+
+public sealed record ResourceNodeStateResponse(
+    string InstanceId,
+    ushort RemainingReserves,
+    DateTime? AvailableAtUtc);
+
+public sealed record ResourceNodeStateListResponse(
+    IReadOnlyList<ResourceNodeStateResponse> Nodes);
+
+public sealed record DepositKnowledgeResponse(
+    string InstanceId,
+    ushort StudyBasisPoints,
+    DateTime DiscoveredAtUtc,
+    int WorldId = 1);
+
+public sealed record DepositKnowledgeListResponse(
+    IReadOnlyList<DepositKnowledgeResponse> Knowledge);
+
+public sealed record MapNoteResponse(
+    string NoteId,
+    float X,
+    float Z,
+    string Text,
+    DateTime CreatedAtUtc,
+    DateTime UpdatedAtUtc,
+    int WorldId = 1);
+
+public sealed record MapNoteListResponse(IReadOnlyList<MapNoteResponse> Notes);

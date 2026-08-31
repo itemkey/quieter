@@ -107,19 +107,22 @@ namespace Quieter.World
         public readonly Vector3 Position;
         public readonly Quaternion Rotation;
         public readonly Vector3 Scale;
+        public readonly ResourceNodeDescriptor Resource;
 
         public WorldObjectSpawn(
             ulong instanceId,
             WorldObjectTypeId typeId,
             Vector3 position,
             Quaternion rotation,
-            Vector3 scale)
+            Vector3 scale,
+            ResourceNodeDescriptor resource = default)
         {
             InstanceId = instanceId;
             TypeId = typeId;
             Position = position;
             Rotation = rotation;
             Scale = scale;
+            Resource = resource;
         }
     }
 

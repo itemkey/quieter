@@ -28,6 +28,7 @@ namespace Quieter.Editor
                 scenes = Scenes,
                 locationPathName = executable,
                 target = BuildTarget.StandaloneWindows64,
+                subtarget = (int)StandaloneBuildSubtarget.Player,
                 options = IsProductionBuild() ? BuildOptions.None : BuildOptions.Development,
             });
             EnsureSucceeded(report);

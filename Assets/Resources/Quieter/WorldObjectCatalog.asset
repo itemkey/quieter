@@ -19,4 +19,229 @@ MonoBehaviour:
   - typeId: 2
     prefab: {fileID: 0}
     placeholderColor: {r: 0.38, g: 0.4, b: 0.45, a: 1}
-
+  resources:
+  - itemId: 7
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 70
+    rockColor: {r: 0.34, g: 0.2, b: 0.13, a: 1}
+    veinColor: {r: 0.58, g: 0.27, b: 0.12, a: 1}
+    minimumHardness: 2
+    maximumHardness: 5
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 8
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 50
+    rockColor: {r: 0.27, g: 0.29, b: 0.27, a: 1}
+    veinColor: {r: 0.05, g: 0.72, b: 0.58, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 11
+    rareImpurityItemId: 12
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 9
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 30
+    rockColor: {r: 0.43, g: 0.44, b: 0.46, a: 1}
+    veinColor: {r: 0.73, g: 0.76, b: 0.78, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 8
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 10
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 30
+    rockColor: {r: 0.25, g: 0.27, b: 0.32, a: 1}
+    veinColor: {r: 0.37, g: 0.43, b: 0.55, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 11
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 11
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 15
+    rockColor: {r: 0.2, g: 0.22, b: 0.25, a: 1}
+    veinColor: {r: 0.82, g: 0.87, b: 0.94, a: 1}
+    minimumHardness: 3
+    maximumHardness: 5
+    primaryImpurityItemId: 10
+    rareImpurityItemId: 12
+    prefersHighGround: 1
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 12
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 4
+    rockColor: {r: 0.78, g: 0.75, b: 0.66, a: 1}
+    veinColor: {r: 1, g: 0.68, b: 0.05, a: 1}
+    minimumHardness: 3
+    maximumHardness: 5
+    primaryImpurityItemId: 11
+    rareImpurityItemId: 0
+    prefersHighGround: 1
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 13
+    category: 2
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 55
+    rockColor: {r: 0.055, g: 0.055, b: 0.065, a: 1}
+    veinColor: {r: 0.16, g: 0.16, b: 0.18, a: 1}
+    minimumHardness: 1
+    maximumHardness: 3
+    primaryImpurityItemId: 15
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 14
+    category: 3
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 24
+    rockColor: {r: 0.72, g: 0.7, b: 0.63, a: 1}
+    veinColor: {r: 0.96, g: 0.94, b: 0.86, a: 1}
+    minimumHardness: 1
+    maximumHardness: 3
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 1
+    stronglyRegional: 1
+  - itemId: 15
+    category: 4
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 18
+    rockColor: {r: 0.4, g: 0.38, b: 0.2, a: 1}
+    veinColor: {r: 0.95, g: 0.8, b: 0.05, a: 1}
+    minimumHardness: 1
+    maximumHardness: 3
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 16
+    prefersHighGround: 1
+    prefersLowGround: 0
+    stronglyRegional: 0
+  - itemId: 16
+    category: 1
+    generationPool: 0
+    visualArchetype: 0
+    requiredTool: 2
+    worldWeight: 6
+    rockColor: {r: 0.27, g: 0.2, b: 0.19, a: 1}
+    veinColor: {r: 0.78, g: 0.035, b: 0.035, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 15
+    rareImpurityItemId: 0
+    prefersHighGround: 1
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 17
+    category: 7
+    generationPool: 1
+    visualArchetype: 1
+    requiredTool: 2
+    worldWeight: 45
+    rockColor: {r: 0.72, g: 0.68, b: 0.55, a: 1}
+    veinColor: {r: 0.9, g: 0.86, b: 0.71, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 20
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 18
+    category: 7
+    generationPool: 1
+    visualArchetype: 2
+    requiredTool: 3
+    worldWeight: 40
+    rockColor: {r: 0.48, g: 0.22, b: 0.12, a: 1}
+    veinColor: {r: 0.66, g: 0.31, b: 0.17, a: 1}
+    minimumHardness: 1
+    maximumHardness: 2
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 1
+    stronglyRegional: 1
+  - itemId: 19
+    category: 7
+    generationPool: 1
+    visualArchetype: 3
+    requiredTool: 2
+    worldWeight: 18
+    rockColor: {r: 0.76, g: 0.75, b: 0.7, a: 1}
+    veinColor: {r: 0.98, g: 0.96, b: 0.88, a: 1}
+    minimumHardness: 1
+    maximumHardness: 3
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 15
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 20
+    category: 7
+    generationPool: 1
+    visualArchetype: 4
+    requiredTool: 2
+    worldWeight: 25
+    rockColor: {r: 0.61, g: 0.59, b: 0.51, a: 1}
+    veinColor: {r: 0.12, g: 0.15, b: 0.16, a: 1}
+    minimumHardness: 2
+    maximumHardness: 4
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 0
+    prefersHighGround: 0
+    prefersLowGround: 0
+    stronglyRegional: 1
+  - itemId: 21
+    category: 7
+    generationPool: 1
+    visualArchetype: 5
+    requiredTool: 2
+    worldWeight: 8
+    rockColor: {r: 0.82, g: 0.82, b: 0.79, a: 1}
+    veinColor: {r: 0.42, g: 0.46, b: 0.5, a: 1}
+    minimumHardness: 3
+    maximumHardness: 5
+    primaryImpurityItemId: 0
+    rareImpurityItemId: 0
+    prefersHighGround: 1
+    prefersLowGround: 0
+    stronglyRegional: 1

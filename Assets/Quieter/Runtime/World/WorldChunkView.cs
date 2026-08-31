@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -7,6 +8,9 @@ namespace Quieter.World
     {
         private Mesh generatedMesh;
         private Material generatedMaterial;
+        private readonly List<ResourceNodeView> resourceNodes = new();
+
+        public IReadOnlyList<ResourceNodeView> ResourceNodes => resourceNodes;
 
         public void Build(
             WorldDefinition definition,
@@ -101,7 +105,9 @@ namespace Quieter.World
             {
                 if (renderVisuals && catalog != null)
                 {
-                    catalog.CreatePresentation(spawn, objectRoot);
+                    var presentation = catalog.CreatePresentation(spawn, objectRoot);
+                    var resourceView = presentation.GetComponent<ResourceNodeView>();
+                    if (resourceView != null) resourceNodes.Add(resourceView);
                     continue;
                 }
 
@@ -111,6 +117,12 @@ namespace Quieter.World
                 physicsObject.transform.SetPositionAndRotation(spawn.Position, spawn.Rotation);
                 physicsObject.transform.localScale = spawn.Scale;
                 physicsObject.AddComponent<BoxCollider>();
+                if (spawn.Resource.IsResourceNode)
+                {
+                    var resourceView = physicsObject.AddComponent<ResourceNodeView>();
+                    resourceView.Initialize(spawn.InstanceId, spawn.Resource);
+                    resourceNodes.Add(resourceView);
+                }
             }
         }
 

@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using Quieter.Core;
 using Quieter.World;
+using Quieter.Inventory;
+using Quieter.UI;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -23,9 +25,6 @@ namespace Quieter.Player
         private const float CameraStepHalfLife = 0.085f;
         private const float CameraStanceResponse = 18f;
         private const float RemoteStanceResponse = 12f;
-        private const float LandingHalfLife = 0.065f;
-        private const float MaximumLandingOffset = 0.012f;
-        private const float MaximumLandingPitch = 0.2f;
         private const float MinimumSmoothedStepHeight = 0.045f;
 
         private readonly struct PredictedInput
@@ -79,8 +78,8 @@ namespace Quieter.Player
         private float cameraStepOffset;
         private float pendingCameraStepOffset;
         private float remoteCrouchBlend;
-        private float landingOffset;
-        private float landingPitch;
+        private float verticalCameraOffset;
+        private float verticalCameraPitch;
         private float viewYaw;
         private float pitch;
         private float bobPhase;
@@ -91,19 +90,21 @@ namespace Quieter.Player
         private int missingInputTicks;
         private double latestInputReceivedAt;
         private bool sampledSprint;
-        private bool sampledJumpHeld;
         private bool sampledCrouchHeld;
         private bool hasServerInput;
         private TextMesh nameLabel;
+        private PlayerInventory playerInventory;
 
         public ulong SteamId { get; private set; }
         public string DisplayName => displayName.Value.ToString();
+        public Camera OwnerCamera => ownerCamera;
         public event Action<NetworkPlayer> ServerDespawning;
 
         private void Awake()
         {
             characterController = GetComponent<CharacterController>();
             movementMotor = new PlayerMovementMotor(characterController);
+            playerInventory = GetComponent<PlayerInventory>();
             if (presentationRoot != null)
             {
                 presentationLocalPosition = presentationRoot.localPosition;
@@ -205,10 +206,18 @@ namespace Quieter.Player
             }
 
             SampleInput();
-            UpdateLook();
+            if ((playerInventory == null || !playerInventory.IsInterfaceOpen)
+                && !ResourceMapView.IsOpen)
+            {
+                UpdateLook();
+            }
             if (Keyboard.current?.escapeKey.wasPressedThisFrame == true)
             {
-                LockCursor(Cursor.lockState != CursorLockMode.Locked);
+                if (!ResourceMapView.TryClose()
+                    && (playerInventory == null || !playerInventory.TryCloseInterface()))
+                {
+                    LockCursor(Cursor.lockState != CursorLockMode.Locked);
+                }
             }
         }
 
@@ -367,7 +376,6 @@ namespace Quieter.Player
             {
                 sampledMovement = Vector2.zero;
                 sampledSprint = false;
-                sampledJumpHeld = false;
                 sampledCrouchHeld = false;
                 return;
             }
@@ -379,9 +387,10 @@ namespace Quieter.Player
             if (keyboard.aKey.isPressed) movement.x -= 1f;
             sampledMovement = Vector2.ClampMagnitude(movement, 1f);
             sampledSprint = keyboard.leftShiftKey.isPressed;
-            sampledJumpHeld = keyboard.spaceKey.isPressed;
-            sampledCrouchHeld = keyboard.leftCtrlKey.isPressed;
-            if (keyboard.spaceKey.wasPressedThisFrame)
+            var interfaceOpen = (playerInventory != null && playerInventory.IsInterfaceOpen)
+                || ResourceMapView.IsOpen;
+            sampledCrouchHeld = !interfaceOpen && keyboard.leftCtrlKey.isPressed;
+            if (!interfaceOpen && keyboard.spaceKey.wasPressedThisFrame)
             {
                 jumpPressId++;
             }
@@ -395,7 +404,6 @@ namespace Quieter.Player
                 Movement = sampledMovement,
                 Yaw = viewYaw,
                 JumpPressId = jumpPressId,
-                JumpHeld = sampledJumpHeld,
                 Sprint = sampledSprint,
                 CrouchHeld = sampledCrouchHeld,
             };
@@ -440,7 +448,6 @@ namespace Quieter.Player
             {
                 input.Movement = Vector2.zero;
                 input.Sprint = false;
-                input.JumpHeld = false;
                 input.CrouchHeld = false;
             }
 
@@ -607,28 +614,28 @@ namespace Quieter.Player
                 cameraStepOffset = 0f;
             }
 
-            if (Mathf.Abs(landingOffset) > 0.00001f
-                || Mathf.Abs(landingPitch) > 0.00001f)
+            if (Mathf.Abs(verticalCameraOffset) > 0.00001f
+                || Mathf.Abs(verticalCameraPitch) > 0.00001f)
             {
-                var landingDecay = Mathf.Pow(
+                var verticalImpulseDecay = Mathf.Pow(
                     0.5f,
-                    Time.unscaledDeltaTime / LandingHalfLife);
-                landingOffset *= landingDecay;
-                landingPitch *= landingDecay;
+                    Time.unscaledDeltaTime / PlayerCameraMotion.VerticalImpulseHalfLife);
+                verticalCameraOffset *= verticalImpulseDecay;
+                verticalCameraPitch *= verticalImpulseDecay;
             }
             else
             {
-                landingOffset = 0f;
-                landingPitch = 0f;
+                verticalCameraOffset = 0f;
+                verticalCameraPitch = 0f;
             }
 
             var renderedStepOffset = cameraStepOffset + pendingCameraStepOffset * alpha;
             var viewRotation = Quaternion.Euler(0f, viewYaw, 0f);
             cameraPivot.position = bodyPosition
-                + Vector3.up * (cameraEyeHeight + renderedStepOffset + landingOffset)
+                + Vector3.up * (cameraEyeHeight + renderedStepOffset + verticalCameraOffset)
                 + viewRotation * bobPose.PositionOffset;
             cameraPivot.rotation = Quaternion.Euler(
-                pitch + bobPose.RotationOffset.x + landingPitch,
+                pitch + bobPose.RotationOffset.x + verticalCameraPitch,
                 viewYaw + bobPose.RotationOffset.y,
                 bobPose.RotationOffset.z);
         }
@@ -698,15 +705,29 @@ namespace Quieter.Player
                 return;
             }
 
+            if (wasGrounded
+                && !simulatedState.Grounded
+                && simulatedState.Velocity.y > 0f)
+            {
+                var takeoffImpulse = PlayerCameraMotion.CalculateTakeoffImpulse(planarSpeed);
+                verticalCameraOffset = Mathf.Min(
+                    verticalCameraOffset,
+                    takeoffImpulse.PositionOffset.y);
+                verticalCameraPitch = Mathf.Min(
+                    verticalCameraPitch,
+                    takeoffImpulse.RotationOffset.x);
+            }
+
             if (!wasGrounded && simulatedState.Grounded && previousVerticalVelocity < -2f)
             {
-                var landingWeight = Mathf.InverseLerp(3f, 18f, -previousVerticalVelocity);
-                landingOffset = Mathf.Min(
-                    landingOffset,
-                    -MaximumLandingOffset * landingWeight);
-                landingPitch = Mathf.Max(
-                    landingPitch,
-                    MaximumLandingPitch * landingWeight);
+                var landingImpulse = PlayerCameraMotion.CalculateLandingImpulse(
+                    -previousVerticalVelocity);
+                verticalCameraOffset = Mathf.Min(
+                    verticalCameraOffset,
+                    landingImpulse.PositionOffset.y);
+                verticalCameraPitch = Mathf.Max(
+                    verticalCameraPitch,
+                    landingImpulse.RotationOffset.x);
             }
 
             if (cameraGait == PlayerGait.Idle || cameraGait == PlayerGait.Airborne)
@@ -887,6 +908,14 @@ namespace Quieter.Player
         {
             Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
             Cursor.visible = !locked;
+        }
+
+        public void SetInventoryInterfaceOpen(bool open)
+        {
+            if (IsOwner)
+            {
+                LockCursor(!open);
+            }
         }
     }
 }
