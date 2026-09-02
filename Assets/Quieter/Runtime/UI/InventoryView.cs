@@ -14,6 +14,12 @@ namespace Quieter.UI
 {
     public sealed class InventoryView : MonoBehaviour
     {
+        private enum ResearchTableTab : byte
+        {
+            Research = 0,
+            Studied = 1,
+        }
+
         private static readonly Color PanelColor = new(0.055f, 0.065f, 0.08f, 0.96f);
         private static readonly Color SlotColor = new(0.12f, 0.14f, 0.18f, 0.98f);
         private static readonly Color RecipeButtonColor = new(0.105f, 0.13f, 0.16f, 1f);
@@ -21,18 +27,30 @@ namespace Quieter.UI
         private static InventoryView instance;
         private static bool requestedOpen;
         private static bool requestedWorkbench;
+        private static bool requestedResearchTable;
 
         private readonly List<InventorySlotView> mainSlots = new();
         private readonly List<InventorySlotView> hotbarSlots = new();
         private readonly List<InventorySlotView> workbenchSlots = new();
         private readonly List<(CraftingCategory Category, Button Button)> categoryButtons = new();
         private readonly List<(CraftingRecipe Recipe, Button Button)> recipeButtons = new();
+        private readonly List<GameObject> researchHistoryCards = new();
         private PlayerInventory inventory;
+        private PlayerResourceInteraction resourceInteraction;
         private GameObject canvasRoot;
         private GameObject hotbarRoot;
         private GameObject inventoryPanel;
         private GameObject workbenchPanel;
         private GameObject recipePanel;
+        private GameObject researchWorkspaceRoot;
+        private GameObject researchTablePanel;
+        private GameObject researchTabRoot;
+        private GameObject studiedTabRoot;
+        private GameObject researchKnowledgeRoot;
+        private RectTransform researchHistoryListRoot;
+        private Text researchHistoryEmptyText;
+        private Button researchTabButton;
+        private Button studiedTabButton;
         private GameObject dismissArea;
         private RectTransform cursorRoot;
         private Image cursorSwatch;
@@ -53,6 +71,22 @@ namespace Quieter.UI
         private GameObject recipeDetailsRoot;
         private Text recipeDetailsText;
         private Text recipeSelectionHint;
+        private InventorySlotView researchTableSlot;
+        private Text researchTableStatus;
+        private Text researchKnowledgeLabel;
+        private Image researchKnowledgeFill;
+        private Image researchHoldFill;
+        private Button researchButton;
+        private Text researchButtonText;
+        private ResearchHoldButtonView researchHoldButton;
+        private GameObject researchResultRoot;
+        private Image researchResultBackground;
+        private Text researchResultText;
+        private Button dismantleTableButton;
+        private GameObject interfaceFeedbackRoot;
+        private Text interfaceFeedbackText;
+        private ResearchTableTab selectedResearchTab;
+        private int researchHistorySignature = int.MinValue;
         private CraftingCategory selectedCraftingCategory = CraftingCategory.Tools;
         private ushort selectedRecipeId;
         private InventorySlotView hoveredSlot;
@@ -73,11 +107,21 @@ namespace Quieter.UI
         private Coroutine quantityEditorFocusRoutine;
 
         public static bool WorkbenchMode => requestedOpen && requestedWorkbench;
+        public static bool ResearchTableMode => requestedOpen && requestedResearchTable;
 
         public static void SetMode(bool open, bool showWorkbench)
         {
             requestedOpen = open;
             requestedWorkbench = open && showWorkbench;
+            requestedResearchTable = false;
+            instance?.ApplyMode();
+        }
+
+        public static void SetResearchTableMode(bool open)
+        {
+            requestedOpen = open;
+            requestedWorkbench = false;
+            requestedResearchTable = open;
             instance?.ApplyMode();
         }
 
@@ -99,6 +143,7 @@ namespace Quieter.UI
 
             SetGameplayVisible(true);
             RefreshPickupPrompt();
+            RefreshInterfaceFeedback();
             if (!requestedOpen) return;
 
             if (cursorRoot != null && Mouse.current != null)
@@ -108,6 +153,7 @@ namespace Quieter.UI
 
             HandleQuantityWheel();
             RefreshDragTarget();
+            if (ResearchTableMode) RefreshResearchTable();
         }
 
         private void BindLocalInventory()
@@ -116,8 +162,13 @@ namespace Quieter.UI
             var next = playerObject != null ? playerObject.GetComponent<PlayerInventory>() : null;
             if (next == inventory) return;
             if (inventory != null) inventory.Changed -= Refresh;
+            if (resourceInteraction != null) resourceInteraction.Changed -= Refresh;
             inventory = next;
             if (inventory != null) inventory.Changed += Refresh;
+            resourceInteraction = playerObject != null
+                ? playerObject.GetComponent<PlayerResourceInteraction>()
+                : null;
+            if (resourceInteraction != null) resourceInteraction.Changed += Refresh;
             ResetQuantitySelection();
             Refresh();
         }
@@ -141,6 +192,7 @@ namespace Quieter.UI
             BuildInventoryPanel();
             BuildWorkbenchPanel();
             BuildRecipePanel();
+            BuildResearchTablePanel();
             BuildItemInfoCard();
             BuildQuantityEditor();
             BuildCursor();
@@ -148,6 +200,7 @@ namespace Quieter.UI
                 TextAnchor.MiddleCenter);
             SetAnchoredRect(pickupPrompt.rectTransform, new Vector2(0.5f, 0.5f),
                 new Vector2(0f, -92f), new Vector2(600f, 44f));
+            BuildInterfaceFeedback();
         }
 
         private void BuildDismissArea()
@@ -258,7 +311,7 @@ namespace Quieter.UI
                 .GetComponent<RectTransform>();
             recipeListRoot.SetParent(recipePanel.transform, false);
             SetAnchoredRect(recipeListRoot, new Vector2(0f, 1f),
-                new Vector2(24f, -114f), new Vector2(282f, 86f), new Vector2(0f, 1f));
+                new Vector2(24f, -114f), new Vector2(282f, 132f), new Vector2(0f, 1f));
 
             recipeSelectionHint = CreateText(recipePanel.transform,
                 "Выберите рецепт, чтобы увидеть состав.", 15, FontStyle.Normal,
@@ -266,18 +319,18 @@ namespace Quieter.UI
             recipeSelectionHint.name = "RecipeSelectionHint";
             recipeSelectionHint.color = new Color(0.68f, 0.73f, 0.79f);
             SetAnchoredRect(recipeSelectionHint.rectTransform, new Vector2(0f, 1f),
-                new Vector2(24f, -220f), new Vector2(282f, 64f), new Vector2(0f, 1f));
+                new Vector2(24f, -260f), new Vector2(282f, 54f), new Vector2(0f, 1f));
 
             recipeDetailsRoot = CreatePanel(recipePanel.transform,
                 new Color(0.075f, 0.09f, 0.11f, 0.96f)).gameObject;
             recipeDetailsRoot.name = "RecipeDetails";
             SetAnchoredRect(recipeDetailsRoot.GetComponent<RectTransform>(), new Vector2(0f, 1f),
-                new Vector2(24f, -210f), new Vector2(282f, 176f), new Vector2(0f, 1f));
+                new Vector2(24f, -250f), new Vector2(282f, 148f), new Vector2(0f, 1f));
             recipeDetailsText = CreateText(recipeDetailsRoot.transform, string.Empty, 15,
                 FontStyle.Normal, TextAnchor.UpperLeft);
             recipeDetailsText.name = "RecipeDetailsText";
             SetAnchoredRect(recipeDetailsText.rectTransform, new Vector2(0f, 1f),
-                new Vector2(12f, -10f), new Vector2(258f, 156f), new Vector2(0f, 1f));
+                new Vector2(12f, -10f), new Vector2(258f, 128f), new Vector2(0f, 1f));
 
             craftButton = CreateButton(recipePanel.transform, "СКРАФТИТЬ",
                 new Color(0.18f, 0.52f, 0.38f));
@@ -289,6 +342,205 @@ namespace Quieter.UI
 
             RebuildRecipeList();
             ClearRecipeSelection();
+        }
+
+        private void BuildResearchTablePanel()
+        {
+            researchWorkspaceRoot = CreatePanel(
+                canvasRoot.transform, new Color(0.025f, 0.03f, 0.04f, 0.92f)).gameObject;
+            researchWorkspaceRoot.name = "ResearchWorkspace";
+            SetAnchoredRect(researchWorkspaceRoot.GetComponent<RectTransform>(),
+                new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1010f, 540f));
+            researchWorkspaceRoot.transform.SetSiblingIndex(inventoryPanel.transform.GetSiblingIndex());
+
+            researchTablePanel = CreatePanel(canvasRoot.transform, PanelColor).gameObject;
+            researchTablePanel.name = "ResearchTablePanel";
+            SetAnchoredRect(researchTablePanel.GetComponent<RectTransform>(),
+                new Vector2(0.5f, 0.5f), new Vector2(319f, 0f), new Vector2(340f, 500f));
+
+            var title = CreateText(researchTablePanel.transform, "ИССЛЕДОВАТЕЛЬСКИЙ СТОЛ", 20,
+                FontStyle.Bold, TextAnchor.MiddleLeft);
+            SetTopRect(title.rectTransform, 18f, -12f, 304f, 32f);
+
+            researchTabButton = CreateButton(researchTablePanel.transform, "ИССЛЕДОВАНИЕ",
+                SelectedRecipeColor);
+            researchTabButton.name = "ResearchTabButton";
+            SetAnchoredRect(researchTabButton.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(18f, -52f), new Vector2(148f, 34f), new Vector2(0f, 1f));
+            researchTabButton.GetComponentInChildren<Text>().fontSize = 13;
+            researchTabButton.onClick.AddListener(
+                () => SelectResearchTableTab(ResearchTableTab.Research));
+
+            studiedTabButton = CreateButton(researchTablePanel.transform, "ИЗУЧЕННОЕ",
+                RecipeButtonColor);
+            studiedTabButton.name = "StudiedTabButton";
+            SetAnchoredRect(studiedTabButton.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(174f, -52f), new Vector2(148f, 34f), new Vector2(0f, 1f));
+            studiedTabButton.GetComponentInChildren<Text>().fontSize = 13;
+            studiedTabButton.onClick.AddListener(
+                () => SelectResearchTableTab(ResearchTableTab.Studied));
+
+            researchTabRoot = new GameObject("ResearchTabContent", typeof(RectTransform));
+            researchTabRoot.transform.SetParent(researchTablePanel.transform, false);
+            SetAnchoredRect(researchTabRoot.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(0f, -96f), new Vector2(340f, 338f), new Vector2(0f, 1f));
+
+            var hint = CreateText(researchTabRoot.transform,
+                "Перетащите образец и удерживайте кнопку 6 секунд. Шанс успеха — 70%.",
+                13, FontStyle.Normal, TextAnchor.UpperLeft);
+            hint.color = new Color(0.7f, 0.74f, 0.8f);
+            SetTopRect(hint.rectTransform, 18f, -2f, 304f, 42f);
+
+            researchTableSlot = CreateSlot(researchTabRoot.transform,
+                new InventorySlotReference(InventorySlotArea.ResearchTable, 0));
+            SetAnchoredRect(researchTableSlot.RectTransform, new Vector2(0f, 1f),
+                new Vector2(18f, -54f), new Vector2(78f, 74f), new Vector2(0f, 1f));
+
+            researchTableStatus = CreateText(researchTabRoot.transform,
+                "Положите неопознанный образец.", 14, FontStyle.Normal, TextAnchor.UpperLeft);
+            researchTableStatus.color = new Color(0.76f, 0.82f, 0.88f);
+            SetTopRect(researchTableStatus.rectTransform, 110f, -54f, 212f, 74f);
+
+            researchKnowledgeRoot = new GameObject("SampleKnowledge", typeof(RectTransform));
+            researchKnowledgeRoot.transform.SetParent(researchTabRoot.transform, false);
+            SetAnchoredRect(researchKnowledgeRoot.GetComponent<RectTransform>(),
+                new Vector2(0f, 1f), new Vector2(18f, -138f),
+                new Vector2(304f, 42f), new Vector2(0f, 1f));
+            researchKnowledgeLabel = CreateText(researchKnowledgeRoot.transform,
+                "Изученность залежи: —", 13, FontStyle.Bold, TextAnchor.MiddleLeft);
+            researchKnowledgeLabel.color = new Color(0.74f, 0.82f, 0.88f);
+            SetTopRect(researchKnowledgeLabel.rectTransform, 0f, 0f, 304f, 22f);
+
+            var knowledgeBar = CreatePanel(researchKnowledgeRoot.transform,
+                new Color(0.11f, 0.13f, 0.16f, 1f));
+            knowledgeBar.name = "KnowledgeBar";
+            SetAnchoredRect(knowledgeBar.rectTransform, new Vector2(0f, 1f),
+                new Vector2(0f, -28f), new Vector2(304f, 10f), new Vector2(0f, 1f));
+            researchKnowledgeFill = CreatePanel(knowledgeBar.transform,
+                new Color(0.25f, 0.78f, 0.55f, 1f));
+            InventoryView.Stretch(researchKnowledgeFill.rectTransform);
+            researchKnowledgeFill.type = Image.Type.Filled;
+            researchKnowledgeFill.fillMethod = Image.FillMethod.Horizontal;
+            researchKnowledgeFill.fillAmount = 0f;
+            researchKnowledgeRoot.SetActive(false);
+
+            researchResultBackground = CreatePanel(researchTabRoot.transform,
+                new Color(0.12f, 0.15f, 0.18f, 1f));
+            researchResultRoot = researchResultBackground.gameObject;
+            researchResultRoot.name = "ResearchResult";
+            SetAnchoredRect(researchResultBackground.rectTransform, new Vector2(0f, 1f),
+                new Vector2(18f, -190f), new Vector2(304f, 62f), new Vector2(0f, 1f));
+            researchResultText = CreateText(researchResultRoot.transform, string.Empty, 12,
+                FontStyle.Bold, TextAnchor.MiddleLeft);
+            Stretch(researchResultText.rectTransform);
+            researchResultText.rectTransform.offsetMin = new Vector2(12f, 6f);
+            researchResultText.rectTransform.offsetMax = new Vector2(-12f, -6f);
+            researchResultRoot.SetActive(false);
+
+            researchButton = CreateButton(researchTabRoot.transform, "ИССЛЕДОВАТЬ",
+                new Color(0.12f, 0.34f, 0.25f));
+            researchButton.name = "HoldResearchButton";
+            SetAnchoredRect(researchButton.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(18f, -264f), new Vector2(304f, 56f), new Vector2(0f, 1f));
+            researchButtonText = researchButton.GetComponentInChildren<Text>();
+            researchHoldFill = CreatePanel(researchButton.transform,
+                new Color(0.28f, 0.82f, 0.57f, 1f));
+            Stretch(researchHoldFill.rectTransform);
+            researchHoldFill.type = Image.Type.Filled;
+            researchHoldFill.fillMethod = Image.FillMethod.Horizontal;
+            researchHoldFill.fillAmount = 0f;
+            researchHoldFill.raycastTarget = false;
+            researchHoldFill.transform.SetAsFirstSibling();
+            researchButtonText.transform.SetAsLastSibling();
+            researchButtonText.raycastTarget = false;
+            researchHoldButton = researchButton.gameObject.AddComponent<ResearchHoldButtonView>();
+            researchHoldButton.Initialize(
+                () => resourceInteraction?.RequestBeginResearchHold(),
+                () => resourceInteraction?.RequestCancelResearchHold());
+
+            BuildStudiedTab();
+
+            dismantleTableButton = CreateButton(researchTablePanel.transform, "РАЗОБРАТЬ СТОЛ",
+                new Color(0.34f, 0.28f, 0.2f));
+            SetAnchoredRect(dismantleTableButton.GetComponent<RectTransform>(),
+                new Vector2(0f, 1f), new Vector2(18f, -448f),
+                new Vector2(304f, 38f), new Vector2(0f, 1f));
+            dismantleTableButton.onClick.AddListener(
+                () => resourceInteraction?.RequestDismantleResearchTable());
+            ApplyResearchTableTab();
+        }
+
+        private void BuildStudiedTab()
+        {
+            studiedTabRoot = new GameObject("StudiedTabContent", typeof(RectTransform));
+            studiedTabRoot.transform.SetParent(researchTablePanel.transform, false);
+            SetAnchoredRect(studiedTabRoot.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(0f, -96f), new Vector2(340f, 338f), new Vector2(0f, 1f));
+
+            var scrollObject = new GameObject("StudiedScrollView", typeof(RectTransform),
+                typeof(ScrollRect));
+            scrollObject.transform.SetParent(studiedTabRoot.transform, false);
+            SetAnchoredRect(scrollObject.GetComponent<RectTransform>(), new Vector2(0f, 1f),
+                new Vector2(18f, -4f), new Vector2(304f, 326f), new Vector2(0f, 1f));
+
+            var viewport = new GameObject("Viewport", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(Image), typeof(RectMask2D));
+            viewport.transform.SetParent(scrollObject.transform, false);
+            Stretch(viewport.GetComponent<RectTransform>());
+            viewport.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.01f);
+
+            var content = new GameObject("StudiedList", typeof(RectTransform),
+                typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+            content.transform.SetParent(viewport.transform, false);
+            researchHistoryListRoot = content.GetComponent<RectTransform>();
+            researchHistoryListRoot.anchorMin = new Vector2(0f, 1f);
+            researchHistoryListRoot.anchorMax = new Vector2(1f, 1f);
+            researchHistoryListRoot.pivot = new Vector2(0.5f, 1f);
+            researchHistoryListRoot.anchoredPosition = Vector2.zero;
+            researchHistoryListRoot.sizeDelta = Vector2.zero;
+            var layout = content.GetComponent<VerticalLayoutGroup>();
+            layout.spacing = 8f;
+            layout.padding = new RectOffset(0, 8, 0, 0);
+            layout.childAlignment = TextAnchor.UpperLeft;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+            content.GetComponent<ContentSizeFitter>().verticalFit =
+                ContentSizeFitter.FitMode.PreferredSize;
+
+            var scroll = scrollObject.GetComponent<ScrollRect>();
+            scroll.viewport = viewport.GetComponent<RectTransform>();
+            scroll.content = researchHistoryListRoot;
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.scrollSensitivity = 28f;
+
+            researchHistoryEmptyText = CreateText(studiedTabRoot.transform,
+                "Пока нет успешно изученных залежей.", 14, FontStyle.Normal,
+                TextAnchor.MiddleCenter);
+            researchHistoryEmptyText.name = "StudiedEmptyMessage";
+            researchHistoryEmptyText.color = new Color(0.68f, 0.73f, 0.79f);
+            SetAnchoredRect(researchHistoryEmptyText.rectTransform, new Vector2(0.5f, 0.5f),
+                Vector2.zero, new Vector2(280f, 72f));
+        }
+
+        private void BuildInterfaceFeedback()
+        {
+            var background = CreatePanel(canvasRoot.transform,
+                new Color(0.045f, 0.06f, 0.07f, 0.98f));
+            interfaceFeedbackRoot = background.gameObject;
+            interfaceFeedbackRoot.name = "InterfaceFeedback";
+            SetAnchoredRect(background.rectTransform, new Vector2(0.5f, 0f),
+                new Vector2(0f, 18f), new Vector2(720f, 50f), new Vector2(0.5f, 0f));
+            interfaceFeedbackText = CreateText(interfaceFeedbackRoot.transform, string.Empty, 15,
+                FontStyle.Bold, TextAnchor.MiddleCenter);
+            Stretch(interfaceFeedbackText.rectTransform);
+            interfaceFeedbackText.rectTransform.offsetMin = new Vector2(16f, 6f);
+            interfaceFeedbackText.rectTransform.offsetMax = new Vector2(-16f, -6f);
+            interfaceFeedbackRoot.SetActive(false);
+            interfaceFeedbackRoot.transform.SetAsLastSibling();
         }
 
         private void BuildRecipeCategoryButtons()
@@ -555,9 +807,27 @@ namespace Quieter.UI
         private void ApplyMode()
         {
             if (!WorkbenchMode) ClearRecipeSelection();
+            if (!ResearchTableMode)
+            {
+                selectedResearchTab = ResearchTableTab.Research;
+                researchHistorySignature = int.MinValue;
+            }
+            if (inventoryPanel != null)
+            {
+                SetAnchoredRect(inventoryPanel.GetComponent<RectTransform>(),
+                    new Vector2(0.5f, 0.5f),
+                    ResearchTableMode ? new Vector2(-174f, 0f) : Vector2.zero,
+                    new Vector2(620f, 500f));
+            }
             if (inventoryPanel != null) inventoryPanel.SetActive(requestedOpen);
             if (workbenchPanel != null) workbenchPanel.SetActive(WorkbenchMode);
             if (recipePanel != null) recipePanel.SetActive(WorkbenchMode);
+            if (researchWorkspaceRoot != null)
+            {
+                researchWorkspaceRoot.SetActive(ResearchTableMode);
+            }
+            if (researchTablePanel != null) researchTablePanel.SetActive(ResearchTableMode);
+            ApplyResearchTableTab();
             if (dismissArea != null) dismissArea.SetActive(requestedOpen);
             CancelDrag();
             HideItemInfo();
@@ -573,6 +843,7 @@ namespace Quieter.UI
                 foreach (var slot in mainSlots) slot.SetStack(default, null, false, 0);
                 foreach (var slot in hotbarSlots) slot.SetStack(default, null, false, 0);
                 foreach (var slot in workbenchSlots) slot.SetStack(default, null, false, 0);
+                researchTableSlot?.SetStack(default, null, false, 0);
                 if (cursorRoot != null) cursorRoot.gameObject.SetActive(false);
                 HideItemInfo();
                 return;
@@ -582,7 +853,9 @@ namespace Quieter.UI
             foreach (var slot in mainSlots) RefreshSlot(slot);
             foreach (var slot in hotbarSlots) RefreshSlot(slot);
             foreach (var slot in workbenchSlots) RefreshSlot(slot);
+            if (researchTableSlot != null) RefreshSlot(researchTableSlot);
             RefreshQuantityEditor();
+            RefreshResearchTable();
 
             cursorRoot.gameObject.SetActive(requestedOpen && dragSourceSlot != null
                 && !draggedStack.IsEmpty);
@@ -602,7 +875,274 @@ namespace Quieter.UI
             var shownSelection = quantitySlot.Equals(slot.Reference) && !stack.IsEmpty
                 ? selectedQuantity
                 : 0;
-            slot.SetStack(stack, item, selected, shownSelection);
+            slot.SetStack(stack, item, selected, shownSelection,
+                ResolveStackDisplayName(stack, item));
+        }
+
+        private string ResolveStackDisplayName(ItemStackState stack, ItemDefinition item)
+        {
+            if (item == null) return string.Empty;
+            return item.Kind == ItemKind.HiddenSample && resourceInteraction != null
+                ? resourceInteraction.GetSampleDisplayName(stack)
+                : item.DisplayName;
+        }
+
+        private void SelectResearchTableTab(ResearchTableTab tab)
+        {
+            if (selectedResearchTab == tab) return;
+            if (resourceInteraction?.IsLocalResearchHolding == true)
+            {
+                resourceInteraction.RequestCancelResearchHold();
+            }
+            selectedResearchTab = tab;
+            CancelDrag();
+            HideItemInfo();
+            ApplyResearchTableTab();
+            RefreshResearchTable();
+        }
+
+        private void ApplyResearchTableTab()
+        {
+            var researchSelected = selectedResearchTab == ResearchTableTab.Research;
+            if (researchTabRoot != null)
+            {
+                researchTabRoot.SetActive(ResearchTableMode && researchSelected);
+            }
+            if (studiedTabRoot != null)
+            {
+                studiedTabRoot.SetActive(ResearchTableMode && !researchSelected);
+            }
+            if (researchTabButton != null)
+            {
+                researchTabButton.GetComponent<Image>().color = researchSelected
+                    ? SelectedRecipeColor
+                    : RecipeButtonColor;
+            }
+            if (studiedTabButton != null)
+            {
+                studiedTabButton.GetComponent<Image>().color = researchSelected
+                    ? RecipeButtonColor
+                    : SelectedRecipeColor;
+            }
+        }
+
+        private void RefreshResearchHistory()
+        {
+            if (researchHistoryListRoot == null || researchHistoryEmptyText == null) return;
+            var signature = 17;
+            if (resourceInteraction != null)
+            {
+                unchecked
+                {
+                    for (var index = 0; index < resourceInteraction.KnowledgeCount; index++)
+                    {
+                        var knowledge = resourceInteraction.GetKnowledge(index);
+                        if (knowledge.StudyBasisPoints == 0) continue;
+                        signature = signature * 31 + knowledge.InstanceId.GetHashCode();
+                        signature = signature * 31 + knowledge.StudyBasisPoints;
+                    }
+                }
+            }
+            if (signature == researchHistorySignature) return;
+            researchHistorySignature = signature;
+            foreach (var card in researchHistoryCards)
+            {
+                if (card != null) Destroy(card);
+            }
+            researchHistoryCards.Clear();
+
+            if (resourceInteraction != null)
+            {
+                for (var index = 0; index < resourceInteraction.KnowledgeCount; index++)
+                {
+                    var knowledge = resourceInteraction.GetKnowledge(index);
+                    if (knowledge.StudyBasisPoints == 0
+                        || !resourceInteraction.TryGetDepositKnowledgePresentation(
+                            knowledge.InstanceId, out var presentation))
+                    {
+                        continue;
+                    }
+                    researchHistoryCards.Add(CreateResearchHistoryCard(presentation));
+                }
+            }
+            researchHistoryEmptyText.gameObject.SetActive(researchHistoryCards.Count == 0);
+        }
+
+        private GameObject CreateResearchHistoryCard(DepositKnowledgePresentation presentation)
+        {
+            var background = CreatePanel(researchHistoryListRoot,
+                new Color(0.085f, 0.105f, 0.13f, 0.98f));
+            var card = background.gameObject;
+            card.name = $"StudiedDeposit_{presentation.InstanceId}";
+            var layout = card.AddComponent<LayoutElement>();
+            layout.minHeight = 74f;
+            layout.preferredHeight = 74f;
+            layout.flexibleHeight = 0f;
+
+            var title = CreateText(card.transform, BuildResearchHistoryName(presentation), 13,
+                FontStyle.Bold, TextAnchor.MiddleLeft);
+            title.name = "StudiedDepositName";
+            SetTopRect(title.rectTransform, 10f, -5f, 208f, 24f);
+
+            var percent = CreateText(card.transform,
+                $"{presentation.StudyBasisPoints / 100f:0.#}%", 13,
+                FontStyle.Bold, TextAnchor.MiddleRight);
+            percent.name = "StudiedDepositPercent";
+            percent.color = new Color(0.38f, 0.88f, 0.64f);
+            SetTopRect(percent.rectTransform, 220f, -5f, 66f, 24f);
+
+            var coordinates = CreateText(card.transform,
+                FormatDepositCoordinates(presentation.Position), 11,
+                FontStyle.Normal, TextAnchor.MiddleLeft);
+            coordinates.name = "StudiedDepositCoordinates";
+            coordinates.color = new Color(0.65f, 0.71f, 0.78f);
+            SetTopRect(coordinates.rectTransform, 10f, -30f, 276f, 20f);
+
+            var bar = CreatePanel(card.transform, new Color(0.04f, 0.05f, 0.065f, 1f));
+            bar.name = "StudiedDepositProgressBar";
+            SetAnchoredRect(bar.rectTransform, new Vector2(0f, 1f),
+                new Vector2(10f, -57f), new Vector2(276f, 8f), new Vector2(0f, 1f));
+            var fill = CreatePanel(bar.transform, new Color(0.25f, 0.78f, 0.55f, 1f));
+            Stretch(fill.rectTransform);
+            fill.type = Image.Type.Filled;
+            fill.fillMethod = Image.FillMethod.Horizontal;
+            fill.fillAmount = presentation.StudyBasisPoints / 10000f;
+            return card;
+        }
+
+        private string BuildResearchHistoryName(DepositKnowledgePresentation presentation)
+        {
+            if (presentation.StudyBasisPoints < 2500) return "Неизвестная залежь";
+            if (presentation.StudyBasisPoints < 5000)
+            {
+                return ResourceBalance.CategoryName(presentation.Category);
+            }
+            return inventory?.Catalog != null
+                && inventory.Catalog.TryGetItem(presentation.ResourceItemId, out var item)
+                    ? item.DisplayName
+                    : $"Ресурс {presentation.ResourceItemId}";
+        }
+
+        private static string FormatDepositCoordinates(Vector3 position) =>
+            $"Источник: X {Mathf.RoundToInt(position.x)}, Z {Mathf.RoundToInt(position.z)}";
+
+        private void RefreshResearchTable()
+        {
+            if (researchButton == null || dismantleTableButton == null
+                || researchTableStatus == null)
+            {
+                return;
+            }
+            var stack = resourceInteraction?.CurrentResearchTableInput ?? default;
+            var busy = resourceInteraction?.CurrentResearchTableBusy == true;
+            var holding = resourceInteraction?.IsLocalResearchHolding == true;
+            var confirmed = resourceInteraction?.IsLocalResearchConfirmed == true;
+            var busyByOther = busy && !holding;
+            var studyBasisPoints = !stack.IsEmpty && resourceInteraction != null
+                ? resourceInteraction.GetStudyBasisPoints(stack.SourceNodeId)
+                : 0;
+            var showSampleKnowledge = ResourceBalance.CanShowSampleKnowledge(
+                stack, studyBasisPoints);
+            if (researchKnowledgeRoot != null)
+            {
+                researchKnowledgeRoot.SetActive(showSampleKnowledge);
+            }
+            if (researchKnowledgeFill != null)
+            {
+                researchKnowledgeFill.fillAmount = studyBasisPoints / 10000f;
+            }
+            if (researchKnowledgeLabel != null)
+            {
+                researchKnowledgeLabel.text =
+                    $"Изученность залежи: {studyBasisPoints / 100f:0.#}%";
+            }
+            var progress = resourceInteraction?.CurrentResearchHoldProgress ?? 0f;
+            if (researchHoldFill != null) researchHoldFill.fillAmount = holding ? progress : 0f;
+            if (researchButtonText != null)
+            {
+                researchButtonText.text = holding
+                    ? confirmed
+                        ? $"ИССЛЕДОВАНИЕ… {progress * ResourceBalance.ResearchDurationSeconds:0.0} / {ResourceBalance.ResearchDurationSeconds:0} С"
+                        : "ПОДГОТОВКА ИССЛЕДОВАНИЯ…"
+                    : "УДЕРЖИВАЙТЕ: ИССЛЕДОВАТЬ";
+            }
+            researchButton.interactable = ResearchTableMode
+                && selectedResearchTab == ResearchTableTab.Research && !stack.IsEmpty
+                && (!busyByOther || holding);
+            dismantleTableButton.interactable = ResearchTableMode && stack.IsEmpty
+                && !busy && !holding;
+            if (holding)
+            {
+                researchTableStatus.text = confirmed
+                    ? "Исследование выполняется.\nНе отпускайте ЛКМ."
+                    : "Сервер подтверждает начало опыта…";
+            }
+            else if (busyByOther)
+            {
+                researchTableStatus.text = "Стол занят другим игроком.";
+            }
+            else if (stack.IsEmpty)
+            {
+                researchTableStatus.text = "Положите неопознанный образец.";
+            }
+            else
+            {
+                var sampleName = ResolveStackDisplayName(
+                    stack, inventory?.Catalog?.GetItem(stack.ItemId));
+                if (showSampleKnowledge && resourceInteraction != null
+                    && resourceInteraction.TryGetDepositKnowledgePresentation(
+                        stack.SourceNodeId, out var presentation))
+                {
+                    researchTableStatus.text = sampleName + "\n"
+                        + FormatDepositCoordinates(presentation.Position);
+                }
+                else
+                {
+                    researchTableStatus.text = sampleName;
+                }
+            }
+
+            if (researchResultRoot != null && researchResultText != null)
+            {
+                var result = resourceInteraction?.CurrentResearchResult ?? string.Empty;
+                researchResultRoot.SetActive(!string.IsNullOrEmpty(result));
+                researchResultText.text = result;
+                if (!string.IsNullOrEmpty(result) && researchResultBackground != null)
+                {
+                    researchResultBackground.color = resourceInteraction.CurrentResearchResultTone switch
+                    {
+                        ResearchResultTone.Success => new Color(0.08f, 0.32f, 0.2f, 1f),
+                        ResearchResultTone.Failure => new Color(0.42f, 0.12f, 0.11f, 1f),
+                        _ => new Color(0.22f, 0.25f, 0.28f, 1f),
+                    };
+                }
+            }
+            if (selectedResearchTab == ResearchTableTab.Studied)
+            {
+                RefreshResearchHistory();
+            }
+        }
+
+        private void RefreshInterfaceFeedback()
+        {
+            if (interfaceFeedbackRoot == null || interfaceFeedbackText == null) return;
+            var feedback = requestedOpen ? resourceInteraction?.LastFeedback : string.Empty;
+            var visible = !string.IsNullOrEmpty(feedback);
+            interfaceFeedbackRoot.SetActive(visible);
+            if (!visible) return;
+            interfaceFeedbackText.text = feedback;
+            var background = interfaceFeedbackRoot.GetComponent<Image>();
+            if (background != null)
+            {
+                background.color = resourceInteraction != null
+                    && resourceInteraction.CurrentResearchResultTone == ResearchResultTone.Success
+                        ? new Color(0.07f, 0.28f, 0.18f, 0.98f)
+                        : resourceInteraction != null
+                            && resourceInteraction.CurrentResearchResultTone == ResearchResultTone.Failure
+                                ? new Color(0.36f, 0.09f, 0.08f, 0.98f)
+                                : new Color(0.045f, 0.06f, 0.07f, 0.98f);
+            }
+            interfaceFeedbackRoot.transform.SetAsLastSibling();
         }
 
         private void HandleQuantityWheel()
@@ -952,7 +1492,7 @@ namespace Quieter.UI
             itemInfoIcon.sprite = item.Icon;
             itemInfoIcon.preserveAspect = item.Icon != null;
             itemInfoIcon.color = item.Icon != null ? Color.white : item.PlaceholderColor;
-            itemInfoName.text = item.DisplayName;
+            itemInfoName.text = ResolveStackDisplayName(stack, item);
             itemInfoDescription.text = string.IsNullOrWhiteSpace(item.Description)
                 ? "Описание пока не добавлено."
                 : item.Description;
@@ -1040,7 +1580,7 @@ namespace Quieter.UI
             cursorSwatch.sprite = item.Icon;
             cursorSwatch.preserveAspect = item.Icon != null;
             cursorSwatch.color = item.Icon != null ? Color.white : item.PlaceholderColor;
-            cursorName.text = item.DisplayName;
+            cursorName.text = ResolveStackDisplayName(source, item);
             cursorQuantity.text = amount.ToString();
             cursorRoot.gameObject.SetActive(true);
             cursorRoot.position = eventData.position + new Vector2(22f, -22f);
@@ -1108,6 +1648,7 @@ namespace Quieter.UI
                 && !ContainsScreenPoint(hotbarRoot, screenPosition)
                 && !ContainsScreenPoint(workbenchPanel, screenPosition)
                 && !ContainsScreenPoint(recipePanel, screenPosition)
+                && !ContainsScreenPoint(researchTablePanel, screenPosition)
                 && (itemInfoRoot == null || !itemInfoRoot.gameObject.activeInHierarchy
                     || !RectTransformUtility.RectangleContainsScreenPoint(
                         itemInfoRoot, screenPosition, null));
@@ -1150,6 +1691,12 @@ namespace Quieter.UI
 
         private InventorySlotView FindSlot(InventorySlotReference reference)
         {
+            if (reference.Area == InventorySlotArea.ResearchTable)
+            {
+                return researchTableSlot != null && researchTableSlot.Reference.Equals(reference)
+                    ? researchTableSlot
+                    : null;
+            }
             var list = reference.Area == InventorySlotArea.Workbench
                 ? workbenchSlots
                 : reference.Area == InventorySlotArea.Inventory
@@ -1176,7 +1723,8 @@ namespace Quieter.UI
             }
 
             pickupPrompt.gameObject.SetActive(true);
-            pickupPrompt.text = $"[E] Подобрать: {item.DisplayName} × {pickup.Stack.Quantity}";
+            pickupPrompt.text = $"[E] Подобрать: {ResolveStackDisplayName(pickup.Stack, item)}"
+                + $" × {pickup.Stack.Quantity}";
         }
 
         private InventorySlotView CreateSlot(Transform parent, InventorySlotReference reference)
@@ -1239,6 +1787,9 @@ namespace Quieter.UI
                 inventoryPanel?.SetActive(false);
                 workbenchPanel?.SetActive(false);
                 recipePanel?.SetActive(false);
+                researchWorkspaceRoot?.SetActive(false);
+                researchTablePanel?.SetActive(false);
+                interfaceFeedbackRoot?.SetActive(false);
                 dismissArea?.SetActive(false);
                 cursorRoot?.gameObject.SetActive(false);
                 HideItemInfo();
@@ -1255,6 +1806,7 @@ namespace Quieter.UI
         private void OnDestroy()
         {
             if (inventory != null) inventory.Changed -= Refresh;
+            if (resourceInteraction != null) resourceInteraction.Changed -= Refresh;
             if (instance == this) instance = null;
         }
 
@@ -1327,6 +1879,55 @@ namespace Quieter.UI
             rect.pivot = pivot ?? new Vector2(0.5f, 0.5f);
             rect.anchoredPosition = position;
             rect.sizeDelta = size;
+        }
+    }
+
+    public sealed class ResearchHoldButtonView : MonoBehaviour,
+        IPointerDownHandler, IPointerUpHandler, IPointerExitHandler
+    {
+        private Button button;
+        private Action pressed;
+        private Action released;
+        private bool holding;
+
+        public void Initialize(Action onPressed, Action onReleased)
+        {
+            button = GetComponent<Button>();
+            pressed = onPressed;
+            released = onReleased;
+        }
+
+        public void OnPointerDown(PointerEventData eventData)
+        {
+            if (eventData.button != PointerEventData.InputButton.Left
+                || holding || button == null || !button.interactable)
+            {
+                return;
+            }
+            holding = true;
+            pressed?.Invoke();
+        }
+
+        public void OnPointerUp(PointerEventData eventData)
+        {
+            if (eventData.button == PointerEventData.InputButton.Left) Release();
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            Release();
+        }
+
+        private void OnDisable()
+        {
+            Release();
+        }
+
+        private void Release()
+        {
+            if (!holding) return;
+            holding = false;
+            released?.Invoke();
         }
     }
 
@@ -1409,11 +2010,14 @@ namespace Quieter.UI
 
         public void SetNumber(int number) => numberText.text = number > 0 ? number.ToString() : string.Empty;
 
-        public void SetStack(ItemStackState stack, ItemDefinition item, bool selected, int chosenQuantity)
+        public void SetStack(ItemStackState stack, ItemDefinition item, bool selected,
+            int chosenQuantity, string displayName = null)
         {
             var hasItem = !stack.IsEmpty && item != null;
             swatch.gameObject.SetActive(hasItem);
-            nameText.text = hasItem ? item.DisplayName : string.Empty;
+            nameText.text = hasItem
+                ? (string.IsNullOrWhiteSpace(displayName) ? item.DisplayName : displayName)
+                : string.Empty;
             quantityText.text = hasItem
                 ? (chosenQuantity > 0 ? $"[{chosenQuantity}]"
                     : item.IsDurable ? stack.Condition.ToString()

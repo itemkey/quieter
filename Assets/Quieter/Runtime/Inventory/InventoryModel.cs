@@ -23,35 +23,71 @@ namespace Quieter.Inventory
 
         public ItemStackState ActiveStack => inventory[InventoryLayout.FirstHotbarSlot + SelectedHotbarIndex];
 
-        public void Load(IEnumerable<StoredInventorySlot> slots, byte selectedHotbarIndex)
+        public List<ItemStackState> Load(
+            IEnumerable<StoredInventorySlot> slots,
+            byte selectedHotbarIndex,
+            ulong sampleOwnerSalt = 0)
         {
             Array.Clear(inventory, 0, inventory.Length);
             Array.Clear(workbench, 0, workbench.Length);
             cursor = default;
             CursorOrigin = InventorySlotReference.Invalid;
+            var extraSamples = new List<ItemStackState>();
             if (slots != null)
             {
                 foreach (var stored in slots)
                 {
-                    if (stored == null || stored.SlotIndex >= inventory.Length
-                        || !TryValidate(new ItemStackState(
+                    if (stored == null || stored.SlotIndex >= inventory.Length)
+                    {
+                        continue;
+                    }
+
+                    var raw = new ItemStackState(
                             stored.ItemId,
                             stored.Quantity,
                             stored.Condition,
                             (ResourceQuality)stored.Quality,
                             stored.HiddenItemId,
                             ParseNodeId(stored.SourceNodeId),
-                            stored.RevealAtPercent), out var valid))
+                            stored.RevealAtPercent,
+                            ParseNodeId(stored.SampleId));
+                    if (catalog.TryGetItem(raw.ItemId, out var definition)
+                        && definition.Kind == ItemKind.HiddenSample)
                     {
+                        var quantity = Math.Max(1, (int)raw.Quantity);
+                        for (var ordinal = 0; ordinal < quantity; ordinal++)
+                        {
+                            var sample = raw.WithQuantity(1);
+                            sample.SampleId = raw.SampleId != 0 && ordinal == 0
+                                ? raw.SampleId
+                                : CreateLegacySampleId(sampleOwnerSalt, stored.SlotIndex, ordinal, sample);
+                            if (ordinal == 0 && TryValidate(sample, out var first))
+                            {
+                                inventory[stored.SlotIndex] = first;
+                            }
+                            else if (TryValidate(sample, out var extra))
+                            {
+                                extraSamples.Add(extra);
+                            }
+                        }
                         continue;
                     }
 
-                    inventory[stored.SlotIndex] = valid;
+                    if (TryValidate(raw, out var valid)) inventory[stored.SlotIndex] = valid;
                 }
             }
 
             SelectedHotbarIndex = (byte)Math.Min((int)selectedHotbarIndex,
                 InventoryLayout.HotbarSlotCount - 1);
+            var pending = new List<ItemStackState>();
+            foreach (var sample in extraSamples)
+            {
+                if (AutoInsert(sample, PickupPlacementPriority.InventoryFirst) > 0)
+                {
+                    pending.Add(sample);
+                }
+            }
+            return pending;
         }
 
         public List<StoredInventorySlot> CreateStoredSlots()
@@ -72,6 +108,7 @@ namespace Quieter.Inventory
                         HiddenItemId = stack.HiddenItemId,
                         SourceNodeId = stack.SourceNodeId == 0 ? null : stack.SourceNodeId.ToString(),
                         RevealAtPercent = stack.RevealAtPercent,
+                        SampleId = stack.SampleId == 0 ? null : stack.SampleId.ToString(),
                     });
                 }
             }
@@ -655,13 +692,13 @@ namespace Quieter.Inventory
 
         public int RevealSamples(ulong sourceNodeId, int studyPercent)
         {
-            if (sourceNodeId == 0 || studyPercent <= 0) return 0;
+            if (sourceNodeId == 0 || studyPercent < 100) return 0;
             var revealed = 0;
             for (var index = 0; index < inventory.Length; index++)
             {
                 var stack = inventory[index];
                 if (stack.IsEmpty || stack.SourceNodeId != sourceNodeId
-                    || stack.HiddenItemId == 0 || stack.RevealAtPercent > studyPercent)
+                    || stack.HiddenItemId == 0)
                 {
                     continue;
                 }
@@ -706,6 +743,25 @@ namespace Quieter.Inventory
 
         private static ulong ParseNodeId(string value) =>
             ulong.TryParse(value, out var parsed) ? parsed : 0UL;
+
+        private static ulong CreateLegacySampleId(
+            ulong ownerSalt,
+            int slotIndex,
+            int ordinal,
+            ItemStackState sample)
+        {
+            unchecked
+            {
+                var value = 14695981039346656037UL;
+                value = (value ^ ownerSalt) * 1099511628211UL;
+                value = (value ^ sample.SourceNodeId) * 1099511628211UL;
+                value = (value ^ sample.HiddenItemId) * 1099511628211UL;
+                value = (value ^ (uint)slotIndex) * 1099511628211UL;
+                value = (value ^ (uint)ordinal) * 1099511628211UL;
+                value = (value ^ (byte)sample.Quality) * 1099511628211UL;
+                return value == 0 ? 1UL : value;
+            }
+        }
 
         private bool TryGetArray(InventorySlotReference reference, out ItemStackState[] slots)
         {

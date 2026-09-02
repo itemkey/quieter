@@ -24,6 +24,7 @@ public sealed class PlayerEntity
     public DateTime LastSeenAtUtc { get; set; }
     public byte SelectedHotbarIndex { get; set; }
     public List<PlayerInventorySlotEntity> InventorySlots { get; set; } = [];
+    public List<PlayerPendingItemEntity> PendingItems { get; set; } = [];
     public List<PlayerDepositKnowledgeEntity> DepositKnowledge { get; set; } = [];
     public List<PlayerMapNoteEntity> MapNotes { get; set; } = [];
 }
@@ -61,7 +62,45 @@ public sealed class PlayerInventorySlotEntity
     public ushort HiddenItemId { get; set; }
     public decimal? SourceNodeId { get; set; }
     public byte RevealAtPercent { get; set; }
+    public decimal? SampleId { get; set; }
     public PlayerEntity Player { get; set; } = null!;
+}
+
+public sealed class PlayerPendingItemEntity
+{
+    public decimal SteamId { get; set; }
+    public ushort ItemIndex { get; set; }
+    public ushort ItemId { get; set; }
+    public ushort Quantity { get; set; }
+    public ushort Condition { get; set; }
+    public byte Quality { get; set; }
+    public ushort HiddenItemId { get; set; }
+    public decimal? SourceNodeId { get; set; }
+    public byte RevealAtPercent { get; set; }
+    public decimal? SampleId { get; set; }
+    public PlayerEntity Player { get; set; } = null!;
+}
+
+public sealed class WorldPlacedObjectEntity
+{
+    public int WorldId { get; set; }
+    public decimal ObjectId { get; set; }
+    public ushort ItemId { get; set; }
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    public float Yaw { get; set; }
+    public ushort InputItemId { get; set; }
+    public ushort InputQuantity { get; set; }
+    public ushort InputCondition { get; set; }
+    public byte InputQuality { get; set; }
+    public ushort InputHiddenItemId { get; set; }
+    public decimal? InputSourceNodeId { get; set; }
+    public byte InputRevealAtPercent { get; set; }
+    public decimal? InputSampleId { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime UpdatedAtUtc { get; set; }
+    public WorldEntity World { get; set; } = null!;
 }
 
 public sealed class PlayerMapNoteEntity

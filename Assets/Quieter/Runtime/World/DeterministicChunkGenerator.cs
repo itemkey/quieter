@@ -276,8 +276,150 @@ namespace Quieter.World
             GenerateStoneOutcrop(definition, coordinate, result);
             GenerateDeposit(definition, coordinate, result);
             GenerateNonOreDeposit(definition, coordinate, result);
+            GenerateStarterTreesAndFiber(definition, coordinate, result);
+            GenerateTrees(definition, coordinate, result);
+            GenerateFiberPlants(definition, coordinate, result);
 
             return result;
+        }
+
+        private static void GenerateStarterTreesAndFiber(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            for (var index = 0; index < 4; index++)
+            {
+                var angle = (32f + index * 91f) * Mathf.Deg2Rad;
+                var radius = 30f + index * 2.5f;
+                var x = Mathf.Cos(angle) * radius;
+                var z = Mathf.Sin(angle) * radius;
+                if (!WorldPointBelongsToChunk(definition, coordinate, x, z)) continue;
+                var id = Hash64(definition.Seed ^ unchecked((long)0xB5AD4ECEDA1CE2A9UL), index, 0, 0);
+                AddTree(definition, result, id, x, z);
+            }
+
+            for (var index = 0; index < 8; index++)
+            {
+                var angle = (17f + index * 137.50776f) * Mathf.Deg2Rad;
+                var radius = 18f + (index % 3) * 3.5f;
+                var x = Mathf.Cos(angle) * radius;
+                var z = Mathf.Sin(angle) * radius;
+                if (!WorldPointBelongsToChunk(definition, coordinate, x, z)) continue;
+                var id = Hash64(definition.Seed ^ unchecked((long)0xD6E8FEB86659FD93UL), index, 0, 0);
+                AddFiberPlant(definition, result, id, x, z);
+            }
+        }
+
+        private static void GenerateTrees(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            var region = Hash64(
+                definition.Seed ^ unchecked((long)0x8CB92BA72F3D8DD7UL),
+                coordinate.X / 3,
+                coordinate.Z / 3,
+                0) % 100UL;
+            // Reuse one roll for a 3x3 region so trees form visible forest groups.
+            // The weighted average is about 0.6 trees per chunk (~600 for 2x2 km).
+            var count = region < 48UL ? 0 : region < 92UL ? 1 : 2;
+            for (var index = 0; index < count; index++)
+            {
+                var id = Hash64(
+                    definition.Seed ^ unchecked((long)0xA24BAED4963EE407UL),
+                    coordinate.X,
+                    coordinate.Z,
+                    index);
+                var position = CandidatePosition(definition, coordinate, id, 3f);
+                if (position.x * position.x + position.z * position.z < 42f * 42f
+                    || !IsFarEnoughFromObjects(position, result, 2.8f))
+                {
+                    continue;
+                }
+                AddTree(definition, result, id, position.x, position.z);
+            }
+        }
+
+        private static void GenerateFiberPlants(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            var id = Hash64(
+                definition.Seed ^ unchecked((long)0x9FB21C651E98DF25UL),
+                coordinate.X,
+                coordinate.Z,
+                0);
+            if (id % 100UL >= 82UL) return;
+            var position = CandidatePosition(definition, coordinate, id, 3f);
+            if (position.x * position.x + position.z * position.z < 42f * 42f
+                || !IsFarEnoughFromObjects(position, result, 2f))
+            {
+                return;
+            }
+            AddFiberPlant(definition, result, id, position.x, position.z);
+        }
+
+        private static void AddTree(
+            WorldDefinition definition,
+            ICollection<WorldObjectSpawn> result,
+            ulong instanceId,
+            float worldX,
+            float worldZ)
+        {
+            var ground = SampleWorldHeight(definition, worldX, worldZ);
+            var heightNoise = ((instanceId >> 16) & 0xFFUL) / 255f;
+            var widthNoise = ((instanceId >> 28) & 0xFFUL) / 255f;
+            var scale = new Vector3(
+                Mathf.Lerp(0.9f, 1.3f, widthNoise),
+                Mathf.Lerp(4.2f, 6.1f, heightNoise),
+                Mathf.Lerp(0.9f, 1.3f, widthNoise));
+            var descriptor = new ResourceNodeDescriptor(
+                WorldObjectKind.Tree,
+                2,
+                ResourceCategory.Forage,
+                DepositRichness.Ordinary,
+                DepositReserveSize.VerySmall,
+                1,
+                ResourceQuality.None,
+                1,
+                requiredTool: ToolKind.Axe);
+            result.Add(new WorldObjectSpawn(
+                instanceId,
+                new WorldObjectTypeId(0),
+                new Vector3(worldX, ground, worldZ),
+                Quaternion.Euler(0f, (instanceId & 0xFFUL) / 255f * 360f, 0f),
+                scale,
+                descriptor));
+        }
+
+        private static void AddFiberPlant(
+            WorldDefinition definition,
+            ICollection<WorldObjectSpawn> result,
+            ulong instanceId,
+            float worldX,
+            float worldZ)
+        {
+            var ground = SampleWorldHeight(definition, worldX, worldZ);
+            var descriptor = new ResourceNodeDescriptor(
+                WorldObjectKind.FiberPlant,
+                ResourceBalance.PlantFiberItemId,
+                ResourceCategory.Forage,
+                DepositRichness.Ordinary,
+                DepositReserveSize.VerySmall,
+                1,
+                ResourceQuality.None,
+                1,
+                respawnSeconds: 600,
+                requiredTool: ToolKind.None);
+            result.Add(new WorldObjectSpawn(
+                instanceId,
+                new WorldObjectTypeId(0),
+                new Vector3(worldX, ground + 0.38f, worldZ),
+                Quaternion.Euler(0f, (instanceId & 0xFFUL) / 255f * 360f, 0f),
+                new Vector3(0.72f, 0.76f, 0.72f),
+                descriptor));
         }
 
         private static void GenerateStarterForage(

@@ -18,6 +18,7 @@ namespace Quieter.Persistence
             public WorldDefinition World;
             public List<StoredPlayer> Players = new();
             public List<StoredResourceNodeState> ResourceNodes = new();
+            public List<StoredPlacedObject> PlacedObjects = new();
         }
 
         [Serializable]
@@ -29,6 +30,7 @@ namespace Quieter.Persistence
             public string CreatedAtUtc;
             public string LastSeenAtUtc;
             public List<StoredInventorySlot> InventorySlots = new();
+            public List<StoredInventorySlot> PendingItems = new();
             public byte SelectedHotbarIndex;
             public List<StoredDepositKnowledge> DepositKnowledge = new();
             public List<StoredMapNote> MapNotes = new();
@@ -157,6 +159,36 @@ namespace Quieter.Persistence
             return Task.CompletedTask;
         }
 
+        public Task<IReadOnlyList<StoredPlacedObject>> LoadPlacedObjectsAsync(
+            int worldId,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                return Task.FromResult<IReadOnlyList<StoredPlacedObject>>(
+                    ClonePlacedObjects(state.PlacedObjects.FindAll(
+                        candidate => candidate != null && candidate.WorldId == worldId)));
+            }
+        }
+
+        public Task SavePlacedObjectsAsync(
+            int worldId,
+            IReadOnlyList<StoredPlacedObject> objects,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                state.PlacedObjects.RemoveAll(entry => entry == null || entry.WorldId == worldId);
+                var replacements = ClonePlacedObjects(objects);
+                foreach (var entry in replacements) entry.WorldId = worldId;
+                state.PlacedObjects.AddRange(replacements);
+                Save();
+            }
+            return Task.CompletedTask;
+        }
+
         public Task SavePositionAsync(
             ulong steamId,
             Vector3 position,
@@ -181,6 +213,7 @@ namespace Quieter.Persistence
         public Task SaveInventoryAsync(
             ulong steamId,
             IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
             byte selectedHotbarIndex,
             CancellationToken cancellationToken = default)
         {
@@ -192,6 +225,7 @@ namespace Quieter.Persistence
                 if (player != null)
                 {
                     player.InventorySlots = CloneSlots(slots);
+                    player.PendingItems = CloneSlots(pendingItems);
                     player.SelectedHotbarIndex = (byte)Math.Min(
                         (int)selectedHotbarIndex,
                         InventoryLayout.HotbarSlotCount - 1);
@@ -272,10 +306,15 @@ namespace Quieter.Persistence
             state ??= new State();
             state.Players ??= new List<StoredPlayer>();
             state.ResourceNodes ??= new List<StoredResourceNodeState>();
+            state.PlacedObjects ??= new List<StoredPlacedObject>();
             var defaultWorldId = state.World.WorldId == 0 ? 1 : state.World.WorldId;
             foreach (var node in state.ResourceNodes)
             {
                 if (node != null && node.WorldId == 0) node.WorldId = defaultWorldId;
+            }
+            foreach (var placed in state.PlacedObjects)
+            {
+                if (placed != null && placed.WorldId == 0) placed.WorldId = defaultWorldId;
             }
             foreach (var player in state.Players)
             {
@@ -321,6 +360,7 @@ namespace Quieter.Persistence
                 CreatedAtUtc = ParseDate(player.CreatedAtUtc),
                 LastSeenAtUtc = ParseDate(player.LastSeenAtUtc),
                 InventorySlots = CloneSlots(player.InventorySlots),
+                PendingItems = CloneSlots(player.PendingItems),
                 SelectedHotbarIndex = player.SelectedHotbarIndex,
                 DepositKnowledge = CloneKnowledge(player.DepositKnowledge),
                 MapNotes = CloneMapNotes(player.MapNotes),
@@ -345,6 +385,7 @@ namespace Quieter.Persistence
                     HiddenItemId = slot.HiddenItemId,
                     SourceNodeId = slot.SourceNodeId,
                     RevealAtPercent = slot.RevealAtPercent,
+                    SampleId = slot.SampleId,
                 });
             }
 
@@ -377,6 +418,46 @@ namespace Quieter.Persistence
             RemainingReserves = state.RemainingReserves,
             AvailableAtUtc = state.AvailableAtUtc,
         };
+
+        private static List<StoredPlacedObject> ClonePlacedObjects(
+            IReadOnlyList<StoredPlacedObject> objects)
+        {
+            var result = new List<StoredPlacedObject>();
+            if (objects == null) return result;
+            foreach (var entry in objects)
+            {
+                if (entry == null) continue;
+                result.Add(new StoredPlacedObject
+                {
+                    WorldId = entry.WorldId,
+                    ObjectId = entry.ObjectId,
+                    ItemId = entry.ItemId,
+                    X = entry.X,
+                    Y = entry.Y,
+                    Z = entry.Z,
+                    Yaw = entry.Yaw,
+                    Input = CloneSlot(entry.Input),
+                    CreatedAtUtc = entry.CreatedAtUtc,
+                    UpdatedAtUtc = entry.UpdatedAtUtc,
+                });
+            }
+            return result;
+        }
+
+        private static StoredInventorySlot CloneSlot(StoredInventorySlot slot) => slot == null
+            ? null
+            : new StoredInventorySlot
+            {
+                SlotIndex = slot.SlotIndex,
+                ItemId = slot.ItemId,
+                Quantity = slot.Quantity,
+                Condition = slot.Condition,
+                Quality = slot.Quality,
+                HiddenItemId = slot.HiddenItemId,
+                SourceNodeId = slot.SourceNodeId,
+                RevealAtPercent = slot.RevealAtPercent,
+                SampleId = slot.SampleId,
+            };
 
         private static List<StoredDepositKnowledge> CloneKnowledge(
             IReadOnlyList<StoredDepositKnowledge> knowledge)

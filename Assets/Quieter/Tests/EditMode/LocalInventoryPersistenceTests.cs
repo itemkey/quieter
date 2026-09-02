@@ -45,6 +45,18 @@ namespace Quieter.Tests
                     HiddenItemId = 7,
                     SourceNodeId = "18446744073709551000",
                     RevealAtPercent = 50,
+                    SampleId = "18446744073709550001",
+                },
+            }, new[]
+            {
+                new StoredInventorySlot
+                {
+                    ItemId = 6,
+                    Quantity = 1,
+                    HiddenItemId = 7,
+                    SourceNodeId = "9991",
+                    RevealAtPercent = 50,
+                    SampleId = "9992",
                 },
             }, 4);
 
@@ -61,6 +73,51 @@ namespace Quieter.Tests
             Assert.That(profile.InventorySlots[1].SourceNodeId,
                 Is.EqualTo("18446744073709551000"));
             Assert.That(profile.InventorySlots[1].RevealAtPercent, Is.EqualTo(50));
+            Assert.That(profile.InventorySlots[1].SampleId,
+                Is.EqualTo("18446744073709550001"));
+            Assert.That(profile.PendingItems, Has.Count.EqualTo(1));
+            Assert.That(profile.PendingItems[0].SampleId, Is.EqualTo("9992"));
+        }
+
+        [Test]
+        public async Task PlacedResearchTableAndItsSample_SurviveRepositoryRestart()
+        {
+            var repository = new LocalJsonRepository(path);
+            var world = await repository.GetOrCreateWorldAsync();
+            await repository.SavePlacedObjectsAsync(world.WorldId, new[]
+            {
+                new StoredPlacedObject
+                {
+                    WorldId = world.WorldId,
+                    ObjectId = "18446744073709550002",
+                    ItemId = 24,
+                    X = 12.5f,
+                    Y = 4.25f,
+                    Z = -8.75f,
+                    Yaw = 45f,
+                    Input = new StoredInventorySlot
+                    {
+                        ItemId = 6,
+                        Quantity = 1,
+                        HiddenItemId = 11,
+                        SourceNodeId = "445566",
+                        RevealAtPercent = 50,
+                        SampleId = "778899",
+                    },
+                    CreatedAtUtc = "2026-09-01T00:00:00.0000000Z",
+                    UpdatedAtUtc = "2026-09-01T00:01:00.0000000Z",
+                },
+            });
+
+            var reopened = new LocalJsonRepository(path);
+            var objects = await reopened.LoadPlacedObjectsAsync(world.WorldId);
+            Assert.That(objects, Has.Count.EqualTo(1));
+            Assert.That(objects[0].ObjectId, Is.EqualTo("18446744073709550002"));
+            Assert.That(objects[0].Yaw, Is.EqualTo(45f));
+            Assert.That(objects[0].Input.ItemId, Is.EqualTo(6));
+            Assert.That(objects[0].Input.HiddenItemId, Is.EqualTo(11));
+            Assert.That(objects[0].Input.SourceNodeId, Is.EqualTo("445566"));
+            Assert.That(objects[0].Input.SampleId, Is.EqualTo("778899"));
         }
 
         [Test]
@@ -167,6 +224,7 @@ namespace Quieter.Tests
             var profile = await repository.LoginAsync(steamId, "Old", Vector3.zero);
 
             Assert.That(profile.InventorySlots, Is.Empty);
+            Assert.That(profile.PendingItems, Is.Empty);
             Assert.That(profile.MapNotes, Is.Empty);
             Assert.That(profile.SelectedHotbarIndex, Is.Zero);
             Assert.That(profile.Position, Is.EqualTo(new Vector3(1f, 8f, 2f)));

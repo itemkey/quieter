@@ -15,6 +15,7 @@ namespace Quieter.World
         private readonly Dictionary<ulong, ResourceNodeRuntimeState> states = new();
         private readonly Dictionary<ulong, int> partialMiningWork = new();
         private readonly HashSet<ulong> dirty = new();
+        private readonly SemaphoreSlim flushGate = new(1, 1);
 
         private NetworkManager networkManager;
         private WorldStreamer streamer;
@@ -179,26 +180,28 @@ namespace Quieter.World
 
         public async Task FlushAsync(CancellationToken cancellationToken)
         {
-            if (repository == null || dirty.Count == 0 || flushRunning) return;
-            flushRunning = true;
-            var ids = new List<ulong>(dirty);
-            var payload = new List<StoredResourceNodeState>(ids.Count);
-            foreach (var id in ids)
-            {
-                if (!states.TryGetValue(id, out var state)) continue;
-                payload.Add(new StoredResourceNodeState
-                {
-                    WorldId = definition.WorldId,
-                    InstanceId = id.ToString(),
-                    RemainingReserves = state.RemainingReserves,
-                    AvailableAtUtc = state.AvailableAtUnixSeconds <= 0
-                        ? null
-                        : DateTimeOffset.FromUnixTimeSeconds(state.AvailableAtUnixSeconds)
-                            .UtcDateTime.ToString("O"),
-                });
-            }
+            if (repository == null) return;
+            await flushGate.WaitAsync(cancellationToken);
             try
             {
+                if (dirty.Count == 0) return;
+                flushRunning = true;
+                var ids = new List<ulong>(dirty);
+                var payload = new List<StoredResourceNodeState>(ids.Count);
+                foreach (var id in ids)
+                {
+                    if (!states.TryGetValue(id, out var state)) continue;
+                    payload.Add(new StoredResourceNodeState
+                    {
+                        WorldId = definition.WorldId,
+                        InstanceId = id.ToString(),
+                        RemainingReserves = state.RemainingReserves,
+                        AvailableAtUtc = state.AvailableAtUnixSeconds <= 0
+                            ? null
+                            : DateTimeOffset.FromUnixTimeSeconds(state.AvailableAtUnixSeconds)
+                                .UtcDateTime.ToString("O"),
+                    });
+                }
                 await repository.SaveResourceNodeStatesAsync(
                     definition.WorldId, payload, cancellationToken);
                 foreach (var state in payload)
@@ -222,6 +225,7 @@ namespace Quieter.World
             {
                 flushRunning = false;
                 nextFlushAt = Time.unscaledTime + 5f;
+                flushGate.Release();
             }
         }
 

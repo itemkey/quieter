@@ -1,8 +1,10 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using NUnit.Framework;
 using Quieter.Inventory;
 using Quieter.World;
+using Unity.Netcode;
 using UnityEngine;
 
 namespace Quieter.Tests.EditMode
@@ -73,7 +75,9 @@ namespace Quieter.Tests.EditMode
                                  && spawn.Resource.ResourceItemId is >= 17 and <= 21))
                     {
                         Assert.That(chunkSpawns.Where(other =>
-                                    other.InstanceId != nonOre.InstanceId)
+                                    other.InstanceId != nonOre.InstanceId
+                                    && other.Resource.Kind != WorldObjectKind.Tree
+                                    && other.Resource.Kind != WorldObjectKind.FiberPlant)
                                 .All(other => Vector2.Distance(
                                     new Vector2(nonOre.Position.x, nonOre.Position.z),
                                     new Vector2(other.Position.x, other.Position.z)) >= 6f),
@@ -184,7 +188,7 @@ namespace Quieter.Tests.EditMode
             var wood = CreateItem(2, "Дерево", 20);
             var pickaxe = CreateItem(5, "Примитивная кирка", 1,
                 ItemKind.Tool, ToolKind.Pickaxe, 120);
-            var unknown = CreateItem(6, "Неопознанный образец", 20, ItemKind.HiddenSample);
+            var unknown = CreateItem(6, "Неопознанный образец", 1, ItemKind.HiddenSample);
             var iron = CreateItem(7, "Железная руда", 20);
             var recipe = ScriptableObject.CreateInstance<CraftingRecipe>();
             recipe.Configure(2, "Примитивная кирка", new[]
@@ -211,16 +215,20 @@ namespace Quieter.Tests.EditMode
 
             const ulong source = 99887766;
             var sample = new ItemStackState(
-                unknown.ItemId, 2, 0, ResourceQuality.High, iron.ItemId, source, 50);
+                unknown.ItemId, 1, 0, ResourceQuality.High, iron.ItemId, source, 50, 101);
             var replicated = sample.ForReplication();
             Assert.That(replicated.ItemId, Is.EqualTo(unknown.ItemId));
-            Assert.That(replicated.Quantity, Is.EqualTo(2));
+            Assert.That(replicated.Quantity, Is.EqualTo(1));
             Assert.That(replicated.HiddenItemId, Is.Zero);
-            Assert.That(replicated.SourceNodeId, Is.Zero);
+            Assert.That(replicated.SourceNodeId, Is.EqualTo(source));
             Assert.That(replicated.Quality, Is.EqualTo(ResourceQuality.None));
             Assert.That(model.AutoInsert(sample, unknown.PickupPriority), Is.Zero);
+            Assert.That(model.AutoInsert(new ItemStackState(
+                unknown.ItemId, 1, 0, ResourceQuality.High, iron.ItemId, source, 50, 102),
+                unknown.PickupPriority), Is.Zero);
             Assert.That(model.RevealSamples(source, 49), Is.Zero);
-            Assert.That(model.RevealSamples(source, 50), Is.EqualTo(2));
+            Assert.That(model.RevealSamples(source, 50), Is.Zero);
+            Assert.That(model.RevealSamples(source, 100), Is.EqualTo(2));
             Assert.That(model.Inventory.Any(stack => stack.ItemId == iron.ItemId
                 && stack.Quantity == 2 && stack.Quality == ResourceQuality.High), Is.True);
             Assert.That(model.AutoInsert(
@@ -230,6 +238,151 @@ namespace Quieter.Tests.EditMode
             Assert.That(model.DamageActiveTool(ToolKind.Pickaxe, 117, out broke), Is.True);
             Assert.That(broke, Is.True);
             Assert.That(model.ActiveStack.IsEmpty, Is.True);
+        }
+
+        [Test]
+        public void ServerMiningWork_TreeCompletesOnceOnEighthAcceptedHit()
+        {
+            var managerObject = new GameObject("Mining rules network manager");
+            assets.Add(managerObject);
+            var manager = managerObject.AddComponent<NetworkManager>();
+            var roleProperty = manager.LocalClient.GetType().GetProperty(
+                "IsServer", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.That(roleProperty, Is.Not.Null);
+            roleProperty.SetValue(manager.LocalClient, true);
+
+            var streamerObject = new GameObject("Mining rules streamer");
+            assets.Add(streamerObject);
+            var streamer = streamerObject.AddComponent<WorldStreamer>();
+            var serviceObject = new GameObject("Mining rules service");
+            assets.Add(serviceObject);
+            var service = serviceObject.AddComponent<ResourceWorldService>();
+            service.Configure(manager, streamer);
+            var treeObject = new GameObject("Tree mining node");
+            assets.Add(treeObject);
+            var tree = treeObject.AddComponent<ResourceNodeView>();
+            tree.Initialize(12345, new ResourceNodeDescriptor(
+                WorldObjectKind.Tree,
+                2,
+                ResourceCategory.Forage,
+                DepositRichness.Ordinary,
+                DepositReserveSize.VerySmall,
+                1,
+                ResourceQuality.None,
+                1,
+                requiredTool: ToolKind.Axe));
+
+            for (var hit = 1; hit < ResourceBalance.TreeHitsRequired; hit++)
+            {
+                Assert.That(service.ApplyMiningHit(
+                    tree, out var completed, out _, out var state), Is.True);
+                Assert.That(completed, Is.False, $"Tree completed on hit {hit}.");
+                Assert.That(state.RemainingReserves, Is.EqualTo(1));
+            }
+            Assert.That(service.ApplyMiningHit(
+                tree, out var finalCompleted, out var extractionIndex, out var finalState),
+                Is.True);
+            Assert.That(finalCompleted, Is.True);
+            Assert.That(extractionIndex, Is.EqualTo(1));
+            Assert.That(finalState.RemainingReserves, Is.Zero);
+            Assert.That(service.ApplyMiningHit(tree, out _, out _, out _), Is.False,
+                "An exhausted tree must not grant a second yield.");
+        }
+
+        [Test]
+        public void ServerInteractionValidation_RejectsFarBehindAndOccludedDeposit()
+        {
+            var playerObject = new GameObject("Interaction validation player");
+            assets.Add(playerObject);
+            var interaction = playerObject.AddComponent<PlayerResourceInteraction>();
+            var depositObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            depositObject.name = "Interaction validation deposit";
+            assets.Add(depositObject);
+            Object.DestroyImmediate(depositObject.GetComponent<MeshRenderer>());
+            depositObject.transform.position = new Vector3(0f, 1.1f, 2f);
+            var deposit = depositObject.AddComponent<ResourceNodeView>();
+            deposit.Initialize(7788, new ResourceNodeDescriptor(
+                WorldObjectKind.Deposit,
+                7,
+                ResourceCategory.MetallicOre,
+                DepositRichness.Ordinary,
+                DepositReserveSize.Small,
+                60,
+                ResourceQuality.Normal,
+                2,
+                requiredTool: ToolKind.Pickaxe));
+            var validate = typeof(PlayerResourceInteraction).GetMethod(
+                "ValidateInteraction", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(validate, Is.Not.Null);
+
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(interaction, new object[] { deposit }), Is.True);
+            depositObject.transform.position = new Vector3(0f, 1.1f, -2f);
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(interaction, new object[] { deposit }), Is.False);
+            depositObject.transform.position = new Vector3(0f, 1.1f, 4f);
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(interaction, new object[] { deposit }), Is.False);
+
+            depositObject.transform.position = new Vector3(0f, 1.1f, 2f);
+            var obstacle = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            obstacle.name = "Interaction validation obstacle";
+            assets.Add(obstacle);
+            obstacle.transform.position = new Vector3(0f, 1.1f, 1f);
+            obstacle.transform.localScale = new Vector3(1f, 2f, 0.25f);
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(interaction, new object[] { deposit }), Is.False);
+        }
+
+        [Test]
+        public void ServerPlacementValidation_UsesAimRangeAndRejectsObstaclesAndSlope()
+        {
+            var playerObject = new GameObject("Placement validation player");
+            assets.Add(playerObject);
+            var interaction = playerObject.AddComponent<PlayerResourceInteraction>();
+            var placedObject = new GameObject("Placement validation service");
+            assets.Add(placedObject);
+            var placed = placedObject.AddComponent<PlacedObjectWorldService>();
+            placed.InitializeClient(WorldDefinition.CreateDefault(556677));
+            var placedField = typeof(PlayerResourceInteraction).GetField(
+                "placedObjects", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(placedField, Is.Not.Null);
+            placedField.SetValue(interaction, placed);
+
+            var ground = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            ground.name = "Placement validation ground";
+            assets.Add(ground);
+            ground.AddComponent<WorldChunkView>();
+            ground.transform.position = new Vector3(0f, -0.1f, 5f);
+            ground.transform.localScale = new Vector3(20f, 0.2f, 20f);
+            var validate = typeof(PlayerResourceInteraction).GetMethod(
+                "ValidatePlacementServer", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(validate, Is.Not.Null);
+
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(
+                interaction, new object[] { new Vector3(0f, 0f, 5f), 0f }), Is.True);
+            Assert.That((bool)validate.Invoke(
+                interaction, new object[] { new Vector3(0f, 0f, 11f), 0f }), Is.False,
+                "Placement farther than the ten-metre aim range must be rejected.");
+
+            var obstacle = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            obstacle.name = "Placement validation obstacle";
+            assets.Add(obstacle);
+            obstacle.transform.position = new Vector3(0f, 0.9f, 2.5f);
+            obstacle.transform.localScale = new Vector3(1.2f, 1.8f, 0.25f);
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(
+                interaction, new object[] { new Vector3(0f, 0f, 5f), 0f }), Is.False,
+                "Placement through an obstacle must be rejected.");
+
+            Object.DestroyImmediate(obstacle);
+            assets.Remove(obstacle);
+            ground.transform.rotation = Quaternion.Euler(30f, 0f, 0f);
+            Physics.SyncTransforms();
+            Assert.That((bool)validate.Invoke(
+                interaction, new object[] { new Vector3(0f, 0f, 5f), 0f }), Is.False,
+                "A slope outside the supported limit must be rejected.");
         }
 
         private ItemDefinition CreateItem(

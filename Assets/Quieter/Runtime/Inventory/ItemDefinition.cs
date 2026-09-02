@@ -8,6 +8,7 @@ namespace Quieter.Inventory
         Resource = 0,
         Tool = 1,
         HiddenSample = 2,
+        Placeable = 3,
     }
 
     public enum ToolKind : byte

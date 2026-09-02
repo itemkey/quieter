@@ -95,7 +95,12 @@ public sealed class ProfileStoreTests
             {
                 new InventorySlotResponse(0, 1, 20),
                 new InventorySlotResponse(
-                    24, 5, 1, 83, 4, 7, "18446744073709551000", 50),
+                    24, 5, 1, 83, 4, 7, "18446744073709551000", 50,
+                    "18446744073709550000"),
+            }, new[]
+            {
+                new InventorySlotResponse(
+                    0, 6, 1, 0, 4, 7, "10001", 50, "10002"),
             }),
             default));
 
@@ -106,7 +111,45 @@ public sealed class ProfileStoreTests
         Assert.Collection(restored.InventorySlots,
             slot => Assert.Equal(new InventorySlotResponse(0, 1, 20), slot),
             slot => Assert.Equal(new InventorySlotResponse(
-                24, 5, 1, 83, 4, 7, "18446744073709551000", 50), slot));
+                24, 5, 1, 83, 4, 7, "18446744073709551000", 50,
+                "18446744073709550000"), slot));
+        Assert.Collection(restored.PendingItems,
+            item => Assert.Equal(new InventorySlotResponse(
+                0, 6, 1, 0, 4, 7, "10001", 50, "10002"), item));
+    }
+
+    [Fact]
+    public async Task PlacedResearchTableAndInput_AreSavedAndRestored()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
+        var created = DateTime.UtcNow.AddMinutes(-2);
+        var updated = DateTime.UtcNow;
+        Assert.True(await store.SavePlacedObjectsAsync(
+            world.WorldId,
+            new PlacedObjectListResponse(new[]
+            {
+                new PlacedObjectResponse(
+                    "18446744073709550001",
+                    24,
+                    12.5f,
+                    4.25f,
+                    -8.75f,
+                    45f,
+                    new InventorySlotResponse(0, 6, 1, 0, 4, 11, "445566", 50, "778899"),
+                    created,
+                    updated),
+            }),
+            default));
+
+        var restored = await store.LoadPlacedObjectsAsync(world.WorldId, default);
+        var table = Assert.Single(restored.Objects);
+        Assert.Equal("18446744073709550001", table.ObjectId);
+        Assert.Equal((ushort)24, table.ItemId);
+        Assert.Equal(45f, table.Yaw);
+        Assert.Equal("778899", table.Input?.SampleId);
+        Assert.Equal("445566", table.Input?.SourceNodeId);
     }
 
     [Fact]
@@ -290,6 +333,7 @@ public sealed class ProfileStoreTests
         Assert.Contains("202608290001_AddInventory", migrations);
         Assert.Contains("202608300001_AddResourceExtraction", migrations);
         Assert.Contains("202608310001_AddNonOreAndMapNotes", migrations);
+        Assert.Contains("202609010001_AddResearchTables", migrations);
     }
 
     private static ProfileDbContext CreateDatabase()

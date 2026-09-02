@@ -22,10 +22,20 @@ namespace Quieter.Inventory
         HotbarFirst = 1,
     }
 
+    public enum PickupResultCode : byte
+    {
+        Collected = 0,
+        CollectedWithOverflow = 1,
+        Unavailable = 2,
+        Blocked = 3,
+        InventoryFull = 4,
+    }
+
     public enum InventorySlotArea : byte
     {
         Inventory = 0,
         Workbench = 1,
+        ResearchTable = 2,
         None = byte.MaxValue,
     }
 
@@ -77,6 +87,7 @@ namespace Quieter.Inventory
         public ushort HiddenItemId;
         public ulong SourceNodeId;
         public byte RevealAtPercent;
+        public ulong SampleId;
 
         public ItemStackState(
             ushort itemId,
@@ -85,7 +96,8 @@ namespace Quieter.Inventory
             ResourceQuality quality = ResourceQuality.None,
             ushort hiddenItemId = 0,
             ulong sourceNodeId = 0,
-            byte revealAtPercent = 0)
+            byte revealAtPercent = 0,
+            ulong sampleId = 0)
         {
             ItemId = itemId;
             Quantity = (ushort)Math.Clamp(quantity, 0, ushort.MaxValue);
@@ -94,6 +106,7 @@ namespace Quieter.Inventory
             HiddenItemId = hiddenItemId;
             SourceNodeId = sourceNodeId;
             RevealAtPercent = revealAtPercent;
+            SampleId = sampleId;
             if (Quantity == 0)
             {
                 Clear();
@@ -112,6 +125,7 @@ namespace Quieter.Inventory
             HiddenItemId = 0;
             SourceNodeId = 0;
             RevealAtPercent = 0;
+            SampleId = 0;
         }
 
         public ItemStackState WithQuantity(int quantity) => new(
@@ -121,21 +135,29 @@ namespace Quieter.Inventory
             Quality,
             HiddenItemId,
             SourceNodeId,
-            RevealAtPercent);
+            RevealAtPercent,
+            SampleId);
 
         public ItemStackState ForReplication()
         {
             if (HiddenItemId == 0) return this;
-            return new ItemStackState(ItemId, Quantity);
+            return new ItemStackState(
+                ItemId,
+                Quantity,
+                sourceNodeId: SourceNodeId,
+                revealAtPercent: RevealAtPercent,
+                sampleId: SampleId);
         }
 
         public bool CanStackWith(ItemStackState other) => !IsEmpty && !other.IsEmpty
+            && ItemId != 6 // Stable ID of the deliberately non-stackable research sample.
             && ItemId == other.ItemId
             && Condition == other.Condition
             && Quality == other.Quality
             && HiddenItemId == other.HiddenItemId
             && SourceNodeId == other.SourceNodeId
-            && RevealAtPercent == other.RevealAtPercent;
+            && RevealAtPercent == other.RevealAtPercent
+            && SampleId == other.SampleId;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
@@ -146,6 +168,7 @@ namespace Quieter.Inventory
             serializer.SerializeValue(ref HiddenItemId);
             serializer.SerializeValue(ref SourceNodeId);
             serializer.SerializeValue(ref RevealAtPercent);
+            serializer.SerializeValue(ref SampleId);
         }
 
         public bool Equals(ItemStackState other) => ItemId == other.ItemId
@@ -154,7 +177,8 @@ namespace Quieter.Inventory
             && Quality == other.Quality
             && HiddenItemId == other.HiddenItemId
             && SourceNodeId == other.SourceNodeId
-            && RevealAtPercent == other.RevealAtPercent;
+            && RevealAtPercent == other.RevealAtPercent
+            && SampleId == other.SampleId;
         public override bool Equals(object obj) => obj is ItemStackState other && Equals(other);
         public override int GetHashCode() => HashCode.Combine(
             ItemId,
@@ -163,7 +187,8 @@ namespace Quieter.Inventory
             (byte)Quality,
             HiddenItemId,
             SourceNodeId,
-            RevealAtPercent);
+            RevealAtPercent,
+            SampleId);
         public override string ToString() => IsEmpty ? "Empty" : $"{ItemId} x{Quantity}";
     }
 
@@ -178,5 +203,6 @@ namespace Quieter.Inventory
         public ushort HiddenItemId;
         public string SourceNodeId;
         public byte RevealAtPercent;
+        public string SampleId;
     }
 }

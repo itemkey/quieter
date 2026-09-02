@@ -6,7 +6,7 @@ namespace Quieter.ProfileService.Data;
 
 public sealed class ProfileStore(ProfileDbContext database)
 {
-    public const ushort CurrentGeneratorVersion = 4;
+    public const ushort CurrentGeneratorVersion = 5;
 
     public async Task<WorldResponse> GetOrCreateWorldAsync(CancellationToken cancellationToken)
     {
@@ -45,6 +45,7 @@ public sealed class ProfileStore(ProfileDbContext database)
         var steamId = ParseSteamId(request.SteamId);
         var player = await database.Players
             .Include(candidate => candidate.InventorySlots)
+            .Include(candidate => candidate.PendingItems)
             .Include(candidate => candidate.DepositKnowledge)
             .Include(candidate => candidate.MapNotes)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
@@ -134,6 +135,106 @@ public sealed class ProfileStore(ProfileDbContext database)
         return true;
     }
 
+    public async Task<PlacedObjectListResponse> LoadPlacedObjectsAsync(
+        int worldId,
+        CancellationToken cancellationToken)
+    {
+        var objects = await database.WorldPlacedObjects
+            .AsNoTracking()
+            .Where(entry => entry.WorldId == worldId)
+            .OrderBy(entry => entry.ObjectId)
+            .ToArrayAsync(cancellationToken);
+        return new PlacedObjectListResponse(objects.Select(entry => new PlacedObjectResponse(
+            FormatId(entry.ObjectId),
+            entry.ItemId,
+            entry.X,
+            entry.Y,
+            entry.Z,
+            entry.Yaw,
+            entry.InputItemId == 0 ? null : new InventorySlotResponse(
+                0,
+                entry.InputItemId,
+                entry.InputQuantity,
+                entry.InputCondition,
+                entry.InputQuality,
+                entry.InputHiddenItemId,
+                FormatOptionalId(entry.InputSourceNodeId),
+                entry.InputRevealAtPercent,
+                FormatOptionalId(entry.InputSampleId)),
+            entry.CreatedAtUtc,
+            entry.UpdatedAtUtc)).ToArray());
+    }
+
+    public async Task<bool> SavePlacedObjectsAsync(
+        int worldId,
+        PlacedObjectListResponse request,
+        CancellationToken cancellationToken)
+    {
+        if (!await database.Worlds.AnyAsync(world => world.Id == worldId, cancellationToken))
+        {
+            return false;
+        }
+        var incoming = request.Objects ?? [];
+        if (incoming.Count > 2048) throw new ArgumentException("Too many placed objects.");
+        var parsed = incoming.Select(entry => new
+        {
+            Entry = entry,
+            ObjectId = ParseInstanceId(entry.ObjectId),
+        }).ToArray();
+        if (parsed.Select(entry => entry.ObjectId).Distinct().Count() != parsed.Length
+            || parsed.Any(entry => entry.Entry.ItemId == 0
+                || !float.IsFinite(entry.Entry.X)
+                || !float.IsFinite(entry.Entry.Y)
+                || !float.IsFinite(entry.Entry.Z)
+                || !float.IsFinite(entry.Entry.Yaw)))
+        {
+            throw new ArgumentException("Placed objects are invalid.");
+        }
+        foreach (var source in parsed)
+        {
+            var input = source.Entry.Input;
+            if (input is not null && (input.ItemId == 0 || input.Quantity == 0))
+            {
+                throw new ArgumentException("Placed object input is invalid.");
+            }
+            _ = ParseOptionalInstanceId(input?.SourceNodeId);
+            _ = ParseOptionalInstanceId(input?.SampleId);
+        }
+        var existing = await database.WorldPlacedObjects
+            .Where(entry => entry.WorldId == worldId)
+            .ToListAsync(cancellationToken);
+        database.WorldPlacedObjects.RemoveRange(existing);
+        var now = DateTime.UtcNow;
+        foreach (var source in parsed)
+        {
+            var input = source.Entry.Input;
+            database.WorldPlacedObjects.Add(new WorldPlacedObjectEntity
+            {
+                WorldId = worldId,
+                ObjectId = source.ObjectId,
+                ItemId = source.Entry.ItemId,
+                X = source.Entry.X,
+                Y = source.Entry.Y,
+                Z = source.Entry.Z,
+                Yaw = source.Entry.Yaw,
+                InputItemId = input?.ItemId ?? 0,
+                InputQuantity = input?.Quantity ?? 0,
+                InputCondition = input?.Condition ?? 0,
+                InputQuality = input?.Quality ?? 0,
+                InputHiddenItemId = input?.HiddenItemId ?? 0,
+                InputSourceNodeId = ParseOptionalInstanceId(input?.SourceNodeId),
+                InputRevealAtPercent = input?.RevealAtPercent ?? 0,
+                InputSampleId = ParseOptionalInstanceId(input?.SampleId),
+                CreatedAtUtc = source.Entry.CreatedAtUtc == default
+                    ? now : source.Entry.CreatedAtUtc.ToUniversalTime(),
+                UpdatedAtUtc = source.Entry.UpdatedAtUtc == default
+                    ? now : source.Entry.UpdatedAtUtc.ToUniversalTime(),
+            });
+        }
+        await database.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
     public async Task<bool> SaveInventoryAsync(
         string steamIdText,
         InventoryRequest request,
@@ -157,10 +258,25 @@ public sealed class ProfileStore(ProfileDbContext database)
             {
                 throw new ArgumentException("Inventory slot is invalid.");
             }
+            _ = ParseOptionalInstanceId(slot.SourceNodeId);
+            _ = ParseOptionalInstanceId(slot.SampleId);
+        }
+
+        var pendingItems = request.PendingItems ?? [];
+        if (pendingItems.Count > 256 || pendingItems.Any(item => item.ItemId == 0
+                || item.Quantity == 0))
+        {
+            throw new ArgumentException("Pending inventory items are invalid.");
+        }
+        foreach (var item in pendingItems)
+        {
+            _ = ParseOptionalInstanceId(item.SourceNodeId);
+            _ = ParseOptionalInstanceId(item.SampleId);
         }
 
         var player = await database.Players
             .Include(candidate => candidate.InventorySlots)
+            .Include(candidate => candidate.PendingItems)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
         if (player is null) return false;
 
@@ -176,6 +292,21 @@ public sealed class ProfileStore(ProfileDbContext database)
                 HiddenItemId = slot.HiddenItemId,
                 SourceNodeId = ParseOptionalInstanceId(slot.SourceNodeId),
                 RevealAtPercent = slot.RevealAtPercent,
+                SampleId = ParseOptionalInstanceId(slot.SampleId),
+        }).ToList();
+        database.PlayerPendingItems.RemoveRange(player.PendingItems);
+        player.PendingItems = pendingItems.Select((slot, index) => new PlayerPendingItemEntity
+        {
+            SteamId = steamId,
+            ItemIndex = (ushort)index,
+            ItemId = slot.ItemId,
+            Quantity = slot.Quantity,
+            Condition = slot.Condition,
+            Quality = slot.Quality,
+            HiddenItemId = slot.HiddenItemId,
+            SourceNodeId = ParseOptionalInstanceId(slot.SourceNodeId),
+            RevealAtPercent = slot.RevealAtPercent,
+            SampleId = ParseOptionalInstanceId(slot.SampleId),
         }).ToList();
         player.SelectedHotbarIndex = request.SelectedHotbarIndex;
         player.LastSeenAtUtc = DateTime.UtcNow;
@@ -371,7 +502,21 @@ public sealed class ProfileStore(ProfileDbContext database)
                     ? decimal.Truncate(slot.SourceNodeId.Value).ToString(
                         System.Globalization.CultureInfo.InvariantCulture)
                     : null,
-                slot.RevealAtPercent))
+                slot.RevealAtPercent,
+                FormatOptionalId(slot.SampleId)))
+            .ToArray(),
+        player.PendingItems
+            .OrderBy(item => item.ItemIndex)
+            .Select(item => new InventorySlotResponse(
+                (byte)Math.Min(item.ItemIndex, byte.MaxValue),
+                item.ItemId,
+                item.Quantity,
+                item.Condition,
+                item.Quality,
+                item.HiddenItemId,
+                FormatOptionalId(item.SourceNodeId),
+                item.RevealAtPercent,
+                FormatOptionalId(item.SampleId)))
             .ToArray(),
         player.SelectedHotbarIndex,
         player.DepositKnowledge
@@ -445,6 +590,13 @@ public sealed class ProfileStore(ProfileDbContext database)
         }
         return parsed;
     }
+
+    private static string FormatId(decimal value) => decimal.Truncate(value).ToString(
+        System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string? FormatOptionalId(decimal? value) => value.HasValue
+        ? FormatId(value.Value)
+        : null;
 
     private static string SanitizeDisplayName(string value)
     {

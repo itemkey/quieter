@@ -17,6 +17,7 @@ namespace Quieter.Persistence
         public DateTime CreatedAtUtc;
         public DateTime LastSeenAtUtc;
         public List<StoredInventorySlot> InventorySlots = new();
+        public List<StoredInventorySlot> PendingItems = new();
         public byte SelectedHotbarIndex;
         public List<StoredDepositKnowledge> DepositKnowledge = new();
         public List<StoredMapNote> MapNotes = new();
@@ -33,6 +34,15 @@ namespace Quieter.Persistence
         Task SaveResourceNodeStatesAsync(
             int worldId,
             IReadOnlyList<StoredResourceNodeState> states,
+            CancellationToken cancellationToken = default);
+
+        Task<IReadOnlyList<StoredPlacedObject>> LoadPlacedObjectsAsync(
+            int worldId,
+            CancellationToken cancellationToken = default);
+
+        Task SavePlacedObjectsAsync(
+            int worldId,
+            IReadOnlyList<StoredPlacedObject> objects,
             CancellationToken cancellationToken = default);
     }
 
@@ -52,6 +62,7 @@ namespace Quieter.Persistence
         Task SaveInventoryAsync(
             ulong steamId,
             IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
             byte selectedHotbarIndex,
             CancellationToken cancellationToken = default);
 

@@ -26,6 +26,7 @@ public sealed record PlayerProfileResponse(
     DateTime CreatedAtUtc,
     DateTime LastSeenAtUtc,
     IReadOnlyList<InventorySlotResponse> InventorySlots,
+    IReadOnlyList<InventorySlotResponse> PendingItems,
     byte SelectedHotbarIndex,
     IReadOnlyList<DepositKnowledgeResponse> DepositKnowledge,
     IReadOnlyList<MapNoteResponse> MapNotes);
@@ -40,11 +41,27 @@ public sealed record InventorySlotResponse(
     byte Quality = 0,
     ushort HiddenItemId = 0,
     string? SourceNodeId = null,
-    byte RevealAtPercent = 0);
+    byte RevealAtPercent = 0,
+    string? SampleId = null);
 
 public sealed record InventoryRequest(
     byte SelectedHotbarIndex,
-    IReadOnlyList<InventorySlotResponse> Slots);
+    IReadOnlyList<InventorySlotResponse> Slots,
+    IReadOnlyList<InventorySlotResponse>? PendingItems = null);
+
+public sealed record PlacedObjectResponse(
+    string ObjectId,
+    ushort ItemId,
+    float X,
+    float Y,
+    float Z,
+    float Yaw,
+    InventorySlotResponse? Input,
+    DateTime CreatedAtUtc,
+    DateTime UpdatedAtUtc);
+
+public sealed record PlacedObjectListResponse(
+    IReadOnlyList<PlacedObjectResponse> Objects);
 
 public sealed record ResourceNodeStateResponse(
     string InstanceId,

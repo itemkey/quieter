@@ -41,7 +41,7 @@ namespace Quieter.World
                 if (collider != null) collider.enabled = available && !depleted;
             }
 
-            if (temporarilyUnavailable)
+            if (temporarilyUnavailable || (depleted && Descriptor.IsTree))
             {
                 foreach (var renderer in renderers)
                 {

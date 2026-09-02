@@ -2,6 +2,7 @@ using System.Collections;
 using System.Reflection;
 using NUnit.Framework;
 using Quieter.Inventory;
+using Quieter.World;
 using Quieter.UI;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -217,6 +218,195 @@ namespace Quieter.Tests
         }
 
         [UnityTest]
+        public IEnumerator ResearchTableInterface_IsCenteredAndSeparatesBothProgressBars()
+        {
+            InventoryView.SetMode(false, false);
+            var root = new GameObject("ResearchTableLayoutTest");
+            root.AddComponent<InventoryView>();
+            yield return null;
+
+            InventoryView.SetResearchTableMode(true);
+            var workspace = Find(root, "ResearchWorkspace");
+            var inventory = Find(root, "InventoryPanel");
+            var table = Find(root, "ResearchTablePanel");
+            var researchTab = Find(root, "ResearchTabContent");
+            var studiedTab = Find(root, "StudiedTabContent");
+            var researchTabButton = Find(root, "ResearchTabButton");
+            var studiedTabButton = Find(root, "StudiedTabButton");
+            var sampleKnowledge = Find(root, "SampleKnowledge");
+            var knowledge = Find(root, "KnowledgeBar");
+            var holdButton = Find(root, "HoldResearchButton");
+            var result = Find(root, "ResearchResult");
+            var feedback = Find(root, "InterfaceFeedback");
+            Assert.That(workspace, Is.Not.Null);
+            Assert.That(workspace.activeSelf, Is.True);
+            Assert.That(inventory.activeSelf, Is.True);
+            Assert.That(table.activeSelf, Is.True);
+            Assert.That(researchTabButton, Is.Not.Null);
+            Assert.That(studiedTabButton, Is.Not.Null);
+            Assert.That(researchTab.activeSelf, Is.True);
+            Assert.That(studiedTab.activeSelf, Is.False);
+            Assert.That(sampleKnowledge.activeSelf, Is.False,
+                "An empty or unidentified sample must not expose deposit knowledge.");
+            Assert.That(result.activeSelf, Is.False);
+            Assert.That(feedback, Is.Not.Null);
+            Assert.That(holdButton.GetComponent<ResearchHoldButtonView>(), Is.Not.Null);
+
+            var inventoryRect = inventory.GetComponent<RectTransform>();
+            var tableRect = table.GetComponent<RectTransform>();
+            Assert.That(inventoryRect.anchoredPosition.x, Is.EqualTo(-174f).Within(0.01f));
+            Assert.That(tableRect.anchoredPosition.x, Is.EqualTo(319f).Within(0.01f));
+            Assert.That(inventoryRect.anchoredPosition.x + inventoryRect.rect.width * 0.5f,
+                Is.LessThan(tableRect.anchoredPosition.x - tableRect.rect.width * 0.5f));
+
+            var knowledgeRect = knowledge.GetComponent<RectTransform>();
+            var holdRect = holdButton.GetComponent<RectTransform>();
+            Assert.That(knowledgeRect.anchoredPosition.y,
+                Is.GreaterThan(holdRect.anchoredPosition.y));
+            Assert.That(holdButton.GetComponentsInChildren<Image>(true).Length,
+                Is.GreaterThanOrEqualTo(2), "The hold button needs a separate fill image.");
+
+            studiedTabButton.GetComponent<Button>().onClick.Invoke();
+            Assert.That(researchTab.activeSelf, Is.False);
+            Assert.That(studiedTab.activeSelf, Is.True);
+            Assert.That(Find(root, "StudiedEmptyMessage").activeSelf, Is.True);
+
+            var feedbackRect = feedback.GetComponent<RectTransform>();
+            Assert.That(feedbackRect.anchorMin.y, Is.EqualTo(0f).Within(0.01f));
+            Assert.That(feedbackRect.pivot.y, Is.EqualTo(0f).Within(0.01f));
+
+            InventoryView.SetMode(false, false);
+            InventoryView.SetResearchTableMode(true);
+            Assert.That(researchTab.activeSelf, Is.True,
+                "Reopening the table must reset it to the research tab.");
+            Assert.That(studiedTab.activeSelf, Is.False);
+
+            InventoryView.SetMode(false, false);
+            Object.Destroy(root);
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator ResearchHoldButton_RequiresContinuousPointerHold()
+        {
+            var root = new GameObject("ResearchHoldButtonTest", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(Image), typeof(Button),
+                typeof(ResearchHoldButtonView));
+            var hold = root.GetComponent<ResearchHoldButtonView>();
+            var starts = 0;
+            var cancellations = 0;
+            hold.Initialize(() => starts++, () => cancellations++);
+            var eventSystem = EventSystem.current ?? new GameObject(
+                "ResearchHoldEventSystem", typeof(EventSystem)).GetComponent<EventSystem>();
+            var pointer = new PointerEventData(eventSystem)
+            {
+                button = PointerEventData.InputButton.Left,
+            };
+
+            hold.OnPointerDown(pointer);
+            Assert.That(starts, Is.EqualTo(1));
+            Assert.That(cancellations, Is.Zero);
+            hold.OnPointerExit(pointer);
+            Assert.That(cancellations, Is.EqualTo(1));
+            hold.OnPointerUp(pointer);
+            Assert.That(cancellations, Is.EqualTo(1));
+
+            hold.OnPointerDown(pointer);
+            hold.OnPointerUp(pointer);
+            Assert.That(starts, Is.EqualTo(2));
+            Assert.That(cancellations, Is.EqualTo(2));
+            Object.Destroy(root);
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator ResearchHistory_KeepsSameResourcesSeparatedBySourceNode()
+        {
+            InventoryView.SetMode(false, false);
+            var root = new GameObject("ResearchHistorySourceTest");
+            var view = root.AddComponent<InventoryView>();
+            yield return null;
+
+            var buildName = typeof(InventoryView).GetMethod(
+                "BuildResearchHistoryName", BindingFlags.Instance | BindingFlags.NonPublic);
+            var createCard = typeof(InventoryView).GetMethod(
+                "CreateResearchHistoryCard", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(buildName, Is.Not.Null);
+            Assert.That(createCard, Is.Not.Null);
+
+            var unknown = new DepositKnowledgePresentation(
+                1, 2400, new Vector3(1f, 0f, 2f), ResourceCategory.NonOre, 17);
+            var category = new DepositKnowledgePresentation(
+                2, 2500, new Vector3(3f, 0f, 4f), ResourceCategory.NonOre, 17);
+            Assert.That(buildName.Invoke(view, new object[] { unknown }),
+                Is.EqualTo("Неизвестная залежь"));
+            Assert.That(buildName.Invoke(view, new object[] { category }),
+                Is.EqualTo("нерудное сырьё"));
+
+            var first = new DepositKnowledgePresentation(
+                1001, 5500, new Vector3(-135f, 0f, 266f),
+                ResourceCategory.NonOre, 17);
+            var second = new DepositKnowledgePresentation(
+                2002, 7200, new Vector3(412f, 0f, -80f),
+                ResourceCategory.NonOre, 17);
+            var firstCard = (GameObject)createCard.Invoke(view, new object[] { first });
+            var secondCard = (GameObject)createCard.Invoke(view, new object[] { second });
+
+            Assert.That(firstCard.name, Is.EqualTo("StudiedDeposit_1001"));
+            Assert.That(secondCard.name, Is.EqualTo("StudiedDeposit_2002"));
+            Assert.That(Find(firstCard, "StudiedDepositCoordinates")
+                    .GetComponent<Text>().text,
+                Does.Contain("X -135").And.Contain("Z 266"));
+            Assert.That(Find(secondCard, "StudiedDepositCoordinates")
+                    .GetComponent<Text>().text,
+                Does.Contain("X 412").And.Contain("Z -80"));
+
+            Object.Destroy(root);
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator ResearchResult_IsDetailedInsideTableAndShortAtBottom()
+        {
+            InventoryView.SetMode(false, false);
+            var interactionObject = new GameObject("Research result interaction");
+            var interaction = interactionObject.AddComponent<PlayerResourceInteraction>();
+            var inventory = interactionObject.GetComponent<PlayerInventory>();
+            var root = new GameObject("ResearchResultPresentationTest");
+            var view = root.AddComponent<InventoryView>();
+            yield return null;
+
+            SetField(view, "inventory", inventory);
+            SetField(view, "resourceInteraction", interaction);
+            SetField(interaction, "localResearchResult",
+                "Исследование успешно. Образец израсходован. Изученность: +20%, всего 55%.");
+            SetField(interaction, "localResearchResultTone", ResearchResultTone.Success);
+            SetField(interaction, "lastFeedback", "УСПЕХ");
+            SetField(interaction, "feedbackExpiresAt", Time.unscaledTime + 5f);
+            InventoryView.SetResearchTableMode(true);
+
+            Invoke(view, "RefreshResearchTable");
+            Invoke(view, "RefreshInterfaceFeedback");
+            var result = Find(root, "ResearchResult");
+            var detailedText = GetField<Text>(view, "researchResultText");
+            var bottomFeedback = Find(root, "InterfaceFeedback");
+            var bottomText = GetField<Text>(view, "interfaceFeedbackText");
+
+            Assert.That(result.activeSelf, Is.True);
+            Assert.That(detailedText.text, Does.Contain("Образец израсходован")
+                .And.Contain("+20%"));
+            Assert.That(bottomFeedback.activeSelf, Is.True);
+            Assert.That(bottomText.text, Is.EqualTo("УСПЕХ"));
+            Assert.That(bottomFeedback.GetComponent<RectTransform>().anchorMin.y,
+                Is.EqualTo(0f).Within(0.01f));
+
+            InventoryView.SetMode(false, false);
+            Object.Destroy(root);
+            Object.Destroy(interactionObject);
+            yield return null;
+        }
+
+        [UnityTest]
         public IEnumerator MapNoteInterface_HasPlacementEditorAndEscapeCancellationStates()
         {
             var createdRoot = ResourceMapView.Instance == null;
@@ -300,6 +490,30 @@ namespace Quieter.Tests
             }
 
             return null;
+        }
+
+        private static T GetField<T>(object target, string name)
+        {
+            var field = target.GetType().GetField(
+                name, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, $"Missing field {name}.");
+            return (T)field.GetValue(target);
+        }
+
+        private static void SetField(object target, string name, object value)
+        {
+            var field = target.GetType().GetField(
+                name, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, $"Missing field {name}.");
+            field.SetValue(target, value);
+        }
+
+        private static void Invoke(object target, string name)
+        {
+            var method = target.GetType().GetMethod(
+                name, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null, $"Missing method {name}.");
+            method.Invoke(target, null);
         }
     }
 }

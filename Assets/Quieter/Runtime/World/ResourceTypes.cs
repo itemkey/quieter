@@ -11,6 +11,23 @@ namespace Quieter.World
         LoosePickup = 1,
         StoneOutcrop = 2,
         Deposit = 3,
+        Tree = 4,
+        FiberPlant = 5,
+    }
+
+    public enum ResearchResultTone : byte
+    {
+        None = 0,
+        Success = 1,
+        Failure = 2,
+        Cancelled = 3,
+    }
+
+    public enum ResearchCancelReason : byte
+    {
+        Released = 0,
+        InterfaceClosed = 1,
+        InteractionLost = 2,
     }
 
     public enum ResourceCategory : byte
@@ -29,6 +46,15 @@ namespace Quieter.World
     {
         Base = 0,
         NonOre = 1,
+    }
+
+    public enum HarvestFeedbackCode : byte
+    {
+        Accepted = 0,
+        YieldReceived = 1,
+        WrongTool = 2,
+        ToolBroken = 3,
+        TargetUnavailable = 4,
     }
 
     public enum ResourceVisualArchetype : byte
@@ -106,8 +132,11 @@ namespace Quieter.World
         public bool IsResourceNode => Kind != WorldObjectKind.Decoration;
         public bool IsResearchable => Kind == WorldObjectKind.Deposit;
         public bool IsMineable => Kind == WorldObjectKind.Deposit
-            || Kind == WorldObjectKind.StoneOutcrop;
-        public bool IsLoosePickup => Kind == WorldObjectKind.LoosePickup;
+            || Kind == WorldObjectKind.StoneOutcrop
+            || Kind == WorldObjectKind.Tree;
+        public bool IsLoosePickup => Kind == WorldObjectKind.LoosePickup
+            || Kind == WorldObjectKind.FiberPlant;
+        public bool IsTree => Kind == WorldObjectKind.Tree;
 
         public bool Equals(ResourceNodeDescriptor other) => Kind == other.Kind
             && ResourceItemId == other.ResourceItemId
@@ -141,6 +170,29 @@ namespace Quieter.World
         public string DiscoveredAtUtc;
     }
 
+    public readonly struct DepositKnowledgePresentation
+    {
+        public readonly ulong InstanceId;
+        public readonly ushort StudyBasisPoints;
+        public readonly Vector3 Position;
+        public readonly ResourceCategory Category;
+        public readonly ushort ResourceItemId;
+
+        public DepositKnowledgePresentation(
+            ulong instanceId,
+            ushort studyBasisPoints,
+            Vector3 position,
+            ResourceCategory category,
+            ushort resourceItemId)
+        {
+            InstanceId = instanceId;
+            StudyBasisPoints = studyBasisPoints;
+            Position = position;
+            Category = category;
+            ResourceItemId = resourceItemId;
+        }
+    }
+
     [Serializable]
     public sealed class StoredMapNote
     {
@@ -149,6 +201,21 @@ namespace Quieter.World
         public float X;
         public float Z;
         public string Text;
+        public string CreatedAtUtc;
+        public string UpdatedAtUtc;
+    }
+
+    [Serializable]
+    public sealed class StoredPlacedObject
+    {
+        public int WorldId;
+        public string ObjectId;
+        public ushort ItemId;
+        public float X;
+        public float Y;
+        public float Z;
+        public float Yaw;
+        public StoredInventorySlot Input;
         public string CreatedAtUtc;
         public string UpdatedAtUtc;
     }
@@ -213,10 +280,18 @@ namespace Quieter.World
     {
         public const ushort PickaxeItemId = 5;
         public const ushort UnknownSampleItemId = 6;
-        public const int ResearchBasisPointsPerSecond = 400;
-        public const int MiningResearchBasisPoints = 100;
+        public const ushort PlantFiberItemId = 23;
+        public const ushort ResearchTableItemId = 24;
         public const float InteractionDistance = 3f;
+        public const float PlacementDistance = 10f;
         public const float MiningCooldownSeconds = 0.8f;
+        public const int TreeHitsRequired = 8;
+        public const int TreeMinimumYield = 8;
+        public const int TreeMaximumYield = 12;
+        public const float ResearchDurationSeconds = 6f;
+        public const int ResearchSuccessPercent = 70;
+        public const int ResearchMinimumBasisPoints = 1500;
+        public const int ResearchMaximumBasisPoints = 3500;
 
         public static readonly ushort[] ReserveUnits = { 30, 60, 120, 240, 480 };
         public static readonly byte[] UsefulChancePercent = { 20, 35, 55, 75, 90 };
@@ -226,9 +301,32 @@ namespace Quieter.World
 
         public static int WorkRequired(ResourceNodeDescriptor descriptor)
         {
+            if (descriptor.IsTree) return TreeHitsRequired;
             var hardness = HardnessWork[Mathf.Clamp(descriptor.Hardness - 1, 0, 4)];
             var richness = RichnessWorkMultiplier[(int)descriptor.Richness];
             return Mathf.Max(1, Mathf.CeilToInt(hardness * richness));
+        }
+
+        public static ulong CalculateResearchRoll(long worldSeed, ulong sampleId)
+        {
+            unchecked
+            {
+                var value = (ulong)worldSeed ^ sampleId ^ 0xD6E8FEB86659FD93UL;
+                value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9UL;
+                value = (value ^ (value >> 27)) * 0x94D049BB133111EBUL;
+                return value ^ (value >> 31);
+            }
+        }
+
+        public static bool CanShowSampleKnowledge(
+            ItemStackState sample,
+            int studyBasisPoints)
+        {
+            return !sample.IsEmpty
+                && sample.ItemId == UnknownSampleItemId
+                && sample.SourceNodeId != 0
+                && sample.RevealAtPercent > 0
+                && studyBasisPoints >= sample.RevealAtPercent * 100;
         }
 
         public static string RichnessName(DepositRichness value) => value switch

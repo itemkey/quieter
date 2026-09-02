@@ -68,8 +68,8 @@ namespace Quieter.Editor
                 ResourceFolder + "/WorldObjectCatalog.asset");
             if (player == null || player.GetComponent<PlayerInventory>() == null
                 || player.GetComponent<PlayerResourceInteraction>() == null
-                || itemCatalog == null || !itemCatalog.TryGetItem(22, out _)
-                || !itemCatalog.TryGetRecipe(3, out _)
+                || itemCatalog == null || !itemCatalog.TryGetItem(24, out _)
+                || !itemCatalog.TryGetRecipe(5, out _)
                 || worldCatalog == null || worldCatalog.Resources.Count < 15
                 || AssetDatabase.LoadAssetAtPath<GameObject>(WorldItemPrefabPath) == null)
             {
@@ -213,10 +213,10 @@ namespace Quieter.Editor
                 10, PickupPlacementPriority.InventoryFirst,
                 new Color(0.77f, 0.66f, 0.35f));
             var axe = CreateItemDefinition(
-                "Axe", 4, "Примитивный топор", "Простой каменный топор. Его применение будет добавлено в будущей механике рубки.",
+                "Axe", 4, "Примитивный топор", "Простой каменный топор для рубки деревьев.",
                 1, PickupPlacementPriority.HotbarFirst,
                 new Color(0.31f, 0.42f, 0.48f),
-                ItemKind.Tool, ToolKind.Axe);
+                ItemKind.Tool, ToolKind.Axe, 1, 100);
             var pickaxe = CreateItemDefinition(
                 "PrimitivePickaxe", 5, "Примитивная кирка",
                 "Каменная кирка для добычи породы и разведки месторождений.",
@@ -225,8 +225,8 @@ namespace Quieter.Editor
                 ItemKind.Tool, ToolKind.Pickaxe, 1, 120);
             var hiddenSample = CreateItemDefinition(
                 "UnknownSample", 6, "Неопознанный образец",
-                "Образец породы неизвестного состава. Исследуйте исходное месторождение.",
-                20, PickupPlacementPriority.InventoryFirst,
+                "Одиночный образец породы. Исследуйте его за исследовательским столом.",
+                1, PickupPlacementPriority.InventoryFirst,
                 new Color(0.42f, 0.42f, 0.4f), ItemKind.HiddenSample);
             var iron = CreateItemDefinition(
                 "IronOre", 7, "Железная руда", "Сырьё для железа, инструментов и оружия.",
@@ -278,6 +278,15 @@ namespace Quieter.Editor
                 "Каменная лопата для разработки глиняных залежей.",
                 1, PickupPlacementPriority.HotbarFirst, new Color(0.38f, 0.34f, 0.28f),
                 ItemKind.Tool, ToolKind.Shovel, 1, 100);
+            var plantFiber = CreateItemDefinition(
+                "PlantFiber", 23, "Растительное волокно",
+                "Прочные растительные волокна для изготовления верёвки.",
+                20, PickupPlacementPriority.InventoryFirst, new Color(0.47f, 0.66f, 0.2f));
+            var researchTable = CreateItemDefinition(
+                "PrimitiveResearchTable", 24, "Примитивный исследовательский стол",
+                "Простой деревянный стол для исследования образцов месторождений.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.42f, 0.25f, 0.11f),
+                ItemKind.Placeable);
 
             const string recipePath = ResourceFolder + "/AxeRecipe.asset";
             var recipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(recipePath);
@@ -327,6 +336,33 @@ namespace Quieter.Editor
             }, shovel, 1, CraftingCategory.Tools);
             EditorUtility.SetDirty(shovelRecipe);
 
+            const string ropeRecipePath = ResourceFolder + "/RopeRecipe.asset";
+            var ropeRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(ropeRecipePath);
+            if (ropeRecipe == null)
+            {
+                ropeRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(ropeRecipe, ropeRecipePath);
+            }
+            ropeRecipe.Configure(4, "Верёвка", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = plantFiber, Quantity = 3 },
+            }, rope, 1, CraftingCategory.Materials);
+            EditorUtility.SetDirty(ropeRecipe);
+
+            const string researchTableRecipePath = ResourceFolder + "/PrimitiveResearchTableRecipe.asset";
+            var researchTableRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(researchTableRecipePath);
+            if (researchTableRecipe == null)
+            {
+                researchTableRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(researchTableRecipe, researchTableRecipePath);
+            }
+            researchTableRecipe.Configure(5, "Примитивный исследовательский стол", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 20 },
+                new CraftingRecipe.Ingredient { Item = rope, Quantity = 4 },
+            }, researchTable, 1, CraftingCategory.Structures);
+            EditorUtility.SetDirty(researchTableRecipe);
+
             var catalog = AssetDatabase.LoadAssetAtPath<ItemCatalog>(ItemCatalogPath);
             if (catalog == null)
             {
@@ -342,9 +378,9 @@ namespace Quieter.Editor
                 {
                     stone, wood, rope, axe, pickaxe, hiddenSample, iron, copper, tin,
                     lead, silver, gold, coal, salt, sulfur, cinnabar,
-                    limestone, clay, gypsum, flint, marble, shovel,
+                    limestone, clay, gypsum, flint, marble, shovel, plantFiber, researchTable,
                 },
-                new[] { recipe, pickaxeRecipe, shovelRecipe });
+                new[] { recipe, pickaxeRecipe, shovelRecipe, ropeRecipe, researchTableRecipe });
             EditorUtility.SetDirty(catalog);
         }
 

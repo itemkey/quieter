@@ -111,6 +111,7 @@ namespace Quieter.Core
             worldObject.transform.SetParent(transform, false);
             var worldStreamer = worldObject.AddComponent<WorldStreamer>();
             var resourceWorld = worldObject.AddComponent<ResourceWorldService>();
+            var placedObjects = worldObject.AddComponent<PlacedObjectWorldService>();
 
             IWorldRepository worldRepository;
             IPlayerProfileRepository playerRepository;
@@ -177,6 +178,7 @@ namespace Quieter.Core
                 playerPrefab,
                 worldStreamer,
                 resourceWorld,
+                placedObjects,
                 catalog,
                 clientAuthentication,
                 serverAuthentication,

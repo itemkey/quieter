@@ -7,6 +7,8 @@ namespace Quieter.Inventory
     public enum CraftingCategory : byte
     {
         Tools = 0,
+        Materials = 1,
+        Structures = 2,
     }
 
     public static class CraftingCategoryNames
@@ -14,6 +16,8 @@ namespace Quieter.Inventory
         public static string DisplayName(CraftingCategory category) => category switch
         {
             CraftingCategory.Tools => "Инструменты",
+            CraftingCategory.Materials => "Материалы",
+            CraftingCategory.Structures => "Постройки",
             _ => "Другое",
         };
     }

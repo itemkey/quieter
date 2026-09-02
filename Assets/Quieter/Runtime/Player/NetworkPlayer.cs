@@ -94,6 +94,7 @@ namespace Quieter.Player
         private bool hasServerInput;
         private TextMesh nameLabel;
         private PlayerInventory playerInventory;
+        private PlayerResourceInteraction resourceInteraction;
 
         public ulong SteamId { get; private set; }
         public string DisplayName => displayName.Value.ToString();
@@ -105,6 +106,7 @@ namespace Quieter.Player
             characterController = GetComponent<CharacterController>();
             movementMotor = new PlayerMovementMotor(characterController);
             playerInventory = GetComponent<PlayerInventory>();
+            resourceInteraction = GetComponent<PlayerResourceInteraction>();
             if (presentationRoot != null)
             {
                 presentationLocalPosition = presentationRoot.localPosition;
@@ -207,13 +209,14 @@ namespace Quieter.Player
 
             SampleInput();
             if ((playerInventory == null || !playerInventory.IsInterfaceOpen)
-                && !ResourceMapView.IsOpen)
+                && !ResourceMapView.IsOpen && !ResourceMapView.IsDepositOpen)
             {
                 UpdateLook();
             }
             if (Keyboard.current?.escapeKey.wasPressedThisFrame == true)
             {
-                if (!ResourceMapView.TryClose()
+                if (!(resourceInteraction?.TryCancelPlacement() ?? false)
+                    && !ResourceMapView.TryClose()
                     && (playerInventory == null || !playerInventory.TryCloseInterface()))
                 {
                     LockCursor(Cursor.lockState != CursorLockMode.Locked);
@@ -385,10 +388,12 @@ namespace Quieter.Player
             if (keyboard.sKey.isPressed) movement.y -= 1f;
             if (keyboard.dKey.isPressed) movement.x += 1f;
             if (keyboard.aKey.isPressed) movement.x -= 1f;
-            sampledMovement = Vector2.ClampMagnitude(movement, 1f);
-            sampledSprint = keyboard.leftShiftKey.isPressed;
+            sampledMovement = ResourceMapView.IsOpen
+                ? Vector2.zero
+                : Vector2.ClampMagnitude(movement, 1f);
+            sampledSprint = !ResourceMapView.IsOpen && keyboard.leftShiftKey.isPressed;
             var interfaceOpen = (playerInventory != null && playerInventory.IsInterfaceOpen)
-                || ResourceMapView.IsOpen;
+                || ResourceMapView.IsOpen || ResourceMapView.IsDepositOpen;
             sampledCrouchHeld = !interfaceOpen && keyboard.leftCtrlKey.isPressed;
             if (!interfaceOpen && keyboard.spaceKey.wasPressedThisFrame)
             {

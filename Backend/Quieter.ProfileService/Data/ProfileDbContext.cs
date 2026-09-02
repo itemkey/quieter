@@ -7,9 +7,11 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
     public DbSet<WorldEntity> Worlds => Set<WorldEntity>();
     public DbSet<PlayerEntity> Players => Set<PlayerEntity>();
     public DbSet<PlayerInventorySlotEntity> PlayerInventorySlots => Set<PlayerInventorySlotEntity>();
+    public DbSet<PlayerPendingItemEntity> PlayerPendingItems => Set<PlayerPendingItemEntity>();
     public DbSet<WorldResourceNodeEntity> WorldResourceNodes => Set<WorldResourceNodeEntity>();
     public DbSet<PlayerDepositKnowledgeEntity> PlayerDepositKnowledge => Set<PlayerDepositKnowledgeEntity>();
     public DbSet<PlayerMapNoteEntity> PlayerMapNotes => Set<PlayerMapNoteEntity>();
+    public DbSet<WorldPlacedObjectEntity> WorldPlacedObjects => Set<WorldPlacedObjectEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +34,10 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
                 .WithOne(slot => slot.Player)
                 .HasForeignKey(slot => slot.SteamId)
                 .OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(player => player.PendingItems)
+                .WithOne(item => item.Player)
+                .HasForeignKey(item => item.SteamId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<PlayerInventorySlotEntity>(entity =>
@@ -39,6 +45,30 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.ToTable("player_inventory_slots");
             entity.HasKey(slot => new { slot.SteamId, slot.SlotIndex });
             entity.Property(slot => slot.SteamId).HasPrecision(20, 0).ValueGeneratedNever();
+            entity.Property(slot => slot.SourceNodeId).HasPrecision(20, 0);
+            entity.Property(slot => slot.SampleId).HasPrecision(20, 0);
+        });
+
+        modelBuilder.Entity<PlayerPendingItemEntity>(entity =>
+        {
+            entity.ToTable("player_pending_items");
+            entity.HasKey(item => new { item.SteamId, item.ItemIndex });
+            entity.Property(item => item.SteamId).HasPrecision(20, 0).ValueGeneratedNever();
+            entity.Property(item => item.SourceNodeId).HasPrecision(20, 0);
+            entity.Property(item => item.SampleId).HasPrecision(20, 0);
+        });
+
+        modelBuilder.Entity<WorldPlacedObjectEntity>(entity =>
+        {
+            entity.ToTable("world_placed_objects");
+            entity.HasKey(item => new { item.WorldId, item.ObjectId });
+            entity.Property(item => item.ObjectId).HasPrecision(20, 0);
+            entity.Property(item => item.InputSourceNodeId).HasPrecision(20, 0);
+            entity.Property(item => item.InputSampleId).HasPrecision(20, 0);
+            entity.HasOne(item => item.World)
+                .WithMany()
+                .HasForeignKey(item => item.WorldId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<WorldResourceNodeEntity>(entity =>

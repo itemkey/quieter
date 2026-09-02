@@ -78,6 +78,30 @@ app.MapPut("/internal/worlds/{worldId:int}/resource-nodes", async (
     }
 });
 
+app.MapGet("/internal/worlds/{worldId:int}/placed-objects", (
+    int worldId,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+    store.LoadPlacedObjectsAsync(worldId, cancellationToken));
+
+app.MapPut("/internal/worlds/{worldId:int}/placed-objects", async (
+    int worldId,
+    PlacedObjectListResponse request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SavePlacedObjectsAsync(worldId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
 app.MapPost("/internal/players/login", async (
     PlayerLoginRequest request,
     ProfileStore store,

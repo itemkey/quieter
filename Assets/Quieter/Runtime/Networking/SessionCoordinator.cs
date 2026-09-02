@@ -32,12 +32,28 @@ namespace Quieter.Networking
             public NetworkPlayer Player;
             public PlayerInventory Inventory;
             public PlayerResourceInteraction ResourceInteraction;
+            public Task FinalSaveTask;
+        }
+
+        private sealed class PlayerSaveSnapshot
+        {
+            public ulong SteamId;
+            public long Revision;
+            public Vector3 Position;
+            public List<StoredInventorySlot> Slots;
+            public List<StoredInventorySlot> PendingItems;
+            public byte SelectedHotbarIndex;
+            public Task KnowledgeSaveTask;
         }
 
         private readonly Dictionary<ulong, double> pendingClients = new();
         private readonly Dictionary<ulong, AuthenticatedClient> authenticatedClients = new();
         private readonly Dictionary<ulong, ulong> authenticatingSteamIds = new();
         private readonly HashSet<ulong> authenticatingClients = new();
+        private readonly Dictionary<ulong, SemaphoreSlim> playerSaveGates = new();
+        private readonly Dictionary<ulong, long> playerSaveRevisions = new();
+        private readonly Dictionary<ulong, long> persistedPlayerSaveRevisions = new();
+        private readonly HashSet<Task> pendingFinalSaveTasks = new();
         private readonly CancellationTokenSource lifetime = new();
 
         private NetworkManager networkManager;
@@ -45,6 +61,7 @@ namespace Quieter.Networking
         private GameObject playerPrefab;
         private WorldStreamer worldStreamer;
         private ResourceWorldService resourceWorld;
+        private PlacedObjectWorldService placedObjects;
         private WorldObjectCatalog worldObjectCatalog;
         private ItemCatalog itemCatalog;
         private GameObject worldItemPrefab;
@@ -74,6 +91,7 @@ namespace Quieter.Networking
         public bool IsAuthenticationReady => clientAuthentication?.IsReady ?? false;
         public string AuthenticationStatus => clientAuthentication?.Status ?? serverAuthentication?.Status ?? string.Empty;
         public ResourceWorldService ResourceWorld => resourceWorld;
+        public PlacedObjectWorldService PlacedObjects => placedObjects;
 
         public void Configure(
             NetworkManager manager,
@@ -81,6 +99,7 @@ namespace Quieter.Networking
             GameObject networkPlayerPrefab,
             WorldStreamer streamer,
             ResourceWorldService resources,
+            PlacedObjectWorldService placedObjectService,
             WorldObjectCatalog catalog,
             IClientAuthenticationProvider clientAuth,
             IServerAuthenticationProvider serverAuth,
@@ -94,6 +113,7 @@ namespace Quieter.Networking
             playerPrefab = networkPlayerPrefab;
             worldStreamer = streamer;
             resourceWorld = resources;
+            placedObjects = placedObjectService;
             worldObjectCatalog = catalog;
             clientAuthentication = clientAuth;
             serverAuthentication = serverAuth;
@@ -111,6 +131,7 @@ namespace Quieter.Networking
             networkManager.OnServerStarted += OnServerStarted;
             Application.wantsToQuit += OnWantsToQuit;
             resourceWorld.Configure(networkManager, worldStreamer);
+            placedObjects.Configure(networkManager);
         }
 
         public async Task StartServerAsync(ushort port)
@@ -124,6 +145,7 @@ namespace Quieter.Networking
             }
 
             await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
+            await placedObjects.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, false);
             transport.SetConnectionData("0.0.0.0", port, "0.0.0.0");
             if (!TransportSecurityConfigurator.ConfigureServerFromEnvironment(transport))
@@ -225,6 +247,7 @@ namespace Quieter.Networking
             authenticationSent = false;
             worldDefinition = await worldRepository.GetOrCreateWorldAsync(lifetime.Token);
             await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
+            await placedObjects.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, true);
             transport.SetConnectionData(address, port, "0.0.0.0");
             SetConnectionHello();
@@ -514,10 +537,16 @@ namespace Quieter.Networking
             if (authenticatedClients.Remove(clientId, out var authenticated))
             {
                 serverAuthentication?.EndSession(authenticated.SteamId);
+                var playerSave = authenticated.FinalSaveTask;
                 if (authenticated.Player != null)
                 {
-                    _ = SavePlayerStateAsync(authenticated, lifetime.Token, true);
+                    var snapshot = CapturePlayerSaveSnapshot(
+                        authenticated, lifetime.Token, true);
+                    playerSave = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
+                    authenticated.FinalSaveTask = playerSave;
                 }
+                playerSave ??= Task.CompletedTask;
+                TrackFinalSave(CompleteDisconnectedSaveAsync(playerSave, lifetime.Token));
             }
 
             if (networkManager.IsClient && clientId == networkManager.LocalClientId)
@@ -648,7 +677,11 @@ namespace Quieter.Networking
                 {
                     throw new InvalidOperationException("Network player prefab has no PlayerInventory.");
                 }
-                playerInventory.InitializeServer(profile.InventorySlots, profile.SelectedHotbarIndex);
+                playerInventory.InitializeServer(
+                    profile.InventorySlots,
+                    profile.PendingItems,
+                    profile.SelectedHotbarIndex,
+                    authentication.SteamId);
                 var resourceInteraction = instance.GetComponent<PlayerResourceInteraction>();
                 if (resourceInteraction == null)
                 {
@@ -677,6 +710,7 @@ namespace Quieter.Networking
                 };
                 SendWorldBootstrap(clientId);
                 resourceWorld.SendSnapshot(clientId);
+                placedObjects.SendSnapshot(clientId);
             }
             catch (Exception exception)
             {
@@ -728,6 +762,7 @@ namespace Quieter.Networking
 
             worldDefinition = definition;
             resourceWorld.InitializeClient(definition);
+            placedObjects.InitializeClient(definition);
             worldStreamer.Initialize(
                 definition,
                 worldObjectCatalog,
@@ -827,22 +862,159 @@ namespace Quieter.Networking
             bool normalizeTemporaryStorage)
         {
             if (client?.Player == null) return;
-            var position = client.Player.transform.position;
+            var gate = GetPlayerSaveGate(client.SteamId);
+            var acquired = false;
+            PlayerSaveSnapshot snapshot = null;
+            try
+            {
+                await gate.WaitAsync(cancellationToken);
+                acquired = true;
+                snapshot = CapturePlayerSaveSnapshot(
+                    client, cancellationToken, normalizeTemporaryStorage);
+                if (snapshot != null)
+                {
+                    await PersistPlayerSnapshotAsync(snapshot, cancellationToken);
+                }
+            }
+            finally
+            {
+                if (acquired) gate.Release();
+                if (snapshot?.KnowledgeSaveTask != null)
+                {
+                    await snapshot.KnowledgeSaveTask;
+                }
+            }
+        }
+
+        private async Task SavePlayerSnapshotAsync(
+            PlayerSaveSnapshot snapshot,
+            CancellationToken cancellationToken)
+        {
+            if (snapshot == null) return;
+            var gate = GetPlayerSaveGate(snapshot.SteamId);
+            var acquired = false;
+            try
+            {
+                await gate.WaitAsync(cancellationToken);
+                acquired = true;
+                await PersistPlayerSnapshotAsync(snapshot, cancellationToken);
+            }
+            finally
+            {
+                if (acquired) gate.Release();
+                if (snapshot.KnowledgeSaveTask != null)
+                {
+                    await snapshot.KnowledgeSaveTask;
+                }
+            }
+        }
+
+        private async Task PersistPlayerSnapshotAsync(
+            PlayerSaveSnapshot snapshot,
+            CancellationToken cancellationToken)
+        {
+            if (persistedPlayerSaveRevisions.TryGetValue(
+                    snapshot.SteamId, out var persistedRevision)
+                && persistedRevision >= snapshot.Revision)
+            {
+                return;
+            }
+            await playerRepository.SavePositionAsync(
+                snapshot.SteamId, snapshot.Position, cancellationToken);
+            await playerRepository.SaveInventoryAsync(
+                snapshot.SteamId,
+                snapshot.Slots,
+                snapshot.PendingItems,
+                snapshot.SelectedHotbarIndex,
+                cancellationToken);
+            persistedPlayerSaveRevisions[snapshot.SteamId] = snapshot.Revision;
+        }
+
+        private PlayerSaveSnapshot CapturePlayerSaveSnapshot(
+            AuthenticatedClient client,
+            CancellationToken cancellationToken,
+            bool normalizeTemporaryStorage)
+        {
+            if (client?.Player == null) return null;
             var slots = client.Inventory == null
                 ? new List<StoredInventorySlot>()
                 : normalizeTemporaryStorage
                     ? client.Inventory.PrepareAndCreateStoredSlots()
                     : client.Inventory.CreateStoredSlotsSnapshot();
             var selected = client.Inventory?.GetServerSelectedHotbarIndex() ?? (byte)0;
-            await playerRepository.SavePositionAsync(client.SteamId, position, cancellationToken);
-            await playerRepository.SaveInventoryAsync(
-                client.SteamId,
-                slots,
-                selected,
-                cancellationToken);
-            if (client.ResourceInteraction != null)
+            var pendingItems = client.Inventory?.CreateStoredPendingItemsSnapshot()
+                ?? new List<StoredInventorySlot>();
+            playerSaveRevisions.TryGetValue(client.SteamId, out var revision);
+            revision++;
+            playerSaveRevisions[client.SteamId] = revision;
+            return new PlayerSaveSnapshot
             {
-                await client.ResourceInteraction.FlushKnowledgeAsync(cancellationToken);
+                SteamId = client.SteamId,
+                Revision = revision,
+                Position = client.Player.transform.position,
+                Slots = slots,
+                PendingItems = pendingItems,
+                SelectedHotbarIndex = selected,
+                KnowledgeSaveTask = client.ResourceInteraction != null
+                    ? client.ResourceInteraction.FlushKnowledgeAsync(cancellationToken)
+                    : Task.CompletedTask,
+            };
+        }
+
+        private SemaphoreSlim GetPlayerSaveGate(ulong steamId)
+        {
+            if (playerSaveGates.TryGetValue(steamId, out var gate)) return gate;
+            gate = new SemaphoreSlim(1, 1);
+            playerSaveGates[steamId] = gate;
+            return gate;
+        }
+
+        private async Task CompleteDisconnectedSaveAsync(
+            Task playerSave,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await playerSave;
+            }
+            finally
+            {
+                try
+                {
+                    if (resourceWorld != null)
+                    {
+                        await resourceWorld.FlushAsync(cancellationToken);
+                    }
+                }
+                finally
+                {
+                    if (placedObjects != null)
+                    {
+                        await placedObjects.FlushAsync(cancellationToken);
+                    }
+                }
+            }
+        }
+
+        private void TrackFinalSave(Task task)
+        {
+            if (task == null || !pendingFinalSaveTasks.Add(task)) return;
+            _ = ObserveFinalSaveAsync(task);
+        }
+
+        private async Task ObserveFinalSaveAsync(Task task)
+        {
+            try
+            {
+                await task;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Final disconnect save did not finish: {exception.Message}");
+            }
+            finally
+            {
+                pendingFinalSaveTasks.Remove(task);
             }
         }
 
@@ -874,7 +1046,9 @@ namespace Quieter.Networking
                 }
 
                 player.ServerDespawning -= OnServerPlayerDespawning;
-                _ = SavePlayerStateAsync(client, lifetime.Token, true);
+                var snapshot = CapturePlayerSaveSnapshot(client, lifetime.Token, true);
+                client.FinalSaveTask = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
+                TrackFinalSave(client.FinalSaveTask);
                 client.Player = null;
                 break;
             }
@@ -898,20 +1072,61 @@ namespace Quieter.Networking
 
         private async Task SaveBeforeQuitAsync()
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
+            foreach (var client in clients)
+            {
+                try
+                {
+                    if (client.Player != null)
+                    {
+                        await SavePlayerStateAsync(client, CancellationToken.None, true);
+                    }
+                    else if (client.FinalSaveTask != null)
+                    {
+                        await client.FinalSaveTask;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning(
+                        $"Final player save for {client.SteamId} did not finish: {exception.Message}");
+                }
+            }
+
+            var pendingFinalSaves = new List<Task>(pendingFinalSaveTasks);
+            if (pendingFinalSaves.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(pendingFinalSaves);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning(
+                        $"A disconnected player's final save did not finish: {exception.Message}");
+                }
+            }
             try
             {
-                var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
-                foreach (var client in clients)
+                if (resourceWorld != null)
                 {
-                    await SavePlayerStateAsync(client, timeout.Token, true);
+                    await resourceWorld.FlushAsync(CancellationToken.None);
                 }
-                await resourceWorld.FlushAsync(timeout.Token);
             }
             catch (Exception exception)
             {
-                Debug.LogWarning($"Final position save did not finish: {exception.Message}");
+                Debug.LogWarning($"Final resource-node save did not finish: {exception.Message}");
+            }
+            try
+            {
+                if (placedObjects != null)
+                {
+                    await placedObjects.FlushAsync(CancellationToken.None);
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Final placed-object save did not finish: {exception.Message}");
             }
 
             shutdownSaveCompleted = true;

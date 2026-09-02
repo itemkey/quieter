@@ -118,7 +118,7 @@ namespace Quieter.Tests
         }
 
         [Test]
-        public void CentralSafeArea_IsFlattenedAndContainsOnlyStarterForage()
+        public void CentralSafeArea_IsFlattenedAndContainsOnlyStarterResources()
         {
             var definition = WorldDefinition.CreateDefault(424242);
             var center = generator.Generate(definition, new ChunkCoord(16, 16));
@@ -128,7 +128,9 @@ namespace Quieter.Tests
             Assert.That(
                 center.Objects.All(item => item.Position.x * item.Position.x
                     + item.Position.z * item.Position.z >= 38f * 38f
-                    || item.Resource.Kind == WorldObjectKind.LoosePickup),
+                    || item.Resource.Kind == WorldObjectKind.LoosePickup
+                    || item.Resource.Kind == WorldObjectKind.Tree
+                    || item.Resource.Kind == WorldObjectKind.FiberPlant),
                 Is.True);
         }
 

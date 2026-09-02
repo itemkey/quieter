@@ -46,6 +46,7 @@ namespace Quieter.Persistence
             public string createdAtUtc;
             public string lastSeenAtUtc;
             public InventorySlotResponse[] inventorySlots;
+            public InventorySlotResponse[] pendingItems;
             public byte selectedHotbarIndex;
             public DepositKnowledgeResponse[] depositKnowledge;
             public MapNoteResponse[] mapNotes;
@@ -62,6 +63,7 @@ namespace Quieter.Persistence
             public ushort hiddenItemId;
             public string sourceNodeId;
             public byte revealAtPercent;
+            public string sampleId;
         }
 
         [Serializable]
@@ -69,6 +71,7 @@ namespace Quieter.Persistence
         {
             public byte selectedHotbarIndex;
             public InventorySlotResponse[] slots;
+            public InventorySlotResponse[] pendingItems;
         }
 
         [Serializable]
@@ -91,6 +94,26 @@ namespace Quieter.Persistence
         private sealed class ResourceNodeListResponse
         {
             public ResourceNodeResponse[] nodes;
+        }
+
+        [Serializable]
+        private sealed class PlacedObjectResponse
+        {
+            public string objectId;
+            public ushort itemId;
+            public float x;
+            public float y;
+            public float z;
+            public float yaw;
+            public InventorySlotResponse input;
+            public string createdAtUtc;
+            public string updatedAtUtc;
+        }
+
+        [Serializable]
+        private sealed class PlacedObjectListResponse
+        {
+            public PlacedObjectResponse[] objects;
         }
 
         [Serializable]
@@ -184,6 +207,7 @@ namespace Quieter.Persistence
                 CreatedAtUtc = ParseDate(response.createdAtUtc),
                 LastSeenAtUtc = ParseDate(response.lastSeenAtUtc),
                 InventorySlots = ToStoredSlots(response.inventorySlots),
+                PendingItems = ToStoredSlots(response.pendingItems),
                 SelectedHotbarIndex = response.selectedHotbarIndex,
                 DepositKnowledge = ToStoredKnowledge(response.depositKnowledge),
                 MapNotes = ToStoredMapNotes(response.mapNotes),
@@ -240,6 +264,68 @@ namespace Quieter.Persistence
             await SendAsync(request, cancellationToken);
         }
 
+        public async Task<IReadOnlyList<StoredPlacedObject>> LoadPlacedObjectsAsync(
+            int worldId,
+            CancellationToken cancellationToken = default)
+        {
+            using var request = UnityWebRequest.Get(
+                $"{baseUrl}/internal/worlds/{worldId}/placed-objects");
+            var responseText = await SendAsync(request, cancellationToken);
+            var response = JsonUtility.FromJson<PlacedObjectListResponse>(responseText);
+            var result = new List<StoredPlacedObject>();
+            if (response?.objects == null) return result;
+            foreach (var entry in response.objects)
+            {
+                if (entry == null) continue;
+                result.Add(new StoredPlacedObject
+                {
+                    WorldId = worldId,
+                    ObjectId = entry.objectId,
+                    ItemId = entry.itemId,
+                    X = entry.x,
+                    Y = entry.y,
+                    Z = entry.z,
+                    Yaw = entry.yaw,
+                    Input = ToStoredSlot(entry.input),
+                    CreatedAtUtc = entry.createdAtUtc,
+                    UpdatedAtUtc = entry.updatedAtUtc,
+                });
+            }
+            return result;
+        }
+
+        public async Task SavePlacedObjectsAsync(
+            int worldId,
+            IReadOnlyList<StoredPlacedObject> objects,
+            CancellationToken cancellationToken = default)
+        {
+            var entries = new List<PlacedObjectResponse>();
+            if (objects != null)
+            {
+                foreach (var entry in objects)
+                {
+                    if (entry == null) continue;
+                    entries.Add(new PlacedObjectResponse
+                    {
+                        objectId = entry.ObjectId,
+                        itemId = entry.ItemId,
+                        x = entry.X,
+                        y = entry.Y,
+                        z = entry.Z,
+                        yaw = entry.Yaw,
+                        input = ToSlotResponse(entry.Input),
+                        createdAtUtc = entry.CreatedAtUtc,
+                        updatedAtUtc = entry.UpdatedAtUtc,
+                    });
+                }
+            }
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/worlds/{worldId}/placed-objects",
+                UnityWebRequest.kHttpVerbPUT,
+                JsonUtility.ToJson(new PlacedObjectListResponse { objects = entries.ToArray() }));
+            await SendAsync(request, cancellationToken);
+        }
+
         public async Task SavePositionAsync(
             ulong steamId,
             Vector3 position,
@@ -256,6 +342,7 @@ namespace Quieter.Persistence
         public async Task SaveInventoryAsync(
             ulong steamId,
             IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
             byte selectedHotbarIndex,
             CancellationToken cancellationToken = default)
         {
@@ -275,6 +362,7 @@ namespace Quieter.Persistence
                         hiddenItemId = slot.HiddenItemId,
                         sourceNodeId = slot.SourceNodeId,
                         revealAtPercent = slot.RevealAtPercent,
+                        sampleId = slot.SampleId,
                     });
                 }
             }
@@ -283,6 +371,7 @@ namespace Quieter.Persistence
             {
                 selectedHotbarIndex = selectedHotbarIndex,
                 slots = payloadSlots.ToArray(),
+                pendingItems = ToSlotResponses(pendingItems),
             };
             using var request = CreateJsonRequest(
                 $"{baseUrl}/internal/players/{steamId}/inventory",
@@ -367,11 +456,55 @@ namespace Quieter.Persistence
                     HiddenItemId = slot.hiddenItemId,
                     SourceNodeId = slot.sourceNodeId,
                     RevealAtPercent = slot.revealAtPercent,
+                    SampleId = slot.sampleId,
                 });
             }
 
             return result;
         }
+
+        private static StoredInventorySlot ToStoredSlot(InventorySlotResponse slot) => slot == null
+            ? null
+            : new StoredInventorySlot
+            {
+                SlotIndex = slot.slotIndex,
+                ItemId = slot.itemId,
+                Quantity = slot.quantity,
+                Condition = slot.condition,
+                Quality = slot.quality,
+                HiddenItemId = slot.hiddenItemId,
+                SourceNodeId = slot.sourceNodeId,
+                RevealAtPercent = slot.revealAtPercent,
+                SampleId = slot.sampleId,
+            };
+
+        private static InventorySlotResponse[] ToSlotResponses(
+            IReadOnlyList<StoredInventorySlot> slots)
+        {
+            if (slots == null) return Array.Empty<InventorySlotResponse>();
+            var result = new List<InventorySlotResponse>(slots.Count);
+            foreach (var slot in slots)
+            {
+                var converted = ToSlotResponse(slot);
+                if (converted != null) result.Add(converted);
+            }
+            return result.ToArray();
+        }
+
+        private static InventorySlotResponse ToSlotResponse(StoredInventorySlot slot) => slot == null
+            ? null
+            : new InventorySlotResponse
+            {
+                slotIndex = slot.SlotIndex,
+                itemId = slot.ItemId,
+                quantity = slot.Quantity,
+                condition = slot.Condition,
+                quality = slot.Quality,
+                hiddenItemId = slot.HiddenItemId,
+                sourceNodeId = slot.SourceNodeId,
+                revealAtPercent = slot.RevealAtPercent,
+                sampleId = slot.SampleId,
+            };
 
         private static List<StoredDepositKnowledge> ToStoredKnowledge(
             DepositKnowledgeResponse[] knowledge)

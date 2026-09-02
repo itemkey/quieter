@@ -17,11 +17,13 @@ namespace Quieter.UI
         private Canvas canvas;
         private GameObject hudRoot;
         private GameObject mapRoot;
+        private GameObject depositInfoRoot;
         private RectTransform mapRect;
         private RectTransform markerRoot;
         private RectTransform playerMarker;
         private Text promptText;
         private Text depositText;
+        private Text depositInfoText;
         private Text durabilityText;
         private Text feedbackText;
         private Text mapDetailsText;
@@ -44,13 +46,27 @@ namespace Quieter.UI
         private DeterministicChunkGenerator mapGenerator;
         private bool mapBuilt;
         private bool markersDirty = true;
+        private float depositOpenedAt;
 
         public static ResourceMapView Instance { get; private set; }
         public static bool IsOpen => Instance != null && Instance.mapRoot != null
             && Instance.mapRoot.activeSelf;
+        public static bool IsDepositOpen => Instance != null && Instance.depositInfoRoot != null
+            && Instance.depositInfoRoot.activeSelf;
+
+        public static void OpenDeposit(ResourceNodeView node, ushort studyBasisPoints)
+        {
+            if (Instance == null || node == null) return;
+            Instance.ShowDeposit(node, studyBasisPoints);
+        }
 
         public static bool TryClose()
         {
+            if (IsDepositOpen)
+            {
+                Instance.SetDepositOpen(false);
+                return true;
+            }
             if (!IsOpen) return false;
             if (Instance.CancelMapTransientState()) return true;
             Instance.SetMapOpen(false);
@@ -77,6 +93,11 @@ namespace Quieter.UI
             if (Keyboard.current?.mKey.wasPressedThisFrame == true)
             {
                 SetMapOpen(!IsOpen);
+            }
+            if (IsDepositOpen && Time.unscaledTime - depositOpenedAt > 0.15f
+                && Keyboard.current?.eKey.wasPressedThisFrame == true)
+            {
+                SetDepositOpen(false);
             }
             RefreshHud();
             if (IsOpen)
@@ -151,6 +172,41 @@ namespace Quieter.UI
             feedbackText.color = new Color(1f, 0.88f, 0.42f);
 
             BuildMapInterface(canvasObject.transform);
+            BuildDepositInfoInterface(canvasObject.transform);
+        }
+
+        private void BuildDepositInfoInterface(Transform parent)
+        {
+            depositInfoRoot = new GameObject("DepositInformation", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(Image));
+            depositInfoRoot.transform.SetParent(parent, false);
+            InventoryView.Stretch((RectTransform)depositInfoRoot.transform);
+            depositInfoRoot.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.36f);
+
+            var card = new GameObject("Card", typeof(RectTransform), typeof(CanvasRenderer),
+                typeof(Image));
+            card.transform.SetParent(depositInfoRoot.transform, false);
+            card.GetComponent<Image>().color = new Color(0.045f, 0.055f, 0.065f, 0.96f);
+            SetAnchored((RectTransform)card.transform, new Vector2(0.5f, 0.5f),
+                Vector2.zero, new Vector2(560f, 560f));
+
+            var title = InventoryView.CreateText(card.transform, "СВЕДЕНИЯ О МЕСТОРОЖДЕНИИ", 22,
+                FontStyle.Bold, TextAnchor.MiddleCenter);
+            SetAnchored(title.rectTransform, new Vector2(0.5f, 1f),
+                new Vector2(0f, -38f), new Vector2(500f, 48f));
+
+            depositInfoText = InventoryView.CreateText(card.transform, string.Empty, 18,
+                FontStyle.Normal, TextAnchor.UpperLeft);
+            depositInfoText.supportRichText = false;
+            SetAnchored(depositInfoText.rectTransform, new Vector2(0.5f, 0.5f),
+                new Vector2(0f, -5f), new Vector2(480f, 390f));
+
+            var close = CreateMapButton(card.transform, "ЗАКРЫТЬ  [E / ESC]",
+                new Color(0.18f, 0.38f, 0.32f));
+            SetAnchored(close.GetComponent<RectTransform>(), new Vector2(0.5f, 0f),
+                new Vector2(0f, 42f), new Vector2(360f, 48f));
+            close.onClick.AddListener(() => SetDepositOpen(false));
+            depositInfoRoot.SetActive(false);
         }
 
         private void BuildMapInterface(Transform parent)
@@ -308,9 +364,9 @@ namespace Quieter.UI
 
         private void RefreshHud()
         {
-            if (inventory == null || interaction == null || IsOpen)
+            if (inventory == null || interaction == null || IsOpen || IsDepositOpen)
             {
-                if (IsOpen)
+                if (IsOpen || IsDepositOpen)
                 {
                     promptText.text = string.Empty;
                     depositText.text = string.Empty;
@@ -320,18 +376,14 @@ namespace Quieter.UI
                 return;
             }
             var node = interaction.FocusedNode;
-            promptText.text = BuildPrompt(node);
-            depositText.text = node != null && node.Descriptor.IsResearchable
-                ? BuildDepositDetails(
-                    new WorldObjectSpawn(
-                        node.InstanceId,
-                        default,
-                        node.transform.position,
-                        node.transform.rotation,
-                        node.transform.localScale,
-                        node.Descriptor),
-                    interaction.GetStudyBasisPoints(node.InstanceId))
-                : string.Empty;
+            promptText.text = interaction.IsPlacementMode
+                ? interaction.PlacementHasSurface
+                    ? "[ЛКМ] Установить стол    [Колесо] Повернуть    [ПКМ/Escape] Отмена"
+                    : "Нет подходящей поверхности    [ПКМ/Escape] Отмена"
+                : interaction.FocusedTable != null
+                    ? "[E] Открыть исследовательский стол"
+                    : BuildPrompt(node);
+            depositText.text = string.Empty;
             var active = inventory.GetReplicatedSlot(new InventorySlotReference(
                 InventorySlotArea.Inventory,
                 InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
@@ -364,7 +416,11 @@ namespace Quieter.UI
             }
             if (node.Descriptor.IsResearchable)
             {
-                return "[ЛКМ] Добывать    [E] Удерживать: исследовать";
+                return "[ЛКМ] Добывать    [E] Открыть сведения";
+            }
+            if (node.Descriptor.IsTree)
+            {
+                return "[ЛКМ] Рубить дерево";
             }
             return string.Empty;
         }
@@ -374,6 +430,7 @@ namespace Quieter.UI
             if (mapRoot == null || interaction == null) return;
             if (open)
             {
+                SetDepositOpen(false);
                 inventory?.SetInterfaceOpen(false);
             }
             mapRoot.SetActive(open);
@@ -388,6 +445,34 @@ namespace Quieter.UI
             {
                 ResetMapNoteUi();
             }
+        }
+
+        private void ShowDeposit(ResourceNodeView node, ushort studyBasisPoints)
+        {
+            if (node == null || depositInfoText == null) return;
+            var spawn = new WorldObjectSpawn(
+                node.InstanceId,
+                default,
+                node.transform.position,
+                node.transform.rotation,
+                node.transform.localScale,
+                node.Descriptor);
+            depositInfoText.text = BuildDepositDetails(spawn, studyBasisPoints);
+            SetDepositOpen(true);
+        }
+
+        private void SetDepositOpen(bool open)
+        {
+            if (depositInfoRoot == null) return;
+            if (open)
+            {
+                if (IsOpen) SetMapOpen(false);
+                inventory?.SetInterfaceOpen(false);
+                depositOpenedAt = Time.unscaledTime;
+            }
+            depositInfoRoot.SetActive(open);
+            if (hudRoot != null) hudRoot.SetActive(!open && !IsOpen);
+            player?.SetInventoryInterfaceOpen(open);
         }
 
         private void BuildMapContent()

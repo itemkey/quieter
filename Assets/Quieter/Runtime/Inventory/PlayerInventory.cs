@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections;
 using Quieter.Player;
 using Quieter.UI;
+using Quieter.World;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -33,6 +34,7 @@ namespace Quieter.Inventory
             NetworkVariableReadPermission.Everyone,
             NetworkVariableWritePermission.Server);
         private readonly Dictionary<uint, Action<bool>> pendingMoveCallbacks = new();
+        private readonly List<ItemStackState> serverPendingItems = new();
 
         private ItemCatalog catalog;
         private GameObject worldItemPrefab;
@@ -40,6 +42,7 @@ namespace Quieter.Inventory
         private NetworkPlayer player;
         private GameObject heldVisual;
         private NetworkWorldItem focusedPickup;
+        private PlayerResourceInteraction resourceInteraction;
         private bool interfaceOpen;
         private uint nextMoveRequestId;
         private Coroutine toolSwingRoutine;
@@ -67,12 +70,18 @@ namespace Quieter.Inventory
                 return reference.Index < workbench.Count ? workbench[reference.Index] : default;
             }
 
+            if (reference.Area == InventorySlotArea.ResearchTable)
+            {
+                return resourceInteraction?.CurrentResearchTableInput ?? default;
+            }
+
             return default;
         }
 
         private void Awake()
         {
             player = GetComponent<NetworkPlayer>();
+            resourceInteraction = GetComponent<PlayerResourceInteraction>();
             catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
             worldItemPrefab = Resources.Load<GameObject>("Quieter/NetworkWorldItem");
         }
@@ -114,7 +123,7 @@ namespace Quieter.Inventory
             var keyboard = Keyboard.current;
             if (keyboard == null) return;
 
-            if (ResourceMapView.IsOpen) return;
+            if (ResourceMapView.IsOpen || ResourceMapView.IsDepositOpen) return;
 
             if (keyboard.tabKey.wasPressedThisFrame)
             {
@@ -139,7 +148,9 @@ namespace Quieter.Inventory
                 }
             }
 
-            var wheel = Mouse.current?.scroll.ReadValue().y ?? 0f;
+            var wheel = resourceInteraction != null && resourceInteraction.IsPlacementMode
+                ? 0f
+                : Mouse.current?.scroll.ReadValue().y ?? 0f;
             if (Mathf.Abs(wheel) > 0.01f)
             {
                 var direction = wheel > 0f ? -1 : 1;
@@ -156,11 +167,25 @@ namespace Quieter.Inventory
 
         public void InitializeServer(
             IEnumerable<StoredInventorySlot> storedSlots,
-            byte selectedIndex)
+            IEnumerable<StoredInventorySlot> storedPendingItems,
+            byte selectedIndex,
+            ulong sampleOwnerSalt)
         {
             if (!IsServer || catalog == null) return;
             model = new InventoryModel(catalog);
-            model.Load(storedSlots, selectedIndex);
+            serverPendingItems.Clear();
+            serverPendingItems.AddRange(model.Load(storedSlots, selectedIndex, sampleOwnerSalt));
+            if (storedPendingItems != null)
+            {
+                var ordinal = 0;
+                foreach (var stored in storedPendingItems)
+                {
+                    if (TryRestorePendingStack(stored, sampleOwnerSalt, ordinal++, out var stack))
+                    {
+                        serverPendingItems.Add(stack);
+                    }
+                }
+            }
             SynchronizeAll();
         }
 
@@ -174,6 +199,29 @@ namespace Quieter.Inventory
             }
             SynchronizeAll();
             return model.CreateStoredSlots();
+        }
+
+        public List<StoredInventorySlot> CreateStoredPendingItemsSnapshot()
+        {
+            var result = new List<StoredInventorySlot>(serverPendingItems.Count);
+            for (var index = 0; index < serverPendingItems.Count; index++)
+            {
+                var stack = serverPendingItems[index];
+                if (stack.IsEmpty) continue;
+                result.Add(new StoredInventorySlot
+                {
+                    SlotIndex = (byte)Math.Min(index, byte.MaxValue),
+                    ItemId = stack.ItemId,
+                    Quantity = stack.Quantity,
+                    Condition = stack.Condition,
+                    Quality = (byte)stack.Quality,
+                    HiddenItemId = stack.HiddenItemId,
+                    SourceNodeId = stack.SourceNodeId == 0 ? null : stack.SourceNodeId.ToString(),
+                    RevealAtPercent = stack.RevealAtPercent,
+                    SampleId = stack.SampleId == 0 ? null : stack.SampleId.ToString(),
+                });
+            }
+            return result;
         }
 
         public List<StoredInventorySlot> CreateStoredSlotsSnapshot()
@@ -202,6 +250,47 @@ namespace Quieter.Inventory
             return true;
         }
 
+        public ItemStackState GetServerSlot(InventorySlotReference reference) =>
+            IsServer && model != null ? model.GetSlot(reference) : default;
+
+        public bool TryRemoveStackServer(
+            InventorySlotReference source,
+            ushort expectedItemId,
+            int quantity,
+            out ItemStackState removed)
+        {
+            removed = default;
+            if (!IsServer || model == null
+                || !model.RemoveStack(source, expectedItemId, quantity, out removed))
+            {
+                return false;
+            }
+            SynchronizeAll();
+            ServerInventoryChanged?.Invoke();
+            return true;
+        }
+
+        public bool TryPlaceStackServer(InventorySlotReference destination, ItemStackState stack)
+        {
+            if (!IsServer || model == null || stack.IsEmpty
+                || destination.Area != InventorySlotArea.Inventory
+                || !model.GetSlot(destination).IsEmpty || !model.SetSlot(destination, stack))
+            {
+                return false;
+            }
+            SynchronizeAll();
+            ServerInventoryChanged?.Invoke();
+            return true;
+        }
+
+        public bool TryConsumeActiveItemServer(ushort expectedItemId)
+        {
+            var slot = new InventorySlotReference(
+                InventorySlotArea.Inventory,
+                InventoryLayout.FirstHotbarSlot + GetServerSelectedHotbarIndex());
+            return TryRemoveStackServer(slot, expectedItemId, 1, out _);
+        }
+
         public int InsertStackServer(ItemStackState stack)
         {
             if (!IsServer || model == null || stack.IsEmpty || catalog == null
@@ -222,6 +311,21 @@ namespace Quieter.Inventory
         {
             if (!IsServer || model == null) return 0;
             var revealed = model.RevealSamples(sourceNodeId, studyPercent);
+            if (studyPercent >= 100)
+            {
+                for (var index = 0; index < serverPendingItems.Count; index++)
+                {
+                    var stack = serverPendingItems[index];
+                    if (stack.ItemId != ResourceBalance.UnknownSampleItemId
+                        || stack.SourceNodeId != sourceNodeId || stack.HiddenItemId == 0)
+                    {
+                        continue;
+                    }
+                    serverPendingItems[index] = new ItemStackState(
+                        stack.HiddenItemId, stack.Quantity, 0, stack.Quality);
+                    revealed += stack.Quantity;
+                }
+            }
             if (revealed > 0)
             {
                 SynchronizeAll();
@@ -281,6 +385,10 @@ namespace Quieter.Inventory
         public void SetInterfaceOpen(bool open, bool showWorkbench = false)
         {
             if (!IsOwner) return;
+            if (resourceInteraction != null && resourceInteraction.CurrentResearchTableId != 0)
+            {
+                resourceInteraction.OnLocalInventoryClosed();
+            }
             interfaceOpen = open;
             InventoryView.SetMode(open, showWorkbench);
             player.SetInventoryInterfaceOpen(open);
@@ -288,6 +396,15 @@ namespace Quieter.Inventory
             {
                 CloseInterfaceServerRpc();
             }
+        }
+
+        public void SetResearchTableInterfaceOpen(bool open)
+        {
+            if (!IsOwner) return;
+            interfaceOpen = open;
+            InventoryView.SetResearchTableMode(open);
+            player.SetInventoryInterfaceOpen(open);
+            if (!open) CloseInterfaceServerRpc();
         }
 
         public bool TryCloseInterface()
@@ -333,6 +450,25 @@ namespace Quieter.Inventory
                 || catalog == null || !catalog.TryGetItem(expectedItemId, out var item))
             {
                 return false;
+            }
+
+            if (source.Area == InventorySlotArea.ResearchTable
+                || destination.Area == InventorySlotArea.ResearchTable)
+            {
+                if (source.Area == InventorySlotArea.ResearchTable
+                    && destination.Area == InventorySlotArea.ResearchTable)
+                {
+                    return false;
+                }
+                var sourceStack = GetReplicatedSlot(source);
+                var destinationStack = GetReplicatedSlot(destination);
+                if (destination.Area == InventorySlotArea.ResearchTable)
+                {
+                    return item.Kind == ItemKind.HiddenSample && quantity == 1
+                        && !sourceStack.IsEmpty && destinationStack.IsEmpty;
+                }
+                return destination.Area == InventorySlotArea.Inventory
+                    && destinationStack.IsEmpty && quantity == 1 && !sourceStack.IsEmpty;
             }
 
             return InventoryModel.CanMoveStack(
@@ -470,11 +606,15 @@ namespace Quieter.Inventory
             uint requestId,
             ServerRpcParams rpcParams = default)
         {
-            var moved = model != null && model.MoveStack(
-                source,
-                destination,
-                expectedItemId,
-                quantity);
+            var moved = source.Area == InventorySlotArea.ResearchTable
+                    || destination.Area == InventorySlotArea.ResearchTable
+                ? resourceInteraction != null && resourceInteraction.TryMoveResearchTableStackServer(
+                    source, destination, expectedItemId, quantity)
+                : model != null && model.MoveStack(
+                    source,
+                    destination,
+                    expectedItemId,
+                    quantity);
             if (moved)
             {
                 SynchronizeAll();
@@ -636,16 +776,51 @@ namespace Quieter.Inventory
             if (model == null || !pickupReference.TryGet(out var networkObject)
                 || networkObject == null || !networkObject.IsSpawned
                 || !networkObject.TryGetComponent<NetworkWorldItem>(out var pickup)
-                || Vector3.Distance(transform.position, pickup.transform.position) > 3.25f
-                || !HasLineOfSight(pickup))
+                || Vector3.Distance(transform.position, pickup.transform.position) > 3.25f)
             {
+                SendPickupResultClientRpc(PickupResultCode.Unavailable, 0, 0);
                 return;
             }
 
-            if (pickup.TryCollectServer(model, out _))
+            var itemId = pickup.Stack.ItemId;
+            if (!HasLineOfSight(pickup))
+            {
+                SendPickupResultClientRpc(PickupResultCode.Blocked, itemId, 0);
+                return;
+            }
+
+            if (pickup.TryCollectServer(model, out var collected))
             {
                 SynchronizeAll();
                 ServerInventoryChanged?.Invoke();
+                SendPickupResultClientRpc(PickupResultCode.Collected, itemId, collected);
+                return;
+            }
+            SendPickupResultClientRpc(PickupResultCode.InventoryFull, itemId, 0);
+        }
+
+        [ClientRpc]
+        private void SendPickupResultClientRpc(PickupResultCode code, ushort itemId, int quantity)
+        {
+            if (!IsOwner || resourceInteraction == null) return;
+            if (code == PickupResultCode.Collected)
+            {
+                var itemName = catalog != null && catalog.TryGetItem(itemId, out var item)
+                    ? item.DisplayName
+                    : "предмет";
+                resourceInteraction.SetLocalFeedback($"Подобрано: {itemName} × {quantity}");
+            }
+            else if (code == PickupResultCode.InventoryFull)
+            {
+                resourceInteraction.SetLocalFeedback("В инвентаре нет места. Предмет остался на земле.");
+            }
+            else if (code == PickupResultCode.Blocked)
+            {
+                resourceInteraction.SetLocalFeedback("Предмет перекрыт препятствием.");
+            }
+            else
+            {
+                resourceInteraction.SetLocalFeedback("Предмет уже недоступен.");
             }
         }
 
@@ -659,11 +834,74 @@ namespace Quieter.Inventory
         private void SynchronizeAll()
         {
             if (!IsServer || model == null) return;
+            DeliverPendingItems();
             SynchronizeList(inventory, model.Inventory);
             SynchronizeList(workbench, model.Workbench);
             cursor.Value = model.Cursor.ForReplication();
             selectedHotbar.Value = model.SelectedHotbarIndex;
             activeItemId.Value = model.ActiveStack.IsEmpty ? (ushort)0 : model.ActiveStack.ItemId;
+        }
+
+        private void DeliverPendingItems()
+        {
+            if (serverPendingItems.Count == 0 || model == null || catalog == null) return;
+            for (var index = serverPendingItems.Count - 1; index >= 0; index--)
+            {
+                var stack = serverPendingItems[index];
+                if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out var item))
+                {
+                    serverPendingItems.RemoveAt(index);
+                    continue;
+                }
+                var remainder = model.AutoInsert(stack, item.PickupPriority);
+                if (remainder <= 0) serverPendingItems.RemoveAt(index);
+                else serverPendingItems[index] = stack.WithQuantity(remainder);
+            }
+        }
+
+        private bool TryRestorePendingStack(
+            StoredInventorySlot stored,
+            ulong ownerSalt,
+            int ordinal,
+            out ItemStackState stack)
+        {
+            stack = default;
+            if (stored == null || stored.Quantity == 0 || catalog == null
+                || !catalog.TryGetItem(stored.ItemId, out var item)
+                || stored.Quantity > item.MaximumStack
+                || (byte)stored.Quality > (byte)ResourceQuality.Superior
+                || stored.HiddenItemId != 0 && !catalog.TryGetItem(stored.HiddenItemId, out _))
+            {
+                return false;
+            }
+            ulong.TryParse(stored.SourceNodeId, out var sourceNodeId);
+            ulong.TryParse(stored.SampleId, out var sampleId);
+            if (item.Kind == ItemKind.HiddenSample && sampleId == 0)
+            {
+                unchecked
+                {
+                    sampleId = 1469598103934665603UL;
+                    sampleId = (sampleId ^ ownerSalt) * 1099511628211UL;
+                    sampleId = (sampleId ^ (uint)ordinal) * 1099511628211UL;
+                    sampleId = (sampleId ^ sourceNodeId) * 1099511628211UL;
+                    if (sampleId == 0) sampleId = 1;
+                }
+            }
+            if (item.Kind == ItemKind.HiddenSample
+                && (stored.HiddenItemId == 0 || sourceNodeId == 0 || sampleId == 0))
+            {
+                return false;
+            }
+            stack = new ItemStackState(
+                stored.ItemId,
+                stored.Quantity,
+                stored.Condition,
+                (ResourceQuality)stored.Quality,
+                stored.HiddenItemId,
+                sourceNodeId,
+                stored.RevealAtPercent,
+                sampleId);
+            return true;
         }
 
         private static void SynchronizeList(
@@ -682,18 +920,27 @@ namespace Quieter.Inventory
         private bool HasLineOfSight(NetworkWorldItem pickup)
         {
             var origin = transform.position + Vector3.up * 1.5f;
-            var direction = pickup.transform.position - origin;
-            var hits = Physics.RaycastAll(
-                origin,
-                direction.normalized,
-                direction.magnitude + 0.2f,
-                Physics.DefaultRaycastLayers,
-                QueryTriggerInteraction.Collide);
-            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
-            foreach (var hit in hits)
+            var colliders = pickup.GetComponentsInChildren<Collider>(true);
+            foreach (var collider in colliders)
             {
-                if (hit.transform.IsChildOf(transform)) continue;
-                return hit.transform == pickup.transform || hit.transform.IsChildOf(pickup.transform);
+                if (collider == null || !collider.enabled) continue;
+                var target = collider.ClosestPoint(origin);
+                if ((target - origin).sqrMagnitude < 0.0001f) target = collider.bounds.center;
+                var direction = target - origin;
+                if (direction.sqrMagnitude < 0.0001f) return true;
+                var hits = Physics.RaycastAll(
+                    origin,
+                    direction.normalized,
+                    direction.magnitude + 0.2f,
+                    Physics.DefaultRaycastLayers,
+                    QueryTriggerInteraction.Collide);
+                Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+                foreach (var hit in hits)
+                {
+                    if (hit.transform.IsChildOf(transform)) continue;
+                    if (hit.collider.GetComponentInParent<NetworkWorldItem>() == pickup) return true;
+                    break;
+                }
             }
 
             return false;
@@ -703,20 +950,9 @@ namespace Quieter.Inventory
         {
             focusedPickup = null;
             var camera = player.OwnerCamera;
-            if (camera == null) return;
-            var hits = Physics.RaycastAll(
-                camera.transform.position,
-                camera.transform.forward,
-                3f,
-                Physics.DefaultRaycastLayers,
-                QueryTriggerInteraction.Collide);
-            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
-            foreach (var hit in hits)
-            {
-                if (hit.transform.IsChildOf(transform)) continue;
-                focusedPickup = hit.collider.GetComponentInParent<NetworkWorldItem>();
-                break;
-            }
+            if (!WorldInteractionRaycast.TryGetClosest(
+                    camera, transform, ResourceBalance.InteractionDistance, out var hit)) return;
+            focusedPickup = hit.collider.GetComponentInParent<NetworkWorldItem>();
         }
 
         private void RebuildHeldVisual(ushort itemId)

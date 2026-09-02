@@ -186,6 +186,14 @@ namespace Quieter.World
         private GameObject CreateResourcePresentation(WorldObjectSpawn spawn, Transform parent)
         {
             BuildLookup();
+            if (spawn.Resource.Kind == WorldObjectKind.Tree)
+            {
+                return CreateTreePresentation(spawn, parent);
+            }
+            if (spawn.Resource.Kind == WorldObjectKind.FiberPlant)
+            {
+                return CreateFiberPlantPresentation(spawn, parent);
+            }
             resourceLookup.TryGetValue(spawn.Resource.ResourceItemId, out var definition);
             var isBranch = spawn.Resource.IsLoosePickup && spawn.Resource.ResourceItemId == 2;
             var archetype = definition?.visualArchetype ?? ResourceVisualArchetype.VeinedRock;
@@ -260,6 +268,44 @@ namespace Quieter.World
             }
 
             return instance;
+        }
+
+        private static GameObject CreateTreePresentation(WorldObjectSpawn spawn, Transform parent)
+        {
+            var root = new GameObject("Tree");
+            root.transform.SetParent(parent, true);
+            root.transform.SetPositionAndRotation(spawn.Position, spawn.Rotation);
+            var collider = root.AddComponent<BoxCollider>();
+            collider.center = new Vector3(0f, 0.48f, 0f);
+            collider.size = new Vector3(0.42f, 0.96f, 0.42f);
+            CreateDecoration(root.transform, PrimitiveType.Cylinder, "Trunk",
+                new Vector3(0f, 0.32f, 0f), new Vector3(0.22f, 0.32f, 0.22f),
+                Quaternion.identity, new Color(0.32f, 0.17f, 0.075f));
+            CreateDecoration(root.transform, PrimitiveType.Sphere, "CanopyLower",
+                new Vector3(0f, 0.7f, 0f), new Vector3(0.78f, 0.42f, 0.78f),
+                Quaternion.identity, new Color(0.16f, 0.43f, 0.12f));
+            CreateDecoration(root.transform, PrimitiveType.Sphere, "CanopyUpper",
+                new Vector3(0.08f, 0.9f, -0.04f), new Vector3(0.58f, 0.34f, 0.58f),
+                Quaternion.identity, new Color(0.2f, 0.5f, 0.14f));
+            return root;
+        }
+
+        private static GameObject CreateFiberPlantPresentation(WorldObjectSpawn spawn, Transform parent)
+        {
+            var root = new GameObject("FiberPlant");
+            root.transform.SetParent(parent, true);
+            root.transform.SetPositionAndRotation(spawn.Position, spawn.Rotation);
+            var collider = root.AddComponent<SphereCollider>();
+            collider.radius = 0.52f;
+            for (var index = 0; index < 5; index++)
+            {
+                CreateDecoration(root.transform, PrimitiveType.Cube, $"FiberLeaf_{index}",
+                    new Vector3((index - 2) * 0.11f, -0.02f + (index % 2) * 0.08f, 0f),
+                    new Vector3(0.1f, 0.7f, 0.08f),
+                    Quaternion.Euler(0f, index * 37f, -28f + index * 14f),
+                    new Color(0.35f, 0.62f, 0.19f));
+            }
+            return root;
         }
 
         private static void CreateDecoration(
