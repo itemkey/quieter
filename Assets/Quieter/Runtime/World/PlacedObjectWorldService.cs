@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Quieter.Inventory;
 using Quieter.Persistence;
+using Quieter.Survival;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -30,6 +31,7 @@ namespace Quieter.World
 
         private readonly Dictionary<ulong, RuntimeObject> objects = new();
         private readonly Dictionary<ulong, ResearchTableView> views = new();
+        private readonly Dictionary<ulong, SurvivalStructureView> structureViews = new();
         private readonly HashSet<ulong> dirtyObjects = new();
         private readonly SemaphoreSlim flushGate = new(1, 1);
         private NetworkManager networkManager;
@@ -43,6 +45,8 @@ namespace Quieter.World
         private float nextFlushAt;
         private uint objectNonce;
         private uint persistenceRevision;
+        private float lastFuelTickAt;
+        private float nextFuelTickAt;
 
         public event Action Changed;
         public WorldDefinition Definition => definition;
@@ -67,7 +71,7 @@ namespace Quieter.World
                 definition.WorldId, cancellationToken);
             foreach (var entry in stored)
             {
-                if (entry == null || entry.ItemId != ResourceBalance.ResearchTableItemId
+                if (entry == null || !SurvivalStructureRules.SupportsPlacement(entry.ItemId)
                     || !ulong.TryParse(entry.ObjectId, out var objectId) || objectId == 0)
                 {
                     continue;
@@ -82,10 +86,21 @@ namespace Quieter.World
                     CreatedAtUtc = ParseDate(entry.CreatedAtUtc),
                     UpdatedAtUtc = ParseDate(entry.UpdatedAtUtc),
                 };
+                if (runtime.ItemId == SurvivalStructureRules.HearthItemId
+                    && !runtime.Input.IsEmpty)
+                {
+                    runtime.Input = SurvivalStructureRules.BurnFuel(
+                        runtime.Input,
+                        Mathf.Max(0f, (float)(DateTime.UtcNow - runtime.UpdatedAtUtc).TotalSeconds));
+                    runtime.UpdatedAtUtc = DateTime.UtcNow;
+                    MarkDirty(objectId, fullSave: false);
+                }
                 objects[objectId] = runtime;
                 CreateOrUpdateView(runtime, networkManager != null && networkManager.IsClient);
             }
             nextFlushAt = Time.unscaledTime + 5f;
+            lastFuelTickAt = Time.unscaledTime;
+            nextFuelTickAt = lastFuelTickAt + 5f;
         }
 
         public void InitializeClient(WorldDefinition worldDefinition)
@@ -102,6 +117,9 @@ namespace Quieter.World
 
         public bool TryGetView(ulong objectId, out ResearchTableView view) =>
             views.TryGetValue(objectId, out view) && view != null;
+
+        public bool TryGetStructureView(ulong objectId, out SurvivalStructureView view) =>
+            structureViews.TryGetValue(objectId, out view) && view != null;
 
         public bool TryGetState(
             ulong objectId,
@@ -124,11 +142,19 @@ namespace Quieter.World
             return false;
         }
 
-        public bool TryPlace(Vector3 position, float yaw, out ulong objectId)
+        public bool IsResearchTable(ulong objectId) => objects.TryGetValue(objectId, out var state)
+            && state.ItemId == ResourceBalance.ResearchTableItemId;
+
+        public bool TryPlace(
+            Vector3 position,
+            float yaw,
+            ushort itemId,
+            out ulong objectId)
         {
             objectId = 0;
             if (networkManager == null || !networkManager.IsServer || definition.WorldId == 0
-                || !IsFinite(position) || !float.IsFinite(yaw))
+                || !IsFinite(position) || !float.IsFinite(yaw)
+                || !SurvivalStructureRules.SupportsPlacement(itemId))
             {
                 return false;
             }
@@ -141,7 +167,7 @@ namespace Quieter.World
             var state = new RuntimeObject
             {
                 ObjectId = objectId,
-                ItemId = ResourceBalance.ResearchTableItemId,
+                ItemId = itemId,
                 Position = position,
                 Yaw = Mathf.Repeat(yaw, 360f),
                 CreatedAtUtc = now,
@@ -155,11 +181,227 @@ namespace Quieter.World
             return true;
         }
 
+        public bool TryPlace(Vector3 position, float yaw, out ulong objectId) => TryPlace(
+            position, yaw, ResourceBalance.ResearchTableItemId, out objectId);
+
+        public bool CanAcceptFuel(ulong objectId, ushort itemId)
+        {
+            if (networkManager == null || !networkManager.IsServer
+                || !SurvivalStructureRules.IsFuel(itemId)
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.HearthItemId)
+            {
+                return false;
+            }
+            return state.Input.IsEmpty
+                || state.Input.ItemId == itemId
+                && state.Input.Quantity < SurvivalStructureRules.MaximumFuelUnits;
+        }
+
+        public bool TryAddFuel(ulong objectId, ushort itemId)
+        {
+            if (!CanAcceptFuel(objectId, itemId)) return false;
+            var state = objects[objectId];
+            var next = SurvivalStructureRules.AddFuel(state.Input, itemId);
+            if (next.Equals(state.Input)) return false;
+            state.Input = next;
+            Touch(state);
+            return true;
+        }
+
+        public bool TryGetBurningHearth(ulong objectId, out Vector3 position)
+        {
+            position = default;
+            if (!objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.HearthItemId
+                || state.Input.IsEmpty)
+            {
+                return false;
+            }
+            position = state.Position;
+            return true;
+        }
+
+        public bool TryFindBurningHearth(Vector3 position, float radius, out ulong objectId)
+        {
+            objectId = 0;
+            var closestSquared = radius * radius;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.HearthItemId || state.Input.IsEmpty)
+                    continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                objectId = state.ObjectId;
+            }
+            return objectId != 0;
+        }
+
+        public bool CanInteract(ulong objectId, Transform actor, float maximumDistance)
+        {
+            if (actor == null || !objects.TryGetValue(objectId, out var state)
+                || Vector3.Distance(actor.position, state.Position) > maximumDistance) return false;
+            var origin = actor.position + Vector3.up * 1.45f;
+            var direction = state.Position + Vector3.up * 0.2f - origin;
+            var hits = Physics.RaycastAll(origin, direction.normalized, direction.magnitude + 0.25f,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+            foreach (var hit in hits)
+            {
+                if (hit.transform.IsChildOf(actor)) continue;
+                var structure = hit.collider.GetComponentInParent<SurvivalStructureView>();
+                return structure != null && structure.ObjectId == objectId;
+            }
+            return false;
+        }
+
+        public bool TryGetWastePitSpace(
+            ulong objectId,
+            out Vector3 position,
+            out ushort availableMilliliters)
+        {
+            position = default;
+            availableMilliliters = 0;
+            if (!objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.UnlinedWastePitItemId)
+            {
+                return false;
+            }
+            position = state.Position;
+            var contents = state.Input.LiquidKind == LiquidKind.Waste
+                ? state.Input.LiquidMilliliters
+                : 0;
+            availableMilliliters = (ushort)Mathf.Max(
+                0, SurvivalStructureRules.WastePitCapacityMilliliters - contents);
+            return availableMilliliters > 0;
+        }
+
+        public bool TryDepositWaste(
+            ulong objectId,
+            ushort milliliters,
+            float biologicalLoad,
+            float toxinLoad)
+        {
+            if (networkManager == null || !networkManager.IsServer || milliliters == 0
+                || !float.IsFinite(biologicalLoad) || !float.IsFinite(toxinLoad)
+                || !TryGetWastePitSpace(objectId, out _, out var available)
+                || milliliters > available)
+            {
+                return false;
+            }
+            var state = objects[objectId];
+            var oldVolume = state.Input.LiquidKind == LiquidKind.Waste
+                ? state.Input.LiquidMilliliters
+                : 0;
+            var newVolume = oldVolume + milliliters;
+            var mixedBiological = (state.Input.BiologicalContamination / 10000f
+                    * oldVolume + Mathf.Clamp01(biologicalLoad) * milliliters)
+                / newVolume;
+            var mixedToxins = (state.Input.ToxinContamination / 10000f
+                    * oldVolume + Mathf.Clamp01(toxinLoad) * milliliters)
+                / newVolume;
+            state.Input = new ItemStackState(
+                40,
+                1,
+                freshness: 10000,
+                biologicalContamination: (ushort)Mathf.RoundToInt(
+                    mixedBiological * 10000f),
+                toxinContamination: (ushort)Mathf.RoundToInt(mixedToxins * 10000f),
+                cleanliness: 0,
+                liquidMilliliters: (ushort)newVolume,
+                liquidKind: LiquidKind.Waste);
+            Touch(state);
+            return true;
+        }
+
+        public void ApplyWasteContamination(
+            Vector3 waterPosition,
+            float rainIntensity,
+            ref float biologicalLoad,
+            ref float toxinLoad)
+        {
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.UnlinedWastePitItemId
+                    || state.Input.LiquidKind != LiquidKind.Waste
+                    || state.Input.LiquidMilliliters == 0)
+                {
+                    continue;
+                }
+                var leakage = SurvivalStructureRules.CalculatePitLeakage(
+                    state.Position,
+                    waterPosition,
+                    state.Input.LiquidMilliliters / 1000f,
+                    state.Input.BiologicalContamination / 10000f,
+                    state.Input.ToxinContamination / 10000f,
+                    rainIntensity);
+                biologicalLoad = Mathf.Clamp01(biologicalLoad + leakage.Biological);
+                toxinLoad = Mathf.Clamp01(toxinLoad + leakage.Toxins);
+            }
+        }
+
+        public SurvivalEnvironment ApplyEnvironmentalInfluence(
+            Vector3 position,
+            SurvivalEnvironment environment)
+        {
+            var rainProtection = 0f;
+            var windProtection = 0f;
+            var externalHeat = environment.ExternalHeat;
+            var smokeConcentration = environment.SmokeConcentration;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId == SurvivalStructureRules.LeanToItemId)
+                {
+                    var local = Quaternion.Euler(0f, -state.Yaw, 0f)
+                        * (position - state.Position);
+                    if (Mathf.Abs(local.x) <= 1.95f && Mathf.Abs(local.z) <= 1.42f
+                        && local.y >= -0.4f && local.y <= 2.8f)
+                    {
+                        rainProtection = Mathf.Max(rainProtection, 0.82f);
+                        windProtection = Mathf.Max(windProtection, 0.48f);
+                    }
+                }
+            }
+            // Resolve shelter first so smoke does not depend on placement/load order.
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId == SurvivalStructureRules.HearthItemId
+                    && !state.Input.IsEmpty)
+                {
+                    var distance = Vector3.Distance(position, state.Position);
+                    if (distance <= 6f)
+                    {
+                        var proximity = 1f - distance / 6f;
+                        externalHeat = Mathf.Max(
+                            externalHeat,
+                            1.15f * proximity);
+                        smokeConcentration = Mathf.Max(
+                            smokeConcentration,
+                            proximity * (rainProtection > 0f ? 0.13f : 0.045f)
+                                * Mathf.Lerp(1f, 0.45f,
+                                    Mathf.InverseLerp(
+                                        0f, 8f, environment.WindMetersPerSecond)));
+                    }
+                }
+            }
+            return new SurvivalEnvironment(
+                environment.AmbientTemperatureC,
+                environment.WindMetersPerSecond * (1f - windProtection),
+                environment.Humidity,
+                environment.Precipitation * (1f - rainProtection),
+                environment.Insulation,
+                externalHeat,
+                environment.Sheltered || rainProtection >= 0.95f,
+                smokeConcentration);
+        }
+
         public bool TryDismantle(ulong objectId, out Vector3 position)
         {
             position = default;
             if (networkManager == null || !networkManager.IsServer
                 || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != ResourceBalance.ResearchTableItemId
                 || state.IsBusy || !state.Input.IsEmpty)
             {
                 return false;
@@ -167,6 +409,8 @@ namespace Quieter.World
             position = state.Position;
             objects.Remove(objectId);
             if (views.Remove(objectId, out var view) && view != null) Destroy(view.gameObject);
+            if (structureViews.Remove(objectId, out var structureView)
+                && structureView != null) Destroy(structureView.gameObject);
             MarkDirty(objectId, fullSave: true);
             BroadcastSnapshot();
             Changed?.Invoke();
@@ -180,6 +424,7 @@ namespace Quieter.World
                 || sample.Quantity != 1 || sample.HiddenItemId == 0
                 || sample.SourceNodeId == 0 || sample.SampleId == 0
                 || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != ResourceBalance.ResearchTableItemId
                 || state.IsBusy || !state.Input.IsEmpty)
             {
                 return false;
@@ -194,6 +439,7 @@ namespace Quieter.World
             sample = default;
             if (networkManager == null || !networkManager.IsServer
                 || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != ResourceBalance.ResearchTableItemId
                 || state.IsBusy || state.Input.IsEmpty)
             {
                 return false;
@@ -214,6 +460,7 @@ namespace Quieter.World
             position = default;
             if (networkManager == null || !networkManager.IsServer
                 || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != ResourceBalance.ResearchTableItemId
                 || state.IsBusy || state.Input.IsEmpty
                 || state.Input.ItemId != ResourceBalance.UnknownSampleItemId)
             {
@@ -237,6 +484,7 @@ namespace Quieter.World
             consumed = default;
             if (networkManager == null || !networkManager.IsServer
                 || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != ResourceBalance.ResearchTableItemId
                 || state.BusyClientId != clientId || state.Input.IsEmpty
                 || state.Input.SampleId != expectedSampleId)
             {
@@ -297,13 +545,33 @@ namespace Quieter.World
 
         private void Update()
         {
-            if (networkManager == null || !networkManager.IsServer || flushRunning
+            if (networkManager == null || !networkManager.IsServer) return;
+            TickHearthFuel();
+            if (flushRunning
                 || (!fullSaveRequired && dirtyObjects.Count == 0)
                 || Time.unscaledTime < nextFlushAt)
             {
                 return;
             }
             _ = FlushWithLoggingAsync();
+        }
+
+        private void TickHearthFuel()
+        {
+            if (Time.unscaledTime < nextFuelTickAt) return;
+            var now = Time.unscaledTime;
+            var elapsed = Mathf.Max(0f, now - lastFuelTickAt);
+            lastFuelTickAt = now;
+            nextFuelTickAt = now + 5f;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.HearthItemId
+                    || state.Input.IsEmpty) continue;
+                var burned = SurvivalStructureRules.BurnFuel(state.Input, elapsed);
+                if (burned.Equals(state.Input)) continue;
+                state.Input = burned;
+                Touch(state);
+            }
         }
 
         private async Task FlushWithLoggingAsync()
@@ -437,6 +705,8 @@ namespace Quieter.World
             {
                 objects.Remove(id);
                 if (views.Remove(id, out var view) && view != null) Destroy(view.gameObject);
+                if (structureViews.Remove(id, out var structureView)
+                    && structureView != null) Destroy(structureView.gameObject);
             }
             Changed?.Invoke();
         }
@@ -451,6 +721,30 @@ namespace Quieter.World
 
         private void CreateOrUpdateView(RuntimeObject state, bool renderVisuals)
         {
+            if (state.ItemId != ResourceBalance.ResearchTableItemId)
+            {
+                if (!structureViews.TryGetValue(state.ObjectId, out var structure)
+                    || structure == null)
+                {
+                    viewRoot ??= new GameObject("PlacedObjects").transform;
+                    viewRoot.SetParent(transform, false);
+                    structure = SurvivalStructureView.Create(
+                        state.ObjectId,
+                        state.ItemId,
+                        state.Position,
+                        state.Yaw,
+                        viewRoot,
+                        renderVisuals);
+                    structureViews[state.ObjectId] = structure;
+                }
+                else
+                {
+                    structure.transform.SetPositionAndRotation(
+                        state.Position, Quaternion.Euler(0f, state.Yaw, 0f));
+                }
+                structure.ApplyState(state.Input.ForReplication());
+                return;
+            }
             if (!views.TryGetValue(state.ObjectId, out var view) || view == null)
             {
                 viewRoot ??= new GameObject("PlacedObjects").transform;
@@ -469,6 +763,12 @@ namespace Quieter.World
 
         private void ApplyViewState(RuntimeObject state)
         {
+            if (structureViews.TryGetValue(state.ObjectId, out var structure)
+                && structure != null)
+            {
+                structure.ApplyState(state.Input.ForReplication());
+                return;
+            }
             if (views.TryGetValue(state.ObjectId, out var view) && view != null)
             {
                 view.ApplyState(state.Input.ForReplication(), state.IsBusy);
@@ -482,6 +782,11 @@ namespace Quieter.World
                 if (view != null) Destroy(view.gameObject);
             }
             views.Clear();
+            foreach (var view in structureViews.Values)
+            {
+                if (view != null) Destroy(view.gameObject);
+            }
+            structureViews.Clear();
             foreach (var state in objects.Values) CreateOrUpdateView(state, renderVisuals);
         }
 
@@ -496,6 +801,11 @@ namespace Quieter.World
                 if (view != null) Destroy(view.gameObject);
             }
             views.Clear();
+            foreach (var view in structureViews.Values)
+            {
+                if (view != null) Destroy(view.gameObject);
+            }
+            structureViews.Clear();
         }
 
         private ulong CreateObjectId(Vector3 position)
@@ -525,6 +835,15 @@ namespace Quieter.World
             writer.WriteValueSafe(stack.SourceNodeId);
             writer.WriteValueSafe(stack.RevealAtPercent);
             writer.WriteValueSafe(stack.SampleId);
+            writer.WriteValueSafe(stack.ItemInstanceId);
+            writer.WriteValueSafe(stack.Freshness);
+            writer.WriteValueSafe(stack.BiologicalContamination);
+            writer.WriteValueSafe(stack.ToxinContamination);
+            writer.WriteValueSafe(stack.Wetness);
+            writer.WriteValueSafe(stack.Cleanliness);
+            writer.WriteValueSafe(stack.LiquidMilliliters);
+            writer.WriteValueSafe(stack.LiquidKind);
+            writer.WriteValueSafe(stack.Equipped);
         }
 
         private static ItemStackState ReadSafeStack(ref FastBufferReader reader)
@@ -534,8 +853,22 @@ namespace Quieter.World
             reader.ReadValueSafe(out ulong sourceNodeId);
             reader.ReadValueSafe(out byte revealAtPercent);
             reader.ReadValueSafe(out ulong sampleId);
+            reader.ReadValueSafe(out ulong itemInstanceId);
+            reader.ReadValueSafe(out ushort freshness);
+            reader.ReadValueSafe(out ushort biologicalContamination);
+            reader.ReadValueSafe(out ushort toxinContamination);
+            reader.ReadValueSafe(out ushort wetness);
+            reader.ReadValueSafe(out ushort cleanliness);
+            reader.ReadValueSafe(out ushort liquidMilliliters);
+            reader.ReadValueSafe(out LiquidKind liquidKind);
+            reader.ReadValueSafe(out bool equipped);
             return new ItemStackState(itemId, quantity, sourceNodeId: sourceNodeId,
-                revealAtPercent: revealAtPercent, sampleId: sampleId);
+                revealAtPercent: revealAtPercent, sampleId: sampleId,
+                itemInstanceId: itemInstanceId, freshness: freshness,
+                biologicalContamination: biologicalContamination,
+                toxinContamination: toxinContamination, wetness: wetness,
+                cleanliness: cleanliness, liquidMilliliters: liquidMilliliters,
+                liquidKind: liquidKind, equipped: equipped);
         }
 
         private static StoredInventorySlot ToStoredStack(ItemStackState stack) => stack.IsEmpty
@@ -550,6 +883,15 @@ namespace Quieter.World
                 SourceNodeId = stack.SourceNodeId.ToString(),
                 RevealAtPercent = stack.RevealAtPercent,
                 SampleId = stack.SampleId.ToString(),
+                ItemInstanceId = stack.ItemInstanceId.ToString(),
+                Freshness = stack.Freshness,
+                BiologicalContamination = stack.BiologicalContamination,
+                ToxinContamination = stack.ToxinContamination,
+                Wetness = stack.Wetness,
+                Cleanliness = stack.Cleanliness,
+                LiquidMilliliters = stack.LiquidMilliliters,
+                LiquidKind = (byte)stack.LiquidKind,
+                Equipped = stack.Equipped,
             };
 
         private static ItemStackState FromStoredStack(StoredInventorySlot stack)
@@ -557,6 +899,7 @@ namespace Quieter.World
             if (stack == null || stack.ItemId == 0 || stack.Quantity == 0) return default;
             ulong.TryParse(stack.SourceNodeId, out var sourceNodeId);
             ulong.TryParse(stack.SampleId, out var sampleId);
+            ulong.TryParse(stack.ItemInstanceId, out var itemInstanceId);
             return new ItemStackState(
                 stack.ItemId,
                 stack.Quantity,
@@ -565,7 +908,16 @@ namespace Quieter.World
                 stack.HiddenItemId,
                 sourceNodeId,
                 stack.RevealAtPercent,
-                sampleId);
+                sampleId,
+                itemInstanceId,
+                stack.Freshness,
+                stack.BiologicalContamination,
+                stack.ToxinContamination,
+                stack.Wetness,
+                stack.Cleanliness,
+                stack.LiquidMilliliters,
+                (LiquidKind)stack.LiquidKind,
+                stack.Equipped);
         }
 
         private static DateTime ParseDate(string value) => DateTime.TryParse(

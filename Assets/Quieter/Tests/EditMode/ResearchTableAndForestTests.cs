@@ -32,6 +32,8 @@ namespace Quieter.Tests.EditMode
             var definition = WorldDefinition.CreateDefault(8493027501);
             var trees = new List<WorldObjectSpawn>();
             var plants = new List<WorldObjectSpawn>();
+            var food = new List<WorldObjectSpawn>();
+            var springs = new List<WorldObjectSpawn>();
             for (var z = 0; z < definition.ChunkCountZ; z++)
             {
                 for (var x = 0; x < definition.ChunkCountX; x++)
@@ -45,6 +47,9 @@ namespace Quieter.Tests.EditMode
                     trees.AddRange(first.Where(item => item.Resource.Kind == WorldObjectKind.Tree));
                     plants.AddRange(first.Where(
                         item => item.Resource.Kind == WorldObjectKind.FiberPlant));
+                    food.AddRange(first.Where(item =>
+                        ResourceBalance.IsWildFood(item.Resource.ResourceItemId)));
+                    springs.AddRange(first.Where(item => item.Resource.IsWaterSource));
                 }
             }
 
@@ -58,6 +63,14 @@ namespace Quieter.Tests.EditMode
             Assert.That(trees.All(item => item.Resource.RequiredTool == ToolKind.Axe), Is.True);
             Assert.That(plants.All(item => item.Resource.ResourceItemId
                 == ResourceBalance.PlantFiberItemId), Is.True);
+            Assert.That(food.Count(item => item.Position.x * item.Position.x
+                    + item.Position.z * item.Position.z < 38f * 38f),
+                Is.GreaterThanOrEqualTo(12));
+            Assert.That(food.Count, Is.InRange(450, 750));
+            Assert.That(springs.Count, Is.InRange(70, 120));
+            Assert.That(springs.Count(item => item.Position.x * item.Position.x
+                    + item.Position.z * item.Position.z < 38f * 38f),
+                Is.GreaterThanOrEqualTo(1));
         }
 
         [Test]
@@ -84,8 +97,92 @@ namespace Quieter.Tests.EditMode
         {
             Assert.That(ResourceBalance.PlacementDistance, Is.EqualTo(10f));
             Assert.That(ResourceBalance.ResearchDurationSeconds, Is.EqualTo(6f));
-            Assert.That(QuieterConstants.ProtocolVersion, Is.EqualTo(10));
-            Assert.That(QuieterConstants.GeneratorVersion, Is.EqualTo(5));
+            Assert.That(QuieterConstants.ProtocolVersion, Is.EqualTo(13));
+            Assert.That(QuieterConstants.GeneratorVersion, Is.EqualTo(7));
+            var catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            Assert.That(catalog.TryGetRecipe(6, out var leanTo), Is.True);
+            Assert.That(catalog.TryGetRecipe(7, out var hearth), Is.True);
+            Assert.That(catalog.TryGetRecipe(8, out var bucket), Is.True);
+            Assert.That(catalog.TryGetRecipe(9, out var wastePit), Is.True);
+            Assert.That(leanTo.Output.ItemId, Is.EqualTo(SurvivalStructureRules.LeanToItemId));
+            Assert.That(hearth.Output.ItemId, Is.EqualTo(SurvivalStructureRules.HearthItemId));
+            Assert.That(bucket.Output.ItemId, Is.EqualTo(38));
+            Assert.That(wastePit.Output.ItemId,
+                Is.EqualTo(SurvivalStructureRules.UnlinedWastePitItemId));
+        }
+
+        [Test]
+        public void HearthFuel_BurnsAcrossUnitsAndCharcoalLastsLonger()
+        {
+            var wood = SurvivalStructureRules.AddFuel(default, 2);
+            wood = SurvivalStructureRules.AddFuel(wood, 2);
+            var afterFirstUnit = SurvivalStructureRules.BurnFuel(wood, 600f);
+            var charcoal = SurvivalStructureRules.AddFuel(default, 37);
+
+            Assert.That(afterFirstUnit.Quantity, Is.EqualTo(1));
+            Assert.That(afterFirstUnit.Condition, Is.EqualTo(10000));
+            Assert.That(SurvivalStructureRules.BurnFuel(afterFirstUnit, 600f).IsEmpty,
+                Is.True);
+            Assert.That(SurvivalStructureRules.BurnFuel(charcoal, 600f).IsEmpty,
+                Is.False);
+            Assert.That(SurvivalStructureRules.AddFuel(wood, 37), Is.EqualTo(wood));
+        }
+
+        [Test]
+        public void WastePit_RunoffRespectsSlopeRainDistanceAndContents()
+        {
+            var pit = new Vector3(0f, 20f, 0f);
+            var downhill = new Vector3(20f, 8f, 0f);
+            var dry = SurvivalStructureRules.CalculatePitLeakage(pit, downhill, 60f, 1f, 0.5f, 0f);
+            var rain = SurvivalStructureRules.CalculatePitLeakage(pit, downhill, 60f, 1f, 0.5f, 1f);
+            Assert.That(dry.Biological, Is.GreaterThan(0f));
+            Assert.That(rain.Biological, Is.GreaterThan(dry.Biological));
+            Assert.That(rain.Toxins, Is.GreaterThan(dry.Toxins));
+            Assert.That(SurvivalStructureRules.CalculatePitLeakage(
+                pit, new Vector3(20f, 21f, 0f), 60f, 1f, 1f, 1f), Is.EqualTo((0f, 0f)));
+            Assert.That(SurvivalStructureRules.CalculatePitLeakage(
+                pit, new Vector3(200f, 0f, 0f), 60f, 1f, 1f, 1f), Is.EqualTo((0f, 0f)));
+            Assert.That(SurvivalStructureRules.CalculatePitLeakage(
+                pit, downhill, 0f, 1f, 1f, 1f), Is.EqualTo((0f, 0f)));
+        }
+
+        [Test]
+        public void HeadlessLeanTo_HasWalkableEntranceAndSolidRoofAndBack()
+        {
+            var position = new Vector3(4000f, 1000f, 4000f);
+            var shelter = SurvivalStructureView.Create(15,
+                SurvivalStructureRules.LeanToItemId, position, 0f, null, false);
+            assets.Add(shelter.gameObject);
+            Physics.SyncTransforms();
+            var interior = Physics.OverlapCapsule(position + Vector3.up * 0.4f,
+                position + Vector3.up * 1.55f, 0.3f);
+            Assert.That(interior.Any(c => c.GetComponentInParent<SurvivalStructureView>() == shelter), Is.False);
+            Assert.That(Physics.Raycast(position + new Vector3(0f, 1.3f, 2f),
+                Vector3.back, out var back, 5f), Is.True);
+            Assert.That(back.collider.transform.localPosition.z, Is.LessThan(-1f));
+            Assert.That(Physics.Raycast(position + Vector3.up, Vector3.up,
+                out var roof, 3f), Is.True);
+            Assert.That(roof.collider.GetComponentInParent<SurvivalStructureView>(), Is.SameAs(shelter));
+        }
+
+        [Test]
+        public void SurvivalCrafts_RequireTimeAndPotteryRequiresFire()
+        {
+            var catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            for (ushort recipeId = 10; recipeId <= 13; recipeId++)
+            {
+                Assert.That(catalog.TryGetRecipe(recipeId, out var recipe), Is.True);
+                Assert.That(recipe.WorkSeconds, Is.GreaterThanOrEqualTo(20f));
+                Assert.That(recipe.RequiresBurningHearth, Is.EqualTo(recipeId <= 11));
+                var model = new InventoryModel(catalog);
+                var index = 0;
+                foreach (var ingredient in recipe.Ingredients)
+                    model.SetSlot(new InventorySlotReference(InventorySlotArea.Workbench, index++),
+                        new ItemStackState(ingredient.Item.ItemId, ingredient.Quantity));
+                Assert.That(model.TryCraft(recipe), Is.True);
+                Assert.That(model.Inventory.Any(s => s.ItemId == recipe.Output.ItemId), Is.True);
+                Assert.That(model.TryCraft(recipe), Is.False, "A second completion must not duplicate output.");
+            }
         }
 
         [Test]

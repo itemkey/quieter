@@ -13,6 +13,7 @@ namespace Quieter.World
         Deposit = 3,
         Tree = 4,
         FiberPlant = 5,
+        Spring = 6,
     }
 
     public enum ResearchResultTone : byte
@@ -137,6 +138,7 @@ namespace Quieter.World
         public bool IsLoosePickup => Kind == WorldObjectKind.LoosePickup
             || Kind == WorldObjectKind.FiberPlant;
         public bool IsTree => Kind == WorldObjectKind.Tree;
+        public bool IsWaterSource => Kind == WorldObjectKind.Spring;
 
         public bool Equals(ResourceNodeDescriptor other) => Kind == other.Kind
             && ResourceItemId == other.ResourceItemId
@@ -197,6 +199,7 @@ namespace Quieter.World
     public sealed class StoredMapNote
     {
         public int WorldId;
+        public string MapItemInstanceId;
         public string NoteId;
         public float X;
         public float Z;
@@ -222,7 +225,8 @@ namespace Quieter.World
 
     public static class MapNoteRules
     {
-        public const int MaximumNotesPerWorld = 64;
+        public const int MaximumNotesPerMap = 64;
+        public const int MaximumNotesPerWorld = MaximumNotesPerMap;
         public const int MaximumTextLength = 80;
         public const float MutationCooldownSeconds = 0.25f;
 
@@ -282,6 +286,9 @@ namespace Quieter.World
         public const ushort UnknownSampleItemId = 6;
         public const ushort PlantFiberItemId = 23;
         public const ushort ResearchTableItemId = 24;
+        public const ushort WildBerriesItemId = 25;
+        public const ushort EdibleRootsItemId = 26;
+        public const ushort WildMushroomsItemId = 27;
         public const float InteractionDistance = 3f;
         public const float PlacementDistance = 10f;
         public const float MiningCooldownSeconds = 0.8f;
@@ -298,6 +305,39 @@ namespace Quieter.World
         public static readonly float[] RichnessWorkMultiplier = { 1.25f, 1.15f, 1f, 0.85f, 0.7f };
         public static readonly float[] HardnessWork = { 1.5f, 2f, 3f, 4f, 5f };
         public static readonly byte[] DurabilityCost = { 1, 1, 2, 2, 3 };
+
+        public static bool IsWildFood(ushort itemId) => itemId is
+            WildBerriesItemId or EdibleRootsItemId or WildMushroomsItemId;
+
+        public static ItemStackState CreateWildFoodStack(ushort itemId, ulong instanceId)
+        {
+            if (!IsWildFood(itemId)) return new ItemStackState(itemId, 1);
+            var freshness = (ushort)(9200 + (instanceId >> 8) % 801UL);
+            var biological = (ushort)(180 + (instanceId >> 24) % 1021UL);
+            ushort toxins = 0;
+            if (itemId == WildMushroomsItemId)
+            {
+                toxins = instanceId % 6UL == 0
+                    ? (ushort)(6200 + (instanceId >> 36) % 2501UL)
+                    : (ushort)((instanceId >> 40) % 501UL);
+            }
+            return new ItemStackState(
+                itemId,
+                1,
+                freshness: freshness,
+                biologicalContamination: biological,
+                toxinContamination: toxins);
+        }
+
+        public static void SampleSpringWater(
+            ulong instanceId,
+            out float biologicalContamination,
+            out float toxinContamination)
+        {
+            biologicalContamination = 0.06f
+                + ((instanceId >> 12) & 0xFFFFUL) / 65535f * 0.32f;
+            toxinContamination = ((instanceId >> 35) & 0xFFFFUL) / 65535f * 0.09f;
+        }
 
         public static int WorkRequired(ResourceNodeDescriptor descriptor)
         {

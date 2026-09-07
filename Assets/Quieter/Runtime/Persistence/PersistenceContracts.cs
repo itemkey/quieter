@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using Quieter.Inventory;
 using Quieter.World;
+using Quieter.Survival;
 using UnityEngine;
 
 namespace Quieter.Persistence
@@ -21,6 +22,7 @@ namespace Quieter.Persistence
         public byte SelectedHotbarIndex;
         public List<StoredDepositKnowledge> DepositKnowledge = new();
         public List<StoredMapNote> MapNotes = new();
+        public CharacterSurvivalState Survival = new();
     }
 
     public interface IWorldRepository
@@ -76,6 +78,21 @@ namespace Quieter.Persistence
             ulong steamId,
             int worldId,
             IReadOnlyList<StoredMapNote> notes,
+            CancellationToken cancellationToken = default);
+
+        Task SaveSurvivalAsync(
+            ulong steamId,
+            CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default);
+    }
+
+    public interface IAtomicPlayerProfileRepository : IPlayerProfileRepository
+    {
+        Task SaveSnapshotAsync(
+            ulong steamId, Vector3 position,
+            IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
+            byte selectedHotbarIndex, CharacterSurvivalState survival,
             CancellationToken cancellationToken = default);
     }
 }

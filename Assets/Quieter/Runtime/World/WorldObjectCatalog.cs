@@ -194,6 +194,14 @@ namespace Quieter.World
             {
                 return CreateFiberPlantPresentation(spawn, parent);
             }
+            if (ResourceBalance.IsWildFood(spawn.Resource.ResourceItemId))
+            {
+                return CreateWildFoodPresentation(spawn, parent);
+            }
+            if (spawn.Resource.IsWaterSource)
+            {
+                return CreateSpringPresentation(spawn, parent);
+            }
             resourceLookup.TryGetValue(spawn.Resource.ResourceItemId, out var definition);
             var isBranch = spawn.Resource.IsLoosePickup && spawn.Resource.ResourceItemId == 2;
             var archetype = definition?.visualArchetype ?? ResourceVisualArchetype.VeinedRock;
@@ -304,6 +312,87 @@ namespace Quieter.World
                     new Vector3(0.1f, 0.7f, 0.08f),
                     Quaternion.Euler(0f, index * 37f, -28f + index * 14f),
                     new Color(0.35f, 0.62f, 0.19f));
+            }
+            return root;
+        }
+
+        private static GameObject CreateWildFoodPresentation(
+            WorldObjectSpawn spawn,
+            Transform parent)
+        {
+            var root = new GameObject("WildFood");
+            root.transform.SetParent(parent, true);
+            root.transform.SetPositionAndRotation(spawn.Position, spawn.Rotation);
+            var collider = root.AddComponent<SphereCollider>();
+            collider.radius = 0.55f;
+            var itemId = spawn.Resource.ResourceItemId;
+            if (itemId == ResourceBalance.WildMushroomsItemId)
+            {
+                for (var index = 0; index < 4; index++)
+                {
+                    var x = -0.24f + index * 0.16f;
+                    CreateDecoration(root.transform, PrimitiveType.Cylinder,
+                        $"MushroomStem_{index}", new Vector3(x, -0.08f, 0.05f * (index % 2)),
+                        new Vector3(0.05f, 0.16f + index * 0.015f, 0.05f),
+                        Quaternion.identity, new Color(0.78f, 0.7f, 0.52f));
+                    CreateDecoration(root.transform, PrimitiveType.Sphere,
+                        $"MushroomCap_{index}", new Vector3(x, 0.09f + index * 0.03f, 0.05f * (index % 2)),
+                        new Vector3(0.16f, 0.07f, 0.16f),
+                        Quaternion.identity, new Color(0.46f, 0.2f, 0.12f));
+                }
+                return root;
+            }
+
+            var leafColor = itemId == ResourceBalance.WildBerriesItemId
+                ? new Color(0.18f, 0.46f, 0.14f)
+                : new Color(0.29f, 0.5f, 0.13f);
+            for (var index = 0; index < 5; index++)
+            {
+                CreateDecoration(root.transform, PrimitiveType.Sphere,
+                    $"Leaf_{index}",
+                    new Vector3((index - 2) * 0.11f, -0.04f + (index % 2) * 0.08f,
+                        ((index + 1) % 3 - 1) * 0.09f),
+                    new Vector3(0.22f, 0.09f, 0.16f),
+                    Quaternion.Euler(0f, index * 41f, 0f), leafColor);
+            }
+            if (itemId == ResourceBalance.WildBerriesItemId)
+            {
+                for (var index = 0; index < 6; index++)
+                {
+                    CreateDecoration(root.transform, PrimitiveType.Sphere,
+                        $"Berry_{index}",
+                        new Vector3(-0.23f + index * 0.09f, 0.08f + (index % 2) * 0.05f,
+                            0.1f - (index % 3) * 0.09f),
+                        Vector3.one * 0.055f, Quaternion.identity,
+                        new Color(0.58f, 0.035f, 0.11f));
+                }
+            }
+            return root;
+        }
+
+        private static GameObject CreateSpringPresentation(
+            WorldObjectSpawn spawn,
+            Transform parent)
+        {
+            var root = new GameObject("Spring");
+            root.transform.SetParent(parent, true);
+            root.transform.SetPositionAndRotation(spawn.Position, spawn.Rotation);
+            var collider = root.AddComponent<BoxCollider>();
+            collider.center = new Vector3(0f, 0.1f, 0f);
+            collider.size = new Vector3(1.9f, 0.45f, 1.65f);
+            CreateDecoration(root.transform, PrimitiveType.Cylinder, "Water",
+                Vector3.zero, new Vector3(0.82f, 0.035f, 0.7f),
+                Quaternion.identity, new Color(0.12f, 0.4f, 0.5f));
+            for (var index = 0; index < 8; index++)
+            {
+                var angle = index / 8f * Mathf.PI * 2f;
+                CreateDecoration(root.transform, PrimitiveType.Sphere,
+                    $"SpringStone_{index}",
+                    new Vector3(Mathf.Cos(angle) * 0.82f, 0.06f,
+                        Mathf.Sin(angle) * 0.68f),
+                    new Vector3(0.28f, 0.16f, 0.24f),
+                    Quaternion.Euler(0f, index * 29f, 0f),
+                    new Color(0.31f, 0.34f, 0.32f));
             }
             return root;
         }

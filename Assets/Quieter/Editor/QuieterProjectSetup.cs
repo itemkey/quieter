@@ -4,6 +4,8 @@ using Quieter.Networking;
 using Quieter.Player;
 using Quieter.World;
 using Quieter.Inventory;
+using Quieter.Survival;
+using Quieter.Combat;
 using Unity.Netcode;
 using UnityEditor;
 using UnityEngine;
@@ -68,7 +70,9 @@ namespace Quieter.Editor
                 ResourceFolder + "/WorldObjectCatalog.asset");
             if (player == null || player.GetComponent<PlayerInventory>() == null
                 || player.GetComponent<PlayerResourceInteraction>() == null
-                || itemCatalog == null || !itemCatalog.TryGetItem(24, out _)
+                || player.GetComponent<PlayerSurvival>() == null
+                || player.GetComponent<PlayerCombat>() == null
+                || itemCatalog == null || !itemCatalog.TryGetItem(43, out _)
                 || !itemCatalog.TryGetRecipe(5, out _)
                 || worldCatalog == null || worldCatalog.Resources.Count < 15
                 || AssetDatabase.LoadAssetAtPath<GameObject>(WorldItemPrefabPath) == null)
@@ -129,6 +133,14 @@ namespace Quieter.Editor
                     {
                         contents.AddComponent<PlayerResourceInteraction>();
                     }
+                    if (contents.GetComponent<PlayerSurvival>() == null)
+                    {
+                        contents.AddComponent<PlayerSurvival>();
+                    }
+                    if (contents.GetComponent<PlayerCombat>() == null)
+                    {
+                        contents.AddComponent<PlayerCombat>();
+                    }
                     PrefabUtility.SaveAsPrefabAsset(contents, PlayerPrefabPath);
                 }
                 finally
@@ -150,9 +162,12 @@ namespace Quieter.Editor
                 controller.skinWidth = 0.08f;
                 controller.minMoveDistance = 0f;
                 root.AddComponent<NetworkObject>();
+                root.GetComponent<NetworkObject>().DontDestroyWithOwner = true;
                 var player = root.AddComponent<NetworkPlayer>();
                 root.AddComponent<PlayerInventory>();
                 root.AddComponent<PlayerResourceInteraction>();
+                root.AddComponent<PlayerSurvival>();
+                root.AddComponent<PlayerCombat>();
 
                 var presentation = GameObject.CreatePrimitive(PrimitiveType.Cube);
                 presentation.name = "Presentation";
@@ -287,6 +302,85 @@ namespace Quieter.Editor
                 "Простой деревянный стол для исследования образцов месторождений.",
                 1, PickupPlacementPriority.HotbarFirst, new Color(0.42f, 0.25f, 0.11f),
                 ItemKind.Placeable);
+            var berries = CreateItemDefinition(
+                "WildBerries", 25, "Дикие ягоды", "Немного воды и сахара; быстро портятся и могут быть заражены.",
+                12, PickupPlacementPriority.InventoryFirst, new Color(0.55f, 0.08f, 0.18f), ItemKind.Food,
+                calories: 55f, proteinGrams: 0.7f, micronutrients: 0.15f, waterLiters: 0.02f,
+                shelfLifeGameHours: 30f);
+            var roots = CreateItemDefinition(
+                "EdibleRoots", 26, "Съедобные коренья", "Грубая пища, требующая очистки и приготовления.",
+                10, PickupPlacementPriority.InventoryFirst, new Color(0.48f, 0.31f, 0.14f), ItemKind.Food,
+                calories: 110f, proteinGrams: 2.2f, micronutrients: 0.18f, waterLiters: 0.03f,
+                shelfLifeGameHours: 96f);
+            var mushrooms = CreateItemDefinition(
+                "WildMushrooms", 27, "Дикие грибы", "Без знания ботаники легко спутать съедобные и опасные виды.",
+                10, PickupPlacementPriority.InventoryFirst, new Color(0.58f, 0.46f, 0.31f), ItemKind.Food,
+                calories: 25f, proteinGrams: 3f, micronutrients: 0.16f, waterLiters: 0.02f,
+                shelfLifeGameHours: 20f);
+            var herbs = CreateItemDefinition(
+                "MedicinalHerbs", 28, "Лекарственные травы", "Сырьё для правдоподобных средневековых составов.",
+                12, PickupPlacementPriority.InventoryFirst, new Color(0.26f, 0.53f, 0.2f), ItemKind.Medical);
+            var waterskin = CreateItemDefinition(
+                "Waterskin", 29, "Бурдюк", "Сосуд для воды; жидкость сохраняет источник и загрязнение.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.42f, 0.24f, 0.12f), ItemKind.LiquidContainer,
+                liquidCapacityMilliliters: 1200);
+            var cookingPot = CreateItemDefinition(
+                "CookingPot", 30, "Глиняный котелок", "Обожжённая посуда для кипячения воды и приготовления пищи на очаге.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.52f, 0.34f, 0.23f), ItemKind.LiquidContainer,
+                liquidCapacityMilliliters: 2000, massKg: 1.5f, volumeLiters: 2.5f);
+            var soap = CreateItemDefinition(
+                "Soap", 31, "Мыло", "Снижает загрязнение рук, тела, ткани и инструментов.",
+                8, PickupPlacementPriority.InventoryFirst, new Color(0.79f, 0.74f, 0.56f), ItemKind.Medical);
+            var cloth = CreateItemDefinition(
+                "CleanCloth", 32, "Ткань", "Её чистота определяет безопасность повязки.",
+                12, PickupPlacementPriority.InventoryFirst, new Color(0.81f, 0.77f, 0.66f), ItemKind.Medical);
+            var needle = CreateItemDefinition(
+                "NeedleAndThread", 33, "Игла и нить", "Для швов; перед применением инструменты следует очистить и прогреть.",
+                1, PickupPlacementPriority.InventoryFirst, new Color(0.65f, 0.65f, 0.62f), ItemKind.Medical);
+            var splint = CreateItemDefinition(
+                "WoodenSplint", 34, "Деревянная шина", "Фиксирует повреждённую конечность на время долгого сращения.",
+                4, PickupPlacementPriority.InventoryFirst, new Color(0.55f, 0.36f, 0.17f), ItemKind.Medical);
+            var sheet = CreateItemDefinition(
+                "FiberSheet", 35, "Лист из волокон", "Высушенный лист для письма и картографии.",
+                8, PickupPlacementPriority.InventoryFirst, new Color(0.76f, 0.69f, 0.5f), ItemKind.Document);
+            var physicalMap = CreateItemDefinition(
+                "PhysicalMap", 36, "Карта", "Физический документ: нанесённые сведения остаются на предмете после смерти владельца.",
+                1, PickupPlacementPriority.InventoryFirst, new Color(0.69f, 0.57f, 0.34f), ItemKind.Document);
+            var charcoal = CreateItemDefinition(
+                "Charcoal", 37, "Древесный уголь", "Топливо и материал для письма.",
+                20, PickupPlacementPriority.InventoryFirst, new Color(0.1f, 0.09f, 0.08f));
+            var bucket = CreateItemDefinition(
+                "WoodenBucket", 38, "Деревянное ведро", "Открытый сосуд для переноса воды и отходов.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.42f, 0.28f, 0.13f), ItemKind.LiquidContainer,
+                liquidCapacityMilliliters: 8000, massKg: 1.8f, volumeLiters: 9f);
+            var tunic = CreateItemDefinition(
+                "WoolTunic", 39, "Шерстяная туника", "Слой одежды, который намокает, пачкается и удерживает тепло.",
+                1, PickupPlacementPriority.InventoryFirst, new Color(0.36f, 0.34f, 0.28f), ItemKind.Clothing,
+                insulation: 0.56f, waterResistance: 0.18f, massKg: 1.4f, volumeLiters: 3f);
+            var chamberPot = CreateItemDefinition(
+                "ChamberPot", 40, "Ночной горшок", "Сосуд для отходов; требует опорожнения и очистки.",
+                1, PickupPlacementPriority.InventoryFirst, new Color(0.52f, 0.42f, 0.31f), ItemKind.LiquidContainer,
+                liquidCapacityMilliliters: 2500, massKg: 1.6f, volumeLiters: 3f);
+            var compass = CreateItemDefinition(
+                "RareCompass", 41, "Редкий компас", "Показывает положение и направление на физической карте.",
+                1, PickupPlacementPriority.InventoryFirst, new Color(0.72f, 0.58f, 0.18f), ItemKind.Tool);
+            var club = CreateItemDefinition(
+                "WoodenClub", 42, "Дубина", "Тяжёлое короткое оружие, вызывающее ушибы и переломы.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.34f, 0.2f, 0.1f), ItemKind.Weapon);
+            var spear = CreateItemDefinition(
+                "WoodenSpear", 43, "Копьё", "Длинное колющее оружие; опасно на дистанции, неудобно вплотную.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.48f, 0.36f, 0.17f), ItemKind.Weapon);
+            var leanTo = CreateItemDefinition(
+                "LeanTo", 44, "Навес", "Крыша и ветрозащитная стенка: ослабляют дождь и ветер, но не удерживают дым.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.31f, 0.27f, 0.12f), ItemKind.Placeable,
+                massKg: 28f, volumeLiters: 80f);
+            var hearth = CreateItemDefinition(
+                "StoneHearth", 45, "Каменный очаг", "Сжигает ветки или древесный уголь, даёт настоящее тепло и требует топлива.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.33f, 0.31f, 0.28f), ItemKind.Placeable,
+                massKg: 35f, volumeLiters: 35f);
+            var wastePit = CreateItemDefinition(
+                "UnlinedWastePit", 46, "Необлицованная выгребная яма", "Примитивная яма для отходов. Дешёвая, но заражает почву и воду ниже по склону.",
+                1, PickupPlacementPriority.HotbarFirst, new Color(0.19f, 0.12f, 0.055f), ItemKind.Placeable);
 
             const string recipePath = ResourceFolder + "/AxeRecipe.asset";
             var recipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(recipePath);
@@ -363,6 +457,78 @@ namespace Quieter.Editor
             }, researchTable, 1, CraftingCategory.Structures);
             EditorUtility.SetDirty(researchTableRecipe);
 
+            const string leanToRecipePath = ResourceFolder + "/LeanToRecipe.asset";
+            var leanToRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(leanToRecipePath);
+            if (leanToRecipe == null)
+            {
+                leanToRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(leanToRecipe, leanToRecipePath);
+            }
+            leanToRecipe.Configure(6, "Навес", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 16 },
+                new CraftingRecipe.Ingredient { Item = rope, Quantity = 6 },
+            }, leanTo, 1, CraftingCategory.Structures);
+            EditorUtility.SetDirty(leanToRecipe);
+
+            const string hearthRecipePath = ResourceFolder + "/StoneHearthRecipe.asset";
+            var hearthRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(hearthRecipePath);
+            if (hearthRecipe == null)
+            {
+                hearthRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(hearthRecipe, hearthRecipePath);
+            }
+            hearthRecipe.Configure(7, "Каменный очаг", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = stone, Quantity = 12 },
+                new CraftingRecipe.Ingredient { Item = clay, Quantity = 4 },
+                new CraftingRecipe.Ingredient { Item = flint, Quantity = 1 },
+            }, hearth, 1, CraftingCategory.Structures);
+            EditorUtility.SetDirty(hearthRecipe);
+
+            const string bucketRecipePath = ResourceFolder + "/WoodenBucketRecipe.asset";
+            var bucketRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(bucketRecipePath);
+            if (bucketRecipe == null)
+            {
+                bucketRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(bucketRecipe, bucketRecipePath);
+            }
+            bucketRecipe.Configure(8, "Деревянное ведро", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 6 },
+                new CraftingRecipe.Ingredient { Item = rope, Quantity = 2 },
+            }, bucket, 1, CraftingCategory.Tools);
+            EditorUtility.SetDirty(bucketRecipe);
+
+            const string wastePitRecipePath = ResourceFolder + "/UnlinedWastePitRecipe.asset";
+            var wastePitRecipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(wastePitRecipePath);
+            if (wastePitRecipe == null)
+            {
+                wastePitRecipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(wastePitRecipe, wastePitRecipePath);
+            }
+            wastePitRecipe.Configure(9, "Необлицованная выгребная яма", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 4 },
+                new CraftingRecipe.Ingredient { Item = rope, Quantity = 2 },
+            }, wastePit, 1, CraftingCategory.Structures);
+            EditorUtility.SetDirty(wastePitRecipe);
+
+            var potRecipe = CreateSurvivalRecipe("CookingPotRecipe", 10, cookingPot,
+                new[] { new CraftingRecipe.Ingredient { Item = clay, Quantity = 5 } },
+                90f, true, SkillId.Pottery);
+            var chamberPotRecipe = CreateSurvivalRecipe("ChamberPotRecipe", 11, chamberPot,
+                new[] { new CraftingRecipe.Ingredient { Item = clay, Quantity = 4 } },
+                60f, true, SkillId.Pottery);
+            var clothRecipe = CreateSurvivalRecipe("ClothRecipe", 12, cloth,
+                new[] { new CraftingRecipe.Ingredient { Item = plantFiber, Quantity = 8 } },
+                30f, false, SkillId.CordageAndTextiles);
+            var splintRecipe = CreateSurvivalRecipe("SplintRecipe", 13, splint, new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 2 },
+                new CraftingRecipe.Ingredient { Item = rope, Quantity = 1 },
+            }, 20f, false, SkillId.Carpentry);
+
             var catalog = AssetDatabase.LoadAssetAtPath<ItemCatalog>(ItemCatalogPath);
             if (catalog == null)
             {
@@ -379,9 +545,31 @@ namespace Quieter.Editor
                     stone, wood, rope, axe, pickaxe, hiddenSample, iron, copper, tin,
                     lead, silver, gold, coal, salt, sulfur, cinnabar,
                     limestone, clay, gypsum, flint, marble, shovel, plantFiber, researchTable,
+                    berries, roots, mushrooms, herbs, waterskin, cookingPot, soap, cloth,
+                    needle, splint, sheet, physicalMap, charcoal, bucket, tunic, chamberPot,
+                    compass, club, spear, leanTo, hearth, wastePit,
                 },
-                new[] { recipe, pickaxeRecipe, shovelRecipe, ropeRecipe, researchTableRecipe });
+                new[] { recipe, pickaxeRecipe, shovelRecipe, ropeRecipe, researchTableRecipe,
+                    leanToRecipe, hearthRecipe, bucketRecipe, wastePitRecipe,
+                    potRecipe, chamberPotRecipe, clothRecipe, splintRecipe });
             EditorUtility.SetDirty(catalog);
+        }
+
+        private static CraftingRecipe CreateSurvivalRecipe(
+            string name, ushort id, ItemDefinition output,
+            CraftingRecipe.Ingredient[] ingredients, float seconds, bool needsHearth, SkillId skill)
+        {
+            var path = $"{ResourceFolder}/{name}.asset";
+            var recipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(path);
+            if (recipe == null)
+            {
+                recipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+                AssetDatabase.CreateAsset(recipe, path);
+            }
+            recipe.Configure(id, output.DisplayName, ingredients, output, 1,
+                CraftingCategory.Tools, seconds, needsHearth, skill);
+            EditorUtility.SetDirty(recipe);
+            return recipe;
         }
 
         private static ItemDefinition CreateItemDefinition(
@@ -395,7 +583,17 @@ namespace Quieter.Editor
             ItemKind kind = ItemKind.Resource,
             ToolKind tool = ToolKind.None,
             byte toolTier = 0,
-            ushort maximumDurability = 0)
+            ushort maximumDurability = 0,
+            float calories = 0f,
+            float proteinGrams = 0f,
+            float micronutrients = 0f,
+            float waterLiters = 0f,
+            ushort liquidCapacityMilliliters = 0,
+            float insulation = 0f,
+            float waterResistance = 0f,
+            float shelfLifeGameHours = 0f,
+            float massKg = 0.2f,
+            float volumeLiters = 0.25f)
         {
             var path = $"{ResourceFolder}/{fileName}.asset";
             var item = AssetDatabase.LoadAssetAtPath<ItemDefinition>(path);
@@ -410,7 +608,17 @@ namespace Quieter.Editor
                 kind: kind,
                 configuredTool: tool,
                 configuredToolTier: toolTier,
-                configuredMaximumDurability: maximumDurability);
+                configuredMaximumDurability: maximumDurability,
+                configuredUnitMassKg: massKg,
+                configuredUnitVolumeLiters: volumeLiters,
+                configuredCaloriesPerUnit: calories,
+                configuredProteinGramsPerUnit: proteinGrams,
+                configuredMicronutrientsPerUnit: micronutrients,
+                configuredWaterLitersPerUnit: waterLiters,
+                configuredLiquidCapacityMilliliters: liquidCapacityMilliliters,
+                configuredInsulation: insulation,
+                configuredWaterResistance: waterResistance,
+                configuredShelfLifeGameHours: shelfLifeGameHours);
             EditorUtility.SetDirty(item);
             return item;
         }

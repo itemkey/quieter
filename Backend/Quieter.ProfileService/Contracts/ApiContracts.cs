@@ -29,7 +29,10 @@ public sealed record PlayerProfileResponse(
     IReadOnlyList<InventorySlotResponse> PendingItems,
     byte SelectedHotbarIndex,
     IReadOnlyList<DepositKnowledgeResponse> DepositKnowledge,
-    IReadOnlyList<MapNoteResponse> MapNotes);
+    IReadOnlyList<MapNoteResponse> MapNotes,
+    string CharacterId,
+    string SurvivalJson,
+    long SurvivalRevision);
 
 public sealed record PositionRequest(float X, float Y, float Z);
 
@@ -42,12 +45,26 @@ public sealed record InventorySlotResponse(
     ushort HiddenItemId = 0,
     string? SourceNodeId = null,
     byte RevealAtPercent = 0,
-    string? SampleId = null);
+    string? SampleId = null,
+    string? ItemInstanceId = null,
+    ushort Freshness = 10000,
+    ushort BiologicalContamination = 0,
+    ushort ToxinContamination = 0,
+    ushort Wetness = 0,
+    ushort Cleanliness = 10000,
+    ushort LiquidMilliliters = 0,
+    byte LiquidKind = 0,
+    bool Equipped = false);
 
 public sealed record InventoryRequest(
     byte SelectedHotbarIndex,
     IReadOnlyList<InventorySlotResponse> Slots,
     IReadOnlyList<InventorySlotResponse>? PendingItems = null);
+
+public sealed record SurvivalRequest(string SurvivalJson, long Revision);
+
+public sealed record PlayerSnapshotRequest(
+    string CharacterId, PositionRequest Position, InventoryRequest Inventory, SurvivalRequest Survival);
 
 public sealed record PlacedObjectResponse(
     string ObjectId,
@@ -87,6 +104,7 @@ public sealed record MapNoteResponse(
     string Text,
     DateTime CreatedAtUtc,
     DateTime UpdatedAtUtc,
-    int WorldId = 1);
+    int WorldId = 1,
+    string MapItemInstanceId = "");
 
 public sealed record MapNoteListResponse(IReadOnlyList<MapNoteResponse> Notes);

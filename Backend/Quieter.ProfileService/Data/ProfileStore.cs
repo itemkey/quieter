@@ -6,7 +6,7 @@ namespace Quieter.ProfileService.Data;
 
 public sealed class ProfileStore(ProfileDbContext database)
 {
-    public const ushort CurrentGeneratorVersion = 5;
+    public const ushort CurrentGeneratorVersion = 7;
 
     public async Task<WorldResponse> GetOrCreateWorldAsync(CancellationToken cancellationToken)
     {
@@ -35,6 +35,14 @@ public sealed class ProfileStore(ProfileDbContext database)
             }
         }
 
+        if (world.GeneratorVersion != CurrentGeneratorVersion)
+        {
+            throw new InvalidOperationException(
+                $"World generator v{world.GeneratorVersion} is incompatible with "
+                + $"required v{CurrentGeneratorVersion}. Back up PostgreSQL and run "
+                + "the explicit survival-world reset operation.");
+        }
+
         return ToResponse(world);
     }
 
@@ -47,7 +55,8 @@ public sealed class ProfileStore(ProfileDbContext database)
             .Include(candidate => candidate.InventorySlots)
             .Include(candidate => candidate.PendingItems)
             .Include(candidate => candidate.DepositKnowledge)
-            .Include(candidate => candidate.MapNotes)
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.Items)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
         var now = DateTime.UtcNow;
         if (player is null)
@@ -70,8 +79,169 @@ public sealed class ProfileStore(ProfileDbContext database)
             player.LastSeenAtUtc = now;
         }
 
+        if (player.CurrentCharacter is null)
+        {
+            var character = new CharacterEntity
+            {
+                CharacterId = Guid.NewGuid(),
+                Name = player.DisplayName,
+                SurvivalJson = "{}",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+            };
+            database.Characters.Add(character);
+            player.CurrentCharacter = character;
+            player.CurrentCharacterId = character.CharacterId;
+        }
+
+        if (player.CurrentCharacter.Items.Count == 0
+            && (player.InventorySlots.Count > 0 || player.PendingItems.Count > 0))
+            ApplyInventory(player, ReadLegacyInventory(player));
         await database.SaveChangesAsync(cancellationToken);
-        return ToResponse(player);
+        var carriedMapIds = player.CurrentCharacter.Items.Where(slot => slot.StorageArea == 0)
+            .Where(slot => slot.ItemId == 36 && slot.ItemInstanceId.HasValue)
+            .Select(slot => slot.ItemInstanceId!.Value)
+            .Distinct()
+            .ToArray();
+        var mapNotes = carriedMapIds.Length == 0
+            ? []
+            : await database.PlayerMapNotes.AsNoTracking()
+                .Where(note => carriedMapIds.Contains(note.MapItemInstanceId))
+                .ToArrayAsync(cancellationToken);
+        return ToResponse(player, mapNotes);
+    }
+
+    public async Task<bool> SaveSnapshotAsync(
+        string steamIdText, PlayerSnapshotRequest request, CancellationToken cancellationToken)
+    {
+        var steamId = ParseSteamId(steamIdText);
+        if (!Guid.TryParse(request.CharacterId, out var characterId)
+            || request.Position is null || request.Inventory is null || request.Survival is null
+            || !float.IsFinite(request.Position.X) || !float.IsFinite(request.Position.Y)
+            || !float.IsFinite(request.Position.Z) || request.Survival.Revision <= 0)
+            throw new ArgumentException("Player snapshot is invalid.");
+        ValidateInventory(request.Inventory);
+        var physiology = ReadLifeState(request.Survival.SurvivalJson, strict: true, characterId);
+
+        var player = await database.Players
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.InventorySlots)
+            .Include(candidate => candidate.PendingItems)
+            .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
+        if (player?.CurrentCharacter is null) return false;
+        var character = player.CurrentCharacter;
+        if (character.CharacterId != characterId)
+            throw new DbUpdateConcurrencyException("The account now controls another character.");
+        if (request.Survival.Revision <= character.Revision) return true;
+        var previous = ReadLifeState(character.SurvivalJson, strict: false);
+        if ((character.LifeState == 4 || previous.LifeState == 4) && physiology.LifeState != 4)
+            throw new ArgumentException("An irreversibly dead character cannot be resurrected.");
+
+        character.SurvivalJson = request.Survival.SurvivalJson;
+        character.Revision = request.Survival.Revision;
+        character.LifeState = physiology.LifeState;
+        character.DeathCause = physiology.DeathCause;
+        character.UpdatedAtUtc = DateTime.UtcNow;
+        player.PositionX = request.Position.X;
+        player.PositionY = request.Position.Y;
+        player.PositionZ = request.Position.Z;
+        ApplyInventory(player, request.Inventory);
+        // EF commits all rows in one transaction. Revision and account binding
+        // are concurrency tokens, so a conflicting save rolls the entire batch back.
+        await database.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private static (byte LifeState, byte DeathCause) ReadLifeState(
+        string json, bool strict, Guid? expectedCharacterId = null)
+    {
+        if (string.IsNullOrWhiteSpace(json) || json.Length > 1_000_000)
+            throw new ArgumentException("Survival aggregate is missing or too large.");
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object)
+                throw new ArgumentException("Survival aggregate must be an object.");
+            if (expectedCharacterId.HasValue
+                && (!root.TryGetProperty("CharacterId", out var id)
+                    || id.ValueKind != System.Text.Json.JsonValueKind.String
+                    || !Guid.TryParse(id.GetString(), out var parsed) || parsed != expectedCharacterId))
+                throw new ArgumentException("Snapshot character identifiers disagree.");
+            if (!root.TryGetProperty("Physiology", out var physiology))
+            {
+                if (strict) throw new ArgumentException("Snapshot physiology is missing.");
+                return (0, 0);
+            }
+            if (physiology.ValueKind != System.Text.Json.JsonValueKind.Object
+                || !physiology.TryGetProperty("LifeState", out var life)
+                || life.ValueKind != System.Text.Json.JsonValueKind.Number
+                || !life.TryGetByte(out var lifeState) || lifeState > 4
+                || !physiology.TryGetProperty("DeathCause", out var cause)
+                || cause.ValueKind != System.Text.Json.JsonValueKind.Number
+                || !cause.TryGetByte(out var deathCause) || deathCause > 13
+                || (lifeState == 4) != (deathCause != 0))
+                throw new ArgumentException("Life state and physiological death cause are inconsistent.");
+            return (lifeState, deathCause);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new ArgumentException("Survival aggregate is not valid JSON.", exception);
+        }
+    }
+
+    public async Task<bool> SaveSurvivalAsync(
+        string steamIdText,
+        SurvivalRequest request,
+        CancellationToken cancellationToken)
+    {
+        var steamId = ParseSteamId(steamIdText);
+        if (request.Revision < 0)
+        {
+            throw new ArgumentException("Survival revision cannot be negative.");
+        }
+        if (string.IsNullOrWhiteSpace(request.SurvivalJson)
+            || request.SurvivalJson.Length > 1_000_000)
+        {
+            throw new ArgumentException("Survival aggregate is missing or too large.");
+        }
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(request.SurvivalJson);
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                throw new ArgumentException("Survival aggregate must be a JSON object.");
+            }
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new ArgumentException("Survival aggregate is not valid JSON.", exception);
+        }
+
+        var player = await database.Players
+            .Include(candidate => candidate.CurrentCharacter)
+            .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
+        if (player?.CurrentCharacter is null) return false;
+        if (request.Revision <= player.CurrentCharacter.Revision)
+        {
+            return true;
+        }
+
+        var physiology = ReadLifeState(request.SurvivalJson, strict: false);
+        var previous = ReadLifeState(player.CurrentCharacter.SurvivalJson, strict: false);
+        if ((player.CurrentCharacter.LifeState == 4 || previous.LifeState == 4)
+            && physiology.LifeState != 4)
+            throw new ArgumentException("An irreversibly dead character cannot be resurrected.");
+
+        player.CurrentCharacter.SurvivalJson = request.SurvivalJson;
+        player.CurrentCharacter.LifeState = physiology.LifeState;
+        player.CurrentCharacter.DeathCause = physiology.DeathCause;
+        player.CurrentCharacter.Revision = request.Revision;
+        player.CurrentCharacter.UpdatedAtUtc = DateTime.UtcNow;
+        player.LastSeenAtUtc = DateTime.UtcNow;
+        await database.SaveChangesAsync(cancellationToken);
+        return true;
     }
 
     public async Task<ResourceNodeStateListResponse> LoadResourceNodeStatesAsync(
@@ -160,7 +330,16 @@ public sealed class ProfileStore(ProfileDbContext database)
                 entry.InputHiddenItemId,
                 FormatOptionalId(entry.InputSourceNodeId),
                 entry.InputRevealAtPercent,
-                FormatOptionalId(entry.InputSampleId)),
+                FormatOptionalId(entry.InputSampleId),
+                FormatOptionalId(entry.InputItemInstanceId),
+                entry.InputFreshness,
+                entry.InputBiologicalContamination,
+                entry.InputToxinContamination,
+                entry.InputWetness,
+                entry.InputCleanliness,
+                entry.InputLiquidMilliliters,
+                entry.InputLiquidKind,
+                entry.InputEquipped),
             entry.CreatedAtUtc,
             entry.UpdatedAtUtc)).ToArray());
     }
@@ -199,6 +378,7 @@ public sealed class ProfileStore(ProfileDbContext database)
             }
             _ = ParseOptionalInstanceId(input?.SourceNodeId);
             _ = ParseOptionalInstanceId(input?.SampleId);
+            _ = ParseOptionalInstanceId(input?.ItemInstanceId);
         }
         var existing = await database.WorldPlacedObjects
             .Where(entry => entry.WorldId == worldId)
@@ -225,6 +405,15 @@ public sealed class ProfileStore(ProfileDbContext database)
                 InputSourceNodeId = ParseOptionalInstanceId(input?.SourceNodeId),
                 InputRevealAtPercent = input?.RevealAtPercent ?? 0,
                 InputSampleId = ParseOptionalInstanceId(input?.SampleId),
+                InputItemInstanceId = ParseOptionalInstanceId(input?.ItemInstanceId),
+                InputFreshness = input?.Freshness ?? 10000,
+                InputBiologicalContamination = input?.BiologicalContamination ?? 0,
+                InputToxinContamination = input?.ToxinContamination ?? 0,
+                InputWetness = input?.Wetness ?? 0,
+                InputCleanliness = input?.Cleanliness ?? 10000,
+                InputLiquidMilliliters = input?.LiquidMilliliters ?? 0,
+                InputLiquidKind = input?.LiquidKind ?? 0,
+                InputEquipped = input?.Equipped ?? false,
                 CreatedAtUtc = source.Entry.CreatedAtUtc == default
                     ? now : source.Entry.CreatedAtUtc.ToUniversalTime(),
                 UpdatedAtUtc = source.Entry.UpdatedAtUtc == default
@@ -241,6 +430,21 @@ public sealed class ProfileStore(ProfileDbContext database)
         CancellationToken cancellationToken)
     {
         var steamId = ParseSteamId(steamIdText);
+        ValidateInventory(request);
+        var player = await database.Players
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.InventorySlots)
+            .Include(candidate => candidate.PendingItems)
+            .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
+        if (player?.CurrentCharacter is null) return false;
+        ApplyInventory(player, request);
+        await database.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private static void ValidateInventory(InventoryRequest request)
+    {
         if (request.SelectedHotbarIndex >= 6)
         {
             throw new ArgumentException("Selected hotbar index must be between 0 and 5.");
@@ -260,6 +464,7 @@ public sealed class ProfileStore(ProfileDbContext database)
             }
             _ = ParseOptionalInstanceId(slot.SourceNodeId);
             _ = ParseOptionalInstanceId(slot.SampleId);
+            _ = ParseOptionalInstanceId(slot.ItemInstanceId);
         }
 
         var pendingItems = request.PendingItems ?? [];
@@ -272,47 +477,57 @@ public sealed class ProfileStore(ProfileDbContext database)
         {
             _ = ParseOptionalInstanceId(item.SourceNodeId);
             _ = ParseOptionalInstanceId(item.SampleId);
+            _ = ParseOptionalInstanceId(item.ItemInstanceId);
         }
+        var instanceIds = slots.Concat(pendingItems)
+            .Select(slot => ParseOptionalInstanceId(slot.ItemInstanceId))
+            .Where(id => id.HasValue).ToArray();
+        if (instanceIds.Distinct().Count() != instanceIds.Length)
+            throw new ArgumentException("An item instance cannot occupy multiple slots.");
+    }
 
-        var player = await database.Players
-            .Include(candidate => candidate.InventorySlots)
-            .Include(candidate => candidate.PendingItems)
-            .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
-        if (player is null) return false;
-
+    private void ApplyInventory(PlayerEntity player, InventoryRequest request)
+    {
+        var character = player.CurrentCharacter
+            ?? throw new InvalidOperationException("Account has no character.");
+        database.CharacterItems.RemoveRange(character.Items);
+        character.Items = (request.Slots ?? [])
+            .Select(slot => ToCharacterItem(character.CharacterId, 0, slot.SlotIndex, slot))
+            .Concat((request.PendingItems ?? [])
+                .Select((slot, index) => ToCharacterItem(character.CharacterId, 1, (ushort)index, slot)))
+            .ToList();
         database.PlayerInventorySlots.RemoveRange(player.InventorySlots);
-        player.InventorySlots = slots.Select(slot => new PlayerInventorySlotEntity
-        {
-            SteamId = steamId,
-            SlotIndex = slot.SlotIndex,
-                ItemId = slot.ItemId,
-                Quantity = slot.Quantity,
-                Condition = slot.Condition,
-                Quality = slot.Quality,
-                HiddenItemId = slot.HiddenItemId,
-                SourceNodeId = ParseOptionalInstanceId(slot.SourceNodeId),
-                RevealAtPercent = slot.RevealAtPercent,
-                SampleId = ParseOptionalInstanceId(slot.SampleId),
-        }).ToList();
         database.PlayerPendingItems.RemoveRange(player.PendingItems);
-        player.PendingItems = pendingItems.Select((slot, index) => new PlayerPendingItemEntity
-        {
-            SteamId = steamId,
-            ItemIndex = (ushort)index,
-            ItemId = slot.ItemId,
-            Quantity = slot.Quantity,
-            Condition = slot.Condition,
-            Quality = slot.Quality,
-            HiddenItemId = slot.HiddenItemId,
-            SourceNodeId = ParseOptionalInstanceId(slot.SourceNodeId),
-            RevealAtPercent = slot.RevealAtPercent,
-            SampleId = ParseOptionalInstanceId(slot.SampleId),
-        }).ToList();
+        player.InventorySlots.Clear();
+        player.PendingItems.Clear();
         player.SelectedHotbarIndex = request.SelectedHotbarIndex;
         player.LastSeenAtUtc = DateTime.UtcNow;
-        await database.SaveChangesAsync(cancellationToken);
-        return true;
     }
+
+    private static CharacterItemEntity ToCharacterItem(
+        Guid characterId, byte area, ushort index, InventorySlotResponse slot) => new()
+    {
+        CharacterId = characterId,
+        StorageArea = area,
+        SlotIndex = index,
+        ItemId = slot.ItemId,
+        Quantity = slot.Quantity,
+        Condition = slot.Condition,
+        Quality = slot.Quality,
+        HiddenItemId = slot.HiddenItemId,
+        SourceNodeId = ParseOptionalInstanceId(slot.SourceNodeId),
+        RevealAtPercent = slot.RevealAtPercent,
+        SampleId = ParseOptionalInstanceId(slot.SampleId),
+        ItemInstanceId = ParseOptionalInstanceId(slot.ItemInstanceId),
+        Freshness = slot.Freshness,
+        BiologicalContamination = slot.BiologicalContamination,
+        ToxinContamination = slot.ToxinContamination,
+        Wetness = slot.Wetness,
+        Cleanliness = slot.Cleanliness,
+        LiquidMilliliters = slot.LiquidMilliliters,
+        LiquidKind = slot.LiquidKind,
+        Equipped = slot.Equipped,
+    };
 
     public async Task<bool> SaveDepositKnowledgeAsync(
         string steamIdText,
@@ -371,28 +586,40 @@ public sealed class ProfileStore(ProfileDbContext database)
         CancellationToken cancellationToken)
     {
         var steamId = ParseSteamId(steamIdText);
-        var playerExists = await database.Players.AnyAsync(
-            player => player.SteamId == steamId, cancellationToken);
+        var player = await database.Players
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.Items)
+            .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
         var world = await database.Worlds.AsNoTracking()
             .SingleOrDefaultAsync(candidate => candidate.Id == worldId, cancellationToken);
-        if (!playerExists || world is null) return false;
+        if (player?.CurrentCharacter is null || world is null) return false;
+
+        var carriedMapIds = player.CurrentCharacter.Items.Where(slot => slot.StorageArea == 0)
+            .Where(slot => slot.ItemId == 36 && slot.ItemInstanceId.HasValue)
+            .Select(slot => slot.ItemInstanceId!.Value)
+            .Distinct()
+            .ToArray();
 
         var incoming = request.Notes ?? [];
-        if (incoming.Count > 64) throw new ArgumentException("Too many map notes.");
         var parsed = incoming.Select(note => new
         {
             Entry = note,
+            MapItemInstanceId = ParseInstanceId(note.MapItemInstanceId),
             NoteId = ParseInstanceId(note.NoteId),
             Text = NormalizeNoteText(note.Text),
         }).ToArray();
-        if (parsed.Select(note => note.NoteId).Distinct().Count() != parsed.Length
-            || parsed.Any(note => note.Text.Length == 0))
+        if (parsed.GroupBy(note => note.MapItemInstanceId).Any(group => group.Count() > 64)
+            || parsed.Select(note => (note.MapItemInstanceId, note.NoteId))
+                .Distinct().Count() != parsed.Length
+            || parsed.Any(note => note.Text.Length == 0
+                || !carriedMapIds.Contains(note.MapItemInstanceId)))
         {
             throw new ArgumentException("Map notes are invalid.");
         }
 
         var existing = await database.PlayerMapNotes
-            .Where(note => note.SteamId == steamId && note.WorldId == worldId)
+            .Where(note => note.WorldId == worldId
+                && carriedMapIds.Contains(note.MapItemInstanceId))
             .ToListAsync(cancellationToken);
         database.PlayerMapNotes.RemoveRange(existing);
         var now = DateTime.UtcNow;
@@ -404,6 +631,7 @@ public sealed class ProfileStore(ProfileDbContext database)
             {
                 SteamId = steamId,
                 WorldId = worldId,
+                MapItemInstanceId = source.MapItemInstanceId,
                 NoteId = source.NoteId,
                 X = Math.Clamp(FiniteOrDefault(source.Entry.X), -halfWidth, halfWidth),
                 Z = Math.Clamp(FiniteOrDefault(source.Entry.Z), -halfDepth, halfDepth),
@@ -481,14 +709,8 @@ public sealed class ProfileStore(ProfileDbContext database)
         };
     }
 
-    private static PlayerProfileResponse ToResponse(PlayerEntity player) => new(
-        decimal.Truncate(player.SteamId).ToString(System.Globalization.CultureInfo.InvariantCulture),
-        player.DisplayName,
-        player.PositionX,
-        player.PositionY,
-        player.PositionZ,
-        player.CreatedAtUtc,
-        player.LastSeenAtUtc,
+    private static InventoryRequest ReadLegacyInventory(PlayerEntity player) => new(
+        player.SelectedHotbarIndex,
         player.InventorySlots
             .OrderBy(slot => slot.SlotIndex)
             .Select(slot => new InventorySlotResponse(
@@ -503,7 +725,16 @@ public sealed class ProfileStore(ProfileDbContext database)
                         System.Globalization.CultureInfo.InvariantCulture)
                     : null,
                 slot.RevealAtPercent,
-                FormatOptionalId(slot.SampleId)))
+                FormatOptionalId(slot.SampleId),
+                FormatOptionalId(slot.ItemInstanceId),
+                slot.Freshness,
+                slot.BiologicalContamination,
+                slot.ToxinContamination,
+                slot.Wetness,
+                slot.Cleanliness,
+                slot.LiquidMilliliters,
+                slot.LiquidKind,
+                slot.Equipped))
             .ToArray(),
         player.PendingItems
             .OrderBy(item => item.ItemIndex)
@@ -516,7 +747,74 @@ public sealed class ProfileStore(ProfileDbContext database)
                 item.HiddenItemId,
                 FormatOptionalId(item.SourceNodeId),
                 item.RevealAtPercent,
-                FormatOptionalId(item.SampleId)))
+                FormatOptionalId(item.SampleId),
+                FormatOptionalId(item.ItemInstanceId),
+                item.Freshness,
+                item.BiologicalContamination,
+                item.ToxinContamination,
+                item.Wetness,
+                item.Cleanliness,
+                item.LiquidMilliliters,
+                item.LiquidKind,
+                item.Equipped))
+            .ToArray());
+
+    private static PlayerProfileResponse ToResponse(
+        PlayerEntity player,
+        IReadOnlyList<PlayerMapNoteEntity> mapNotes) => new(
+        decimal.Truncate(player.SteamId).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        player.DisplayName,
+        player.PositionX,
+        player.PositionY,
+        player.PositionZ,
+        player.CreatedAtUtc,
+        player.LastSeenAtUtc,
+        (player.CurrentCharacter?.Items ?? []).Where(slot => slot.StorageArea == 0)
+            .OrderBy(slot => slot.SlotIndex)
+            .Select(slot => new InventorySlotResponse(
+                (byte)slot.SlotIndex,
+                slot.ItemId,
+                slot.Quantity,
+                slot.Condition,
+                slot.Quality,
+                slot.HiddenItemId,
+                slot.SourceNodeId.HasValue
+                    ? decimal.Truncate(slot.SourceNodeId.Value).ToString(
+                        System.Globalization.CultureInfo.InvariantCulture)
+                    : null,
+                slot.RevealAtPercent,
+                FormatOptionalId(slot.SampleId),
+                FormatOptionalId(slot.ItemInstanceId),
+                slot.Freshness,
+                slot.BiologicalContamination,
+                slot.ToxinContamination,
+                slot.Wetness,
+                slot.Cleanliness,
+                slot.LiquidMilliliters,
+                slot.LiquidKind,
+                slot.Equipped))
+            .ToArray(),
+        (player.CurrentCharacter?.Items ?? []).Where(item => item.StorageArea == 1)
+            .OrderBy(item => item.SlotIndex)
+            .Select(item => new InventorySlotResponse(
+                (byte)Math.Min(item.SlotIndex, byte.MaxValue),
+                item.ItemId,
+                item.Quantity,
+                item.Condition,
+                item.Quality,
+                item.HiddenItemId,
+                FormatOptionalId(item.SourceNodeId),
+                item.RevealAtPercent,
+                FormatOptionalId(item.SampleId),
+                FormatOptionalId(item.ItemInstanceId),
+                item.Freshness,
+                item.BiologicalContamination,
+                item.ToxinContamination,
+                item.Wetness,
+                item.Cleanliness,
+                item.LiquidMilliliters,
+                item.LiquidKind,
+                item.Equipped))
             .ToArray(),
         player.SelectedHotbarIndex,
         player.DepositKnowledge
@@ -528,7 +826,7 @@ public sealed class ProfileStore(ProfileDbContext database)
                 entry.DiscoveredAtUtc,
                 entry.WorldId))
             .ToArray(),
-        player.MapNotes
+        mapNotes
             .OrderBy(note => note.NoteId)
             .Select(note => new MapNoteResponse(
                 decimal.Truncate(note.NoteId).ToString(
@@ -538,8 +836,13 @@ public sealed class ProfileStore(ProfileDbContext database)
                 note.Text,
                 note.CreatedAtUtc,
                 note.UpdatedAtUtc,
-                note.WorldId))
-            .ToArray());
+                note.WorldId,
+                decimal.Truncate(note.MapItemInstanceId).ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)))
+            .ToArray(),
+        player.CurrentCharacter?.CharacterId.ToString("D") ?? string.Empty,
+        player.CurrentCharacter?.SurvivalJson ?? "{}",
+        player.CurrentCharacter?.Revision ?? 0);
 
     private static decimal ParseSteamId(string value)
     {

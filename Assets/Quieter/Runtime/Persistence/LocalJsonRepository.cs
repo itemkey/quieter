@@ -5,11 +5,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Quieter.World;
 using Quieter.Inventory;
+using Quieter.Survival;
 using UnityEngine;
 
 namespace Quieter.Persistence
 {
-    public sealed class LocalJsonRepository : IWorldRepository, IPlayerProfileRepository
+    public sealed class LocalJsonRepository : IWorldRepository, IAtomicPlayerProfileRepository
     {
         [Serializable]
         private sealed class State
@@ -19,6 +20,7 @@ namespace Quieter.Persistence
             public List<StoredPlayer> Players = new();
             public List<StoredResourceNodeState> ResourceNodes = new();
             public List<StoredPlacedObject> PlacedObjects = new();
+            public List<StoredMapNote> MapNotes = new();
         }
 
         [Serializable]
@@ -34,6 +36,7 @@ namespace Quieter.Persistence
             public byte SelectedHotbarIndex;
             public List<StoredDepositKnowledge> DepositKnowledge = new();
             public List<StoredMapNote> MapNotes = new();
+            public CharacterSurvivalState Survival = new();
         }
 
         private readonly string path;
@@ -66,10 +69,13 @@ namespace Quieter.Persistence
                         changed = true;
                     }
 
-                    if (state.World.GeneratorVersion < Core.QuieterConstants.GeneratorVersion)
+                    if (state.World.GeneratorVersion != Core.QuieterConstants.GeneratorVersion)
                     {
-                        state.World.GeneratorVersion = Core.QuieterConstants.GeneratorVersion;
-                        changed = true;
+                        throw new InvalidDataException(
+                            $"Мир создан генератором v{state.World.GeneratorVersion}, "
+                            + $"а этой сборке нужен v{Core.QuieterConstants.GeneratorVersion}. "
+                            + "Сделайте резервную копию и выполните явный сброс мира; "
+                            + "автоматическое преобразование отключено.");
                     }
 
                     if (changed)
@@ -108,6 +114,8 @@ namespace Quieter.Persistence
                 }
 
                 player.DisplayName = SanitizeName(displayName);
+                if (string.IsNullOrWhiteSpace(player.Survival.CharacterId))
+                    player.Survival.CharacterId = Guid.NewGuid().ToString("D");
                 player.LastSeenAtUtc = now.ToString("O");
                 Save();
                 return Task.FromResult(ToProfile(player));
@@ -273,10 +281,85 @@ namespace Quieter.Persistence
                 var player = state.Players.Find(candidate => candidate.SteamId == steamId.ToString());
                 if (player != null)
                 {
-                    player.MapNotes.RemoveAll(entry => entry == null || entry.WorldId == worldId);
+                    var carriedMapIds = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var slot in player.InventorySlots)
+                    {
+                        if (slot != null && slot.ItemId == 36
+                            && !string.IsNullOrWhiteSpace(slot.ItemInstanceId))
+                        {
+                            carriedMapIds.Add(slot.ItemInstanceId);
+                        }
+                    }
+                    state.MapNotes.RemoveAll(entry => entry == null
+                        || entry.WorldId == worldId
+                        && carriedMapIds.Contains(entry.MapItemInstanceId));
                     var currentWorld = CloneMapNotes(notes);
-                    foreach (var entry in currentWorld) entry.WorldId = worldId;
-                    player.MapNotes.AddRange(currentWorld);
+                    foreach (var entry in currentWorld)
+                    {
+                        if (!carriedMapIds.Contains(entry.MapItemInstanceId)) continue;
+                        entry.WorldId = worldId;
+                        state.MapNotes.Add(entry);
+                    }
+                    player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
+                    Save();
+                }
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task SaveSnapshotAsync(
+            ulong steamId, Vector3 position,
+            IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
+            byte selectedHotbarIndex, CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (survival == null || survival.Physiology == null || survival.Revision <= 0
+                || string.IsNullOrWhiteSpace(survival.CharacterId)
+                || !float.IsFinite(position.x) || !float.IsFinite(position.y) || !float.IsFinite(position.z)
+                || selectedHotbarIndex >= InventoryLayout.HotbarSlotCount
+                || (survival.Physiology.LifeState == CharacterLifeState.Dead)
+                    != (survival.Physiology.DeathCause != DeathCause.None))
+                throw new ArgumentException("Invalid character snapshot.");
+            lock (sync)
+            {
+                EnsureLoaded();
+                var index = state.Players.FindIndex(candidate => candidate.SteamId == steamId.ToString());
+                if (index < 0) throw new InvalidOperationException("Account not found.");
+                var previous = state.Players[index];
+                if (previous.Survival.CharacterId != survival.CharacterId)
+                    throw new InvalidOperationException("Account now controls another character.");
+                if (survival.Revision <= previous.Survival.Revision) return Task.CompletedTask;
+                if (previous.Survival.Physiology.LifeState == CharacterLifeState.Dead
+                    && survival.Physiology.LifeState != CharacterLifeState.Dead)
+                    throw new InvalidOperationException("Cannot resurrect an irreversibly dead character.");
+                var next = JsonUtility.FromJson<StoredPlayer>(JsonUtility.ToJson(previous));
+                next.Position = position;
+                next.InventorySlots = CloneSlots(slots);
+                next.PendingItems = CloneSlots(pendingItems);
+                next.SelectedHotbarIndex = selectedHotbarIndex;
+                next.Survival = CloneSurvival(survival);
+                next.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
+                state.Players[index] = next;
+                try { Save(); }
+                catch { state.Players[index] = previous; throw; }
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task SaveSurvivalAsync(
+            ulong steamId,
+            CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                EnsureLoaded();
+                var player = state.Players.Find(candidate => candidate.SteamId == steamId.ToString());
+                if (player != null && survival != null)
+                {
+                    player.Survival = CloneSurvival(survival);
                     player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
                     Save();
                 }
@@ -307,6 +390,7 @@ namespace Quieter.Persistence
             state.Players ??= new List<StoredPlayer>();
             state.ResourceNodes ??= new List<StoredResourceNodeState>();
             state.PlacedObjects ??= new List<StoredPlacedObject>();
+            state.MapNotes ??= new List<StoredMapNote>();
             var defaultWorldId = state.World.WorldId == 0 ? 1 : state.World.WorldId;
             foreach (var node in state.ResourceNodes)
             {
@@ -316,11 +400,17 @@ namespace Quieter.Persistence
             {
                 if (placed != null && placed.WorldId == 0) placed.WorldId = defaultWorldId;
             }
+            foreach (var note in state.MapNotes)
+            {
+                if (note != null && note.WorldId == 0) note.WorldId = defaultWorldId;
+            }
             foreach (var player in state.Players)
             {
                 player.InventorySlots ??= new List<StoredInventorySlot>();
                 player.DepositKnowledge ??= new List<StoredDepositKnowledge>();
                 player.MapNotes ??= new List<StoredMapNote>();
+                player.Survival ??= new CharacterSurvivalState();
+                player.Survival.EnsureInitialized();
                 foreach (var entry in player.DepositKnowledge)
                 {
                     if (entry != null && entry.WorldId == 0) entry.WorldId = defaultWorldId;
@@ -344,14 +434,25 @@ namespace Quieter.Persistence
             File.WriteAllText(temporary, JsonUtility.ToJson(state, true));
             if (File.Exists(path))
             {
-                File.Delete(path);
+                File.Replace(temporary, path, null);
             }
-
-            File.Move(temporary, path);
+            else
+            {
+                File.Move(temporary, path);
+            }
         }
 
-        private static PlayerProfile ToProfile(StoredPlayer player)
+        private PlayerProfile ToProfile(StoredPlayer player)
         {
+            var carriedMapIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var slot in player.InventorySlots)
+            {
+                if (slot != null && slot.ItemId == 36
+                    && !string.IsNullOrWhiteSpace(slot.ItemInstanceId))
+                {
+                    carriedMapIds.Add(slot.ItemInstanceId);
+                }
+            }
             return new PlayerProfile
             {
                 SteamId = ulong.Parse(player.SteamId),
@@ -363,8 +464,19 @@ namespace Quieter.Persistence
                 PendingItems = CloneSlots(player.PendingItems),
                 SelectedHotbarIndex = player.SelectedHotbarIndex,
                 DepositKnowledge = CloneKnowledge(player.DepositKnowledge),
-                MapNotes = CloneMapNotes(player.MapNotes),
+                MapNotes = CloneMapNotes(state.MapNotes.FindAll(note => note != null
+                    && carriedMapIds.Contains(note.MapItemInstanceId))),
+                Survival = CloneSurvival(player.Survival),
             };
+        }
+
+        private static CharacterSurvivalState CloneSurvival(CharacterSurvivalState value)
+        {
+            var clone = value == null
+                ? new CharacterSurvivalState()
+                : JsonUtility.FromJson<CharacterSurvivalState>(JsonUtility.ToJson(value));
+            clone.EnsureInitialized();
+            return clone;
         }
 
         private static List<StoredInventorySlot> CloneSlots(
@@ -386,6 +498,15 @@ namespace Quieter.Persistence
                     SourceNodeId = slot.SourceNodeId,
                     RevealAtPercent = slot.RevealAtPercent,
                     SampleId = slot.SampleId,
+                    ItemInstanceId = slot.ItemInstanceId,
+                    Freshness = slot.Freshness,
+                    BiologicalContamination = slot.BiologicalContamination,
+                    ToxinContamination = slot.ToxinContamination,
+                    Wetness = slot.Wetness,
+                    Cleanliness = slot.Cleanliness,
+                    LiquidMilliliters = slot.LiquidMilliliters,
+                    LiquidKind = slot.LiquidKind,
+                    Equipped = slot.Equipped,
                 });
             }
 
@@ -457,6 +578,15 @@ namespace Quieter.Persistence
                 SourceNodeId = slot.SourceNodeId,
                 RevealAtPercent = slot.RevealAtPercent,
                 SampleId = slot.SampleId,
+                ItemInstanceId = slot.ItemInstanceId,
+                Freshness = slot.Freshness,
+                BiologicalContamination = slot.BiologicalContamination,
+                ToxinContamination = slot.ToxinContamination,
+                Wetness = slot.Wetness,
+                Cleanliness = slot.Cleanliness,
+                LiquidMilliliters = slot.LiquidMilliliters,
+                LiquidKind = slot.LiquidKind,
+                Equipped = slot.Equipped,
             };
 
         private static List<StoredDepositKnowledge> CloneKnowledge(
@@ -488,6 +618,7 @@ namespace Quieter.Persistence
                 result.Add(new StoredMapNote
                 {
                     WorldId = note.WorldId,
+                    MapItemInstanceId = note.MapItemInstanceId,
                     NoteId = note.NoteId,
                     X = note.X,
                     Z = note.Z,

@@ -1,3 +1,4 @@
+using Quieter.Survival;
 using UnityEngine;
 
 namespace Quieter.Player
@@ -83,7 +84,9 @@ namespace Quieter.Player
             bool sprint,
             bool grounded,
             float deltaTime,
-            bool crouched = false)
+            bool crouched = false,
+            float speedMultiplier = 1f,
+            float accelerationMultiplier = 1f)
         {
             movement = Vector2.ClampMagnitude(movement, 1f);
             if (!grounded && movement.sqrMagnitude < 0.0001f)
@@ -113,7 +116,7 @@ namespace Quieter.Player
                     PlayerMovementTuning.AirborneSpeedCap);
             }
 
-            var target = movement * targetSpeed;
+            var target = movement * targetSpeed * Mathf.Clamp(speedMultiplier, 0f, 1.25f);
             var acceleration = PlayerMovementTuning.AirAcceleration;
             if (grounded)
             {
@@ -145,7 +148,10 @@ namespace Quieter.Player
                 }
             }
 
-            return Vector2.MoveTowards(current, target, acceleration * deltaTime);
+            return Vector2.MoveTowards(
+                current,
+                target,
+                acceleration * Mathf.Clamp(accelerationMultiplier, 0f, 1.25f) * deltaTime);
         }
 
         public static Vector3 ProjectPlanarOnGround(Vector3 planarVelocity, Vector3 groundNormal)
@@ -197,10 +203,32 @@ namespace Quieter.Player
             ref PlayerNetworkState state,
             PlayerInputFrame input,
             float deltaTime)
+            => Simulate(
+                ref state,
+                input,
+                deltaTime,
+                CharacterCapabilities.Normal);
+
+        public CollisionFlags Simulate(
+            ref PlayerNetworkState state,
+            PlayerInputFrame input,
+            float deltaTime,
+            CharacterCapabilities capabilities)
         {
             if (!controller.enabled)
             {
                 return CollisionFlags.None;
+            }
+
+            if (!capabilities.CanMove)
+            {
+                input.Movement = Vector2.zero;
+                input.Sprint = false;
+                input.JumpPressId = state.LastObservedJumpPressId;
+            }
+            else if (!capabilities.CanSprint)
+            {
+                input.Sprint = false;
             }
 
             EnsureStance(state.Crouched);
@@ -239,13 +267,16 @@ namespace Quieter.Player
                 input.Sprint && !state.Crouched,
                 groundedBeforeMove,
                 deltaTime,
-                state.Crouched);
+                state.Crouched,
+                capabilities.MovementSpeed,
+                capabilities.Acceleration);
 
             var jumpStarted = RegisterJump(ref state, input.JumpPressId, groundedBeforeMove);
             var vertical = state.Velocity.y;
             if (jumpStarted)
             {
-                vertical = PlayerMovementTuning.CalculateJumpSpeed(planar.magnitude);
+                vertical = PlayerMovementTuning.CalculateJumpSpeed(planar.magnitude)
+                    * capabilities.JumpStrength;
                 groundedBeforeMove = false;
             }
             else if (groundedBeforeMove && vertical <= 0f)

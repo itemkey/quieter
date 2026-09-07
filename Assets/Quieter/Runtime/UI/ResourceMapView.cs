@@ -13,6 +13,8 @@ namespace Quieter.UI
 {
     public sealed class ResourceMapView : MonoBehaviour
     {
+        private const ushort PhysicalMapItemId = 36;
+        private const ushort CompassItemId = 41;
         private readonly Dictionary<ulong, WorldObjectSpawn> depositSpawns = new();
         private Canvas canvas;
         private GameObject hudRoot;
@@ -33,6 +35,7 @@ namespace Quieter.UI
         private GameObject noteActionsRoot;
         private GameObject noteDeleteConfirmRoot;
         private InputField noteInput;
+        private ulong selectedMapInstanceId;
         private ulong selectedNoteId;
         private Vector2 selectedNotePosition;
         private bool placingNote;
@@ -92,6 +95,13 @@ namespace Quieter.UI
             if (interaction == null) return;
             if (Keyboard.current?.mKey.wasPressedThisFrame == true)
             {
+                if (!IsOpen && (inventory == null
+                    || !inventory.TryGetReplicatedItemInstance(
+                        PhysicalMapItemId, out selectedMapInstanceId)))
+                {
+                    feedbackText.text = "У вас нет физической карты. Нужны два листа, материал для письма и шнур.";
+                    return;
+                }
                 SetMapOpen(!IsOpen);
             }
             if (IsDepositOpen && Time.unscaledTime - depositOpenedAt > 0.15f
@@ -102,6 +112,13 @@ namespace Quieter.UI
             RefreshHud();
             if (IsOpen)
             {
+                if (inventory == null || !inventory.ContainsReplicatedItemInstance(
+                        PhysicalMapItemId, selectedMapInstanceId))
+                {
+                    feedbackText.text = "Карты больше нет в инвентаре.";
+                    SetMapOpen(false);
+                    return;
+                }
                 if (!mapBuilt) BuildMapContent();
                 if (markersDirty) RefreshMarkers();
                 UpdatePlayerMarker();
@@ -378,11 +395,13 @@ namespace Quieter.UI
             var node = interaction.FocusedNode;
             promptText.text = interaction.IsPlacementMode
                 ? interaction.PlacementHasSurface
-                    ? "[ЛКМ] Установить стол    [Колесо] Повернуть    [ПКМ/Escape] Отмена"
+                    ? "[ЛКМ] Установить    [Колесо] Повернуть    [ПКМ/Escape] Отмена"
                     : "Нет подходящей поверхности    [ПКМ/Escape] Отмена"
                 : interaction.FocusedTable != null
                     ? "[E] Открыть исследовательский стол"
-                    : BuildPrompt(node);
+                    : interaction.FocusedStructure != null
+                        ? BuildStructurePrompt(interaction.FocusedStructure)
+                        : BuildPrompt(node);
             depositText.text = string.Empty;
             var active = inventory.GetReplicatedSlot(new InventorySlotReference(
                 InventorySlotArea.Inventory,
@@ -405,6 +424,8 @@ namespace Quieter.UI
         private string BuildPrompt(ResourceNodeView node)
         {
             if (node == null || !node.IsAvailable) return string.Empty;
+            if (node.Descriptor.IsWaterSource)
+                return "[E] Набрать воду в сосуд    [R] Вымыть предмет в руке";
             if (node.Descriptor.IsLoosePickup)
             {
                 var name = ItemName(node.Descriptor.ResourceItemId);
@@ -423,6 +444,21 @@ namespace Quieter.UI
                 return "[ЛКМ] Рубить дерево";
             }
             return string.Empty;
+        }
+
+        private string BuildStructurePrompt(SurvivalStructureView structure)
+        {
+            if (structure.ItemId == SurvivalStructureRules.UnlinedWastePitItemId)
+                return "[E] Опорожнить сосуд с отходами";
+            if (structure.ItemId == SurvivalStructureRules.LeanToItemId)
+                return "Навес — частичная защита от дождя и ветра";
+            if (structure.ItemId != SurvivalStructureRules.HearthItemId) return string.Empty;
+            var active = inventory.GetReplicatedSlot(new InventorySlotReference(
+                InventorySlotArea.Inventory,
+                InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
+            return active.ItemId == 30 && active.LiquidMilliliters > 0
+                ? "[E] Кипятить воду в котелке"
+                : "[E] Добавить древесину или уголь в очаг";
         }
 
         private void SetMapOpen(bool open)
@@ -480,48 +516,27 @@ namespace Quieter.UI
             if (resourceWorld == null || worldCatalog == null) return;
             var definition = resourceWorld.Definition;
             if (definition.ChunkCountX == 0) return;
-            mapGenerator = new DeterministicChunkGenerator(worldCatalog);
-            var texture = new Texture2D(128, 128, TextureFormat.RGBA32, false)
+            var texture = new Texture2D(8, 8, TextureFormat.RGBA32, false)
             {
                 name = "QuieterWorldMap",
                 filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp,
             };
-            var minimum = definition.WorldMinimum;
             for (var y = 0; y < texture.height; y++)
             {
                 for (var x = 0; x < texture.width; x++)
                 {
-                    var worldX = Mathf.Lerp(minimum.x, definition.WorldMaximum.x,
-                        x / (float)(texture.width - 1));
-                    var worldZ = Mathf.Lerp(minimum.z, definition.WorldMaximum.z,
-                        y / (float)(texture.height - 1));
-                    var height = mapGenerator.SampleHeight(definition, worldX, worldZ);
-                    var shade = Mathf.InverseLerp(1f, 48f, height);
-                    texture.SetPixel(x, y, Color.Lerp(
-                        new Color(0.12f, 0.2f, 0.1f),
-                        new Color(0.48f, 0.47f, 0.37f), shade));
+                    var fiber = Mathf.PerlinNoise(x * 0.61f, y * 0.73f) * 0.035f;
+                    texture.SetPixel(x, y, new Color(
+                        0.69f + fiber,
+                        0.61f + fiber,
+                        0.43f + fiber));
                 }
             }
             texture.Apply(false, true);
             terrainImage.texture = texture;
 
             depositSpawns.Clear();
-            for (var z = 0; z < definition.ChunkCountZ; z++)
-            {
-                for (var x = 0; x < definition.ChunkCountX; x++)
-                {
-                    var objects = mapGenerator.GenerateObjectsForMap(
-                        definition, new ChunkCoord(x, z));
-                    foreach (var spawn in objects)
-                    {
-                        if (spawn.Resource.IsResearchable)
-                        {
-                            depositSpawns[spawn.InstanceId] = spawn;
-                        }
-                    }
-                }
-            }
             mapBuilt = true;
             markersDirty = true;
         }
@@ -535,33 +550,10 @@ namespace Quieter.UI
                 if (child == playerMarker) continue;
                 Destroy(child.gameObject);
             }
-            for (var knowledgeIndex = 0; knowledgeIndex < interaction.KnowledgeCount; knowledgeIndex++)
-            {
-                var knowledge = interaction.GetKnowledge(knowledgeIndex);
-                if (!depositSpawns.TryGetValue(knowledge.InstanceId, out var spawn)) continue;
-                var color = knowledge.StudyBasisPoints >= 5000
-                    && itemCatalog != null
-                    && itemCatalog.TryGetItem(spawn.Resource.ResourceItemId, out var item)
-                    ? item.PlaceholderColor
-                    : new Color(0.68f, 0.68f, 0.68f);
-                var marker = CreateMarker(markerRoot, color, 13f);
-                marker.anchoredPosition = WorldToMap(spawn.Position);
-                var button = marker.gameObject.AddComponent<Button>();
-                button.targetGraphic = marker.GetComponent<Image>();
-                var capturedSpawn = spawn;
-                var capturedStudy = knowledge.StudyBasisPoints;
-                button.onClick.AddListener(() =>
-                    SelectDepositMarker(capturedSpawn, capturedStudy));
-
-                var label = InventoryView.CreateText(marker, BuildMarkerName(spawn, knowledge.StudyBasisPoints),
-                    10, FontStyle.Bold, TextAnchor.UpperCenter);
-                SetAnchored(label.rectTransform, new Vector2(0.5f, 0f),
-                    new Vector2(0f, -12f), new Vector2(160f, 30f));
-            }
             for (var noteIndex = 0; noteIndex < interaction.MapNoteCount; noteIndex++)
             {
                 var note = interaction.GetMapNote(noteIndex);
-                if (note.NoteId == 0) continue;
+                if (note.NoteId == 0 || note.MapItemInstanceId != selectedMapInstanceId) continue;
                 var marker = CreateMarker(markerRoot, new Color(1f, 0.73f, 0.16f), 15f);
                 marker.name = $"MapNote_{note.NoteId}";
                 marker.anchoredPosition = WorldToMap(note.Position);
@@ -583,6 +575,10 @@ namespace Quieter.UI
         private void UpdatePlayerMarker()
         {
             if (playerMarker == null || interaction == null) return;
+            var hasCompass = inventory != null
+                && inventory.ContainsReplicatedItem(CompassItemId);
+            playerMarker.gameObject.SetActive(hasCompass);
+            if (!hasCompass) return;
             playerMarker.anchoredPosition = WorldToMap(interaction.transform.position);
             playerMarker.localRotation = Quaternion.Euler(0f, 0f, -interaction.transform.eulerAngles.y);
         }
@@ -590,7 +586,8 @@ namespace Quieter.UI
         private void BeginNotePlacement()
         {
             if (interaction == null) return;
-            if (interaction.MapNoteCount >= MapNoteRules.MaximumNotesPerWorld)
+            if (interaction.CountMapNotes(selectedMapInstanceId)
+                >= MapNoteRules.MaximumNotesPerMap)
             {
                 noteFeedbackText.text = "Достигнут лимит: 64 заметки.";
                 return;
@@ -659,12 +656,14 @@ namespace Quieter.UI
             }
             if (selectedNoteId == 0)
             {
-                interaction?.RequestCreateMapNote(selectedNotePosition, text);
+                interaction?.RequestCreateMapNote(
+                    selectedMapInstanceId, selectedNotePosition, text);
                 mapDetailsText.text = "Заметка сохраняется…";
             }
             else
             {
-                interaction?.RequestUpdateMapNote(selectedNoteId, selectedNotePosition, text);
+                interaction?.RequestUpdateMapNote(
+                    selectedMapInstanceId, selectedNoteId, selectedNotePosition, text);
                 mapDetailsText.text = $"{text}\n\nКоординаты: "
                     + $"{selectedNotePosition.x:0}, {selectedNotePosition.y:0}";
                 noteActionsRoot.SetActive(true);
@@ -703,7 +702,10 @@ namespace Quieter.UI
 
         private void DeleteSelectedNote()
         {
-            if (selectedNoteId != 0) interaction?.RequestDeleteMapNote(selectedNoteId);
+            if (selectedNoteId != 0)
+            {
+                interaction?.RequestDeleteMapNote(selectedMapInstanceId, selectedNoteId);
+            }
             selectedNoteId = 0;
             noteDeleteConfirmRoot.SetActive(false);
             noteActionsRoot.SetActive(false);
@@ -741,7 +743,11 @@ namespace Quieter.UI
                 for (var index = 0; index < interaction.MapNoteCount; index++)
                 {
                     note = interaction.GetMapNote(index);
-                    if (note.NoteId == noteId) return true;
+                    if (note.MapItemInstanceId == selectedMapInstanceId
+                        && note.NoteId == noteId)
+                    {
+                        return true;
+                    }
                 }
             }
             note = default;

@@ -4,13 +4,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using Quieter.World;
 using Quieter.Inventory;
+using Quieter.Survival;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
 
 namespace Quieter.Persistence
 {
-    public sealed class HttpProfileRepository : IWorldRepository, IPlayerProfileRepository
+    public sealed class HttpProfileRepository : IWorldRepository, IAtomicPlayerProfileRepository
     {
         [Serializable]
         private sealed class WorldResponse
@@ -50,6 +51,9 @@ namespace Quieter.Persistence
             public byte selectedHotbarIndex;
             public DepositKnowledgeResponse[] depositKnowledge;
             public MapNoteResponse[] mapNotes;
+            public string survivalJson;
+            public string characterId;
+            public long survivalRevision;
         }
 
         [Serializable]
@@ -64,6 +68,15 @@ namespace Quieter.Persistence
             public string sourceNodeId;
             public byte revealAtPercent;
             public string sampleId;
+            public string itemInstanceId;
+            public ushort freshness = 10000;
+            public ushort biologicalContamination;
+            public ushort toxinContamination;
+            public ushort wetness;
+            public ushort cleanliness = 10000;
+            public ushort liquidMilliliters;
+            public byte liquidKind;
+            public bool equipped;
         }
 
         [Serializable]
@@ -80,6 +93,22 @@ namespace Quieter.Persistence
             public float x;
             public float y;
             public float z;
+        }
+
+        [Serializable]
+        private sealed class SurvivalRequest
+        {
+            public string survivalJson;
+            public long revision;
+        }
+
+        [Serializable]
+        private sealed class SnapshotRequest
+        {
+            public string characterId;
+            public PositionRequest position;
+            public InventoryRequest inventory;
+            public SurvivalRequest survival;
         }
 
         [Serializable]
@@ -135,6 +164,7 @@ namespace Quieter.Persistence
         private sealed class MapNoteResponse
         {
             public int worldId;
+            public string mapItemInstanceId;
             public string noteId;
             public float x;
             public float z;
@@ -211,6 +241,10 @@ namespace Quieter.Persistence
                 SelectedHotbarIndex = response.selectedHotbarIndex,
                 DepositKnowledge = ToStoredKnowledge(response.depositKnowledge),
                 MapNotes = ToStoredMapNotes(response.mapNotes),
+                Survival = ParseSurvival(
+                    response.survivalJson,
+                    response.characterId,
+                    response.survivalRevision),
             };
         }
 
@@ -363,6 +397,15 @@ namespace Quieter.Persistence
                         sourceNodeId = slot.SourceNodeId,
                         revealAtPercent = slot.RevealAtPercent,
                         sampleId = slot.SampleId,
+                        itemInstanceId = slot.ItemInstanceId,
+                        freshness = slot.Freshness,
+                        biologicalContamination = slot.BiologicalContamination,
+                        toxinContamination = slot.ToxinContamination,
+                        wetness = slot.Wetness,
+                        cleanliness = slot.Cleanliness,
+                        liquidMilliliters = slot.LiquidMilliliters,
+                        liquidKind = slot.LiquidKind,
+                        equipped = slot.Equipped,
                     });
                 }
             }
@@ -423,6 +466,7 @@ namespace Quieter.Persistence
                     entries.Add(new MapNoteResponse
                     {
                         worldId = worldId,
+                        mapItemInstanceId = note.MapItemInstanceId,
                         noteId = note.NoteId,
                         x = note.X,
                         z = note.Z,
@@ -437,6 +481,80 @@ namespace Quieter.Persistence
                 UnityWebRequest.kHttpVerbPUT,
                 JsonUtility.ToJson(new MapNoteListResponse { notes = entries.ToArray() }));
             await SendAsync(request, cancellationToken);
+        }
+
+        public async Task SaveSnapshotAsync(
+            ulong steamId, Vector3 position,
+            IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems,
+            byte selectedHotbarIndex, CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default)
+        {
+            if (survival == null) throw new ArgumentNullException(nameof(survival));
+            var payload = new SnapshotRequest
+            {
+                characterId = survival.CharacterId,
+                position = new PositionRequest { x = position.x, y = position.y, z = position.z },
+                inventory = new InventoryRequest
+                {
+                    selectedHotbarIndex = selectedHotbarIndex,
+                    slots = ToSlotResponses(slots),
+                    pendingItems = ToSlotResponses(pendingItems),
+                },
+                survival = new SurvivalRequest
+                {
+                    survivalJson = JsonUtility.ToJson(survival), revision = survival.Revision,
+                },
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/players/{steamId}/snapshot",
+                UnityWebRequest.kHttpVerbPUT, JsonUtility.ToJson(payload));
+            await SendAsync(request, cancellationToken);
+        }
+
+        public async Task SaveSurvivalAsync(
+            ulong steamId,
+            CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default)
+        {
+            if (survival == null) return;
+            var payload = new SurvivalRequest
+            {
+                survivalJson = JsonUtility.ToJson(survival),
+                revision = survival.Revision,
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/players/{steamId}/survival",
+                UnityWebRequest.kHttpVerbPUT,
+                JsonUtility.ToJson(payload));
+            await SendAsync(request, cancellationToken);
+        }
+
+        private static CharacterSurvivalState ParseSurvival(
+            string json,
+            string characterId,
+            long revision)
+        {
+            CharacterSurvivalState result = null;
+            if (!string.IsNullOrWhiteSpace(json))
+            {
+                try
+                {
+                    result = JsonUtility.FromJson<CharacterSurvivalState>(json);
+                }
+                catch (Exception)
+                {
+                    result = null;
+                }
+            }
+            result ??= new CharacterSurvivalState();
+            result.EnsureInitialized();
+            if (!string.IsNullOrWhiteSpace(characterId))
+            {
+                result.CharacterId = characterId;
+            }
+            result.Revision = Math.Max(result.Revision, revision);
+            return result;
         }
 
         private static List<StoredInventorySlot> ToStoredSlots(InventorySlotResponse[] slots)
@@ -457,6 +575,15 @@ namespace Quieter.Persistence
                     SourceNodeId = slot.sourceNodeId,
                     RevealAtPercent = slot.revealAtPercent,
                     SampleId = slot.sampleId,
+                    ItemInstanceId = slot.itemInstanceId,
+                    Freshness = slot.freshness,
+                    BiologicalContamination = slot.biologicalContamination,
+                    ToxinContamination = slot.toxinContamination,
+                    Wetness = slot.wetness,
+                    Cleanliness = slot.cleanliness,
+                    LiquidMilliliters = slot.liquidMilliliters,
+                    LiquidKind = slot.liquidKind,
+                    Equipped = slot.equipped,
                 });
             }
 
@@ -476,6 +603,15 @@ namespace Quieter.Persistence
                 SourceNodeId = slot.sourceNodeId,
                 RevealAtPercent = slot.revealAtPercent,
                 SampleId = slot.sampleId,
+                ItemInstanceId = slot.itemInstanceId,
+                Freshness = slot.freshness,
+                BiologicalContamination = slot.biologicalContamination,
+                ToxinContamination = slot.toxinContamination,
+                Wetness = slot.wetness,
+                Cleanliness = slot.cleanliness,
+                LiquidMilliliters = slot.liquidMilliliters,
+                LiquidKind = slot.liquidKind,
+                Equipped = slot.equipped,
             };
 
         private static InventorySlotResponse[] ToSlotResponses(
@@ -504,6 +640,15 @@ namespace Quieter.Persistence
                 sourceNodeId = slot.SourceNodeId,
                 revealAtPercent = slot.RevealAtPercent,
                 sampleId = slot.SampleId,
+                itemInstanceId = slot.ItemInstanceId,
+                freshness = slot.Freshness,
+                biologicalContamination = slot.BiologicalContamination,
+                toxinContamination = slot.ToxinContamination,
+                wetness = slot.Wetness,
+                cleanliness = slot.Cleanliness,
+                liquidMilliliters = slot.LiquidMilliliters,
+                liquidKind = slot.LiquidKind,
+                equipped = slot.Equipped,
             };
 
         private static List<StoredDepositKnowledge> ToStoredKnowledge(
@@ -535,6 +680,7 @@ namespace Quieter.Persistence
                 result.Add(new StoredMapNote
                 {
                     WorldId = note.worldId,
+                    MapItemInstanceId = note.mapItemInstanceId,
                     NoteId = note.noteId,
                     X = note.x,
                     Z = note.z,

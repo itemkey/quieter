@@ -153,6 +153,43 @@ app.MapPut("/internal/players/{steamId}/inventory", async (
     }
 });
 
+app.MapPut("/internal/players/{steamId}/snapshot", async (
+    string steamId, PlayerSnapshotRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveSnapshotAsync(steamId, request, cancellationToken)
+            ? Results.NoContent() : Results.NotFound();
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Character revision or account binding changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/players/{steamId}/survival", async (
+    string steamId,
+    SurvivalRequest request,
+    ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveSurvivalAsync(steamId, request, cancellationToken)
+            ? Results.NoContent()
+            : Results.NotFound();
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
 app.MapPut("/internal/players/{steamId}/worlds/{worldId:int}/deposit-knowledge", async (
     string steamId,
     int worldId,

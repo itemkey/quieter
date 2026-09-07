@@ -57,6 +57,63 @@ namespace Quieter.Tests
         }
 
         [Test]
+        public void LiquidTransfer_RollsBackRejectedDestinationAndConservesPartialVolume()
+        {
+            var survivalCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            var model = new InventoryModel(survivalCatalog);
+            var slot = new InventorySlotReference(InventorySlotArea.Inventory, 0);
+            var original = new ItemStackState(40, 1, itemInstanceId: 120,
+                biologicalContamination: 8000, toxinContamination: 1400,
+                liquidMilliliters: 2500, liquidKind: LiquidKind.Waste);
+            Assert.That(model.SetSlot(slot, original), Is.True);
+            Assert.That(model.TryDrainLiquid(slot, LiquidKind.Waste, 900,
+                (_, _) => false, out var rejected), Is.False);
+            Assert.That(rejected, Is.Zero);
+            Assert.That(model.GetSlot(slot), Is.EqualTo(original));
+
+            var destinationVolume = 0;
+            Assert.That(model.TryDrainLiquid(slot, LiquidKind.Waste, 900,
+                (source, amount) =>
+                {
+                    Assert.That(source.ItemInstanceId, Is.EqualTo(120));
+                    Assert.That(source.BiologicalContamination, Is.EqualTo(8000));
+                    destinationVolume += amount;
+                    return true;
+                }, out var transferred), Is.True);
+            Assert.That(transferred, Is.EqualTo(900));
+            Assert.That(model.GetSlot(slot).LiquidMilliliters + destinationVolume, Is.EqualTo(2500));
+            Assert.That(model.GetSlot(slot).ItemInstanceId, Is.EqualTo(original.ItemInstanceId));
+            Assert.That(model.GetSlot(slot).Cleanliness, Is.LessThanOrEqualTo(1200));
+            Assert.That(model.TryDrainLiquid(slot, LiquidKind.Water, 900,
+                (_, _) => throw new System.Exception("Wrong kind reached the sink"), out _), Is.False);
+            Assert.That(model.TryDrainLiquid(slot, LiquidKind.Waste, 60000,
+                (_, amount) => { destinationVolume += amount; return true; }, out _), Is.True);
+            Assert.That(destinationVolume, Is.EqualTo(2500));
+            Assert.That(model.GetSlot(slot).LiquidKind, Is.EqualTo(LiquidKind.None));
+            Assert.That(model.GetSlot(slot).ToxinContamination, Is.EqualTo(1400));
+        }
+
+        [Test]
+        public void Rinsing_DoesNotSterilizeWithRawWaterOrWashFilledEquippedItems()
+        {
+            var survivalCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            survivalCatalog.TryGetItem(40, out var pot);
+            var dirty = new ItemStackState(40, 1, itemInstanceId: 90,
+                biologicalContamination: 9500, toxinContamination: 6000, cleanliness: 1000);
+            var rinsed = ItemHygieneRules.Rinse(dirty, pot, 0.45f, 0.08f);
+            Assert.That(rinsed.ItemInstanceId, Is.EqualTo(dirty.ItemInstanceId));
+            Assert.That(rinsed.BiologicalContamination, Is.GreaterThanOrEqualTo(4500));
+            Assert.That(rinsed.ToxinContamination, Is.GreaterThanOrEqualTo(1200));
+            Assert.That(ItemHygieneRules.MedicalMaterialCleanliness(rinsed), Is.LessThanOrEqualTo(0.55f));
+            dirty.LiquidMilliliters = 100;
+            dirty.LiquidKind = LiquidKind.Waste;
+            Assert.That(ItemHygieneRules.Rinse(dirty, pot, 0f, 0f), Is.EqualTo(dirty));
+            dirty.LiquidMilliliters = 0;
+            dirty.Equipped = true;
+            Assert.That(ItemHygieneRules.Rinse(dirty, pot, 0f, 0f), Is.EqualTo(dirty));
+        }
+
+        [Test]
         public void ToolRecipeCategory_ContainsConfiguredAxePickaxeAndShovelRecipes()
         {
             var projectCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
@@ -359,6 +416,64 @@ namespace Quieter.Tests
             Assert.That(model.RemoveStack(Inventory(0), stone.ItemId, 7, out removed), Is.True);
             AssertStack(removed, stone, 7);
             Assert.That(model.Inventory[0].IsEmpty, Is.True);
+        }
+
+        [Test]
+        public void TransferTo_IsAtomicAndUnequipsTransferredStack()
+        {
+            var source = new InventoryModel(catalog);
+            var destination = new InventoryModel(catalog);
+            var equippedAxe = new ItemStackState(axe.ItemId, 1, 100)
+            {
+                Equipped = true,
+            };
+            source.SetSlot(Inventory(0), equippedAxe);
+            for (var index = 0; index < InventoryLayout.InventorySlotCount; index++)
+            {
+                destination.SetSlot(Inventory(index),
+                    new ItemStackState(stone.ItemId, stone.MaximumStack));
+            }
+
+            Assert.That(source.TryTransferTo(
+                Inventory(0), 1, destination, axe.PickupPriority, out _), Is.False);
+            Assert.That(source.Inventory[0].ItemId, Is.EqualTo(axe.ItemId));
+            Assert.That(source.Inventory[0].Equipped, Is.True);
+
+            destination.SetSlot(Inventory(InventoryLayout.FirstHotbarSlot), default);
+            Assert.That(source.TryTransferTo(
+                Inventory(0), 1, destination, axe.PickupPriority,
+                out var transferred), Is.True);
+            Assert.That(source.Inventory[0].IsEmpty, Is.True);
+            Assert.That(transferred.Equipped, Is.False);
+            Assert.That(destination.Inventory[InventoryLayout.FirstHotbarSlot].ItemId,
+                Is.EqualTo(axe.ItemId));
+            Assert.That(destination.Inventory[InventoryLayout.FirstHotbarSlot].Equipped,
+                Is.False);
+        }
+
+        [Test]
+        public void PerishableFood_DecaysWithTimeTemperatureAndHumidity()
+        {
+            var food = ScriptableObject.CreateInstance<ItemDefinition>();
+            food.Configure(
+                50,
+                "Тестовая пища",
+                10,
+                PickupPlacementPriority.InventoryFirst,
+                Color.white,
+                kind: ItemKind.Food,
+                configuredShelfLifeGameHours: 24f);
+            assets.Add(food);
+            var fresh = new ItemStackState(food.ItemId, 1);
+
+            var warm = FoodDecayRules.Advance(fresh, food, 7200f, 30f, 0.8f);
+            var frozen = FoodDecayRules.Advance(fresh, food, 7200f, -5f, 0.8f);
+
+            Assert.That(warm.Freshness, Is.Zero);
+            Assert.That(warm.BiologicalContamination, Is.GreaterThan(8000));
+            Assert.That(frozen.Freshness, Is.GreaterThan(8500));
+            Assert.That(frozen.BiologicalContamination,
+                Is.LessThan(warm.BiologicalContamination));
         }
 
         [Test]

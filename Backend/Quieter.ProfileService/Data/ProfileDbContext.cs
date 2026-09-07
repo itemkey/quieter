@@ -6,6 +6,8 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
 {
     public DbSet<WorldEntity> Worlds => Set<WorldEntity>();
     public DbSet<PlayerEntity> Players => Set<PlayerEntity>();
+    public DbSet<CharacterEntity> Characters => Set<CharacterEntity>();
+    public DbSet<CharacterItemEntity> CharacterItems => Set<CharacterItemEntity>();
     public DbSet<PlayerInventorySlotEntity> PlayerInventorySlots => Set<PlayerInventorySlotEntity>();
     public DbSet<PlayerPendingItemEntity> PlayerPendingItems => Set<PlayerPendingItemEntity>();
     public DbSet<WorldResourceNodeEntity> WorldResourceNodes => Set<WorldResourceNodeEntity>();
@@ -30,6 +32,11 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.Property(player => player.SteamId).HasPrecision(20, 0).ValueGeneratedNever();
             entity.Property(player => player.DisplayName).HasMaxLength(32);
             entity.Property(player => player.SelectedHotbarIndex).HasDefaultValue((byte)0);
+            entity.Property(player => player.CurrentCharacterId).IsConcurrencyToken();
+            entity.HasOne(player => player.CurrentCharacter)
+                .WithOne(character => character.ControllingPlayer)
+                .HasForeignKey<PlayerEntity>(player => player.CurrentCharacterId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasMany(player => player.InventorySlots)
                 .WithOne(slot => slot.Player)
                 .HasForeignKey(slot => slot.SteamId)
@@ -40,6 +47,28 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<CharacterEntity>(entity =>
+        {
+            entity.ToTable("characters");
+            entity.HasKey(character => character.CharacterId);
+            entity.Property(character => character.Name).HasMaxLength(32);
+            entity.Property(character => character.SurvivalJson).HasColumnType("jsonb");
+            entity.Property(character => character.Revision).IsConcurrencyToken();
+            entity.HasIndex(character => character.UpdatedAtUtc);
+        });
+
+        modelBuilder.Entity<CharacterItemEntity>(entity =>
+        {
+            entity.ToTable("character_items");
+            entity.HasKey(item => new { item.CharacterId, item.StorageArea, item.SlotIndex });
+            entity.Property(item => item.SourceNodeId).HasPrecision(20, 0);
+            entity.Property(item => item.SampleId).HasPrecision(20, 0);
+            entity.Property(item => item.ItemInstanceId).HasPrecision(20, 0);
+            entity.HasIndex(item => item.ItemInstanceId);
+            entity.HasOne(item => item.Character).WithMany(character => character.Items)
+                .HasForeignKey(item => item.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<PlayerInventorySlotEntity>(entity =>
         {
             entity.ToTable("player_inventory_slots");
@@ -47,6 +76,7 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.Property(slot => slot.SteamId).HasPrecision(20, 0).ValueGeneratedNever();
             entity.Property(slot => slot.SourceNodeId).HasPrecision(20, 0);
             entity.Property(slot => slot.SampleId).HasPrecision(20, 0);
+            entity.Property(slot => slot.ItemInstanceId).HasPrecision(20, 0);
         });
 
         modelBuilder.Entity<PlayerPendingItemEntity>(entity =>
@@ -56,6 +86,7 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.Property(item => item.SteamId).HasPrecision(20, 0).ValueGeneratedNever();
             entity.Property(item => item.SourceNodeId).HasPrecision(20, 0);
             entity.Property(item => item.SampleId).HasPrecision(20, 0);
+            entity.Property(item => item.ItemInstanceId).HasPrecision(20, 0);
         });
 
         modelBuilder.Entity<WorldPlacedObjectEntity>(entity =>
@@ -65,6 +96,7 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.Property(item => item.ObjectId).HasPrecision(20, 0);
             entity.Property(item => item.InputSourceNodeId).HasPrecision(20, 0);
             entity.Property(item => item.InputSampleId).HasPrecision(20, 0);
+            entity.Property(item => item.InputItemInstanceId).HasPrecision(20, 0);
             entity.HasOne(item => item.World)
                 .WithMany()
                 .HasForeignKey(item => item.WorldId)
@@ -101,14 +133,16 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
         modelBuilder.Entity<PlayerMapNoteEntity>(entity =>
         {
             entity.ToTable("player_map_notes");
-            entity.HasKey(note => new { note.SteamId, note.WorldId, note.NoteId });
+            entity.HasKey(note => new
+            {
+                note.WorldId,
+                note.MapItemInstanceId,
+                note.NoteId,
+            });
             entity.Property(note => note.SteamId).HasPrecision(20, 0);
+            entity.Property(note => note.MapItemInstanceId).HasPrecision(20, 0);
             entity.Property(note => note.NoteId).HasPrecision(20, 0);
             entity.Property(note => note.Text).HasMaxLength(80);
-            entity.HasOne(note => note.Player)
-                .WithMany(player => player.MapNotes)
-                .HasForeignKey(note => note.SteamId)
-                .OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(note => note.World)
                 .WithMany()
                 .HasForeignKey(note => note.WorldId)

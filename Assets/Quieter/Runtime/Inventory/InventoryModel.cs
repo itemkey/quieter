@@ -17,6 +17,44 @@ namespace Quieter.Inventory
 
         public IReadOnlyList<ItemStackState> Inventory => inventory;
         public IReadOnlyList<ItemStackState> Workbench => workbench;
+
+        public bool TryDrainLiquid(
+            InventorySlotReference source,
+            LiquidKind requiredKind,
+            ushort maximumMilliliters,
+            Func<ItemStackState, ushort, bool> acceptLiquid,
+            out ushort drainedMilliliters)
+        {
+            drainedMilliliters = 0;
+            var original = GetSlot(source);
+            if (maximumMilliliters == 0 || acceptLiquid == null || original.IsEmpty
+                || original.LiquidKind != requiredKind || original.LiquidMilliliters == 0)
+                return false;
+            var amount = (ushort)Math.Min(maximumMilliliters, original.LiquidMilliliters);
+            var next = original;
+            next.LiquidMilliliters -= amount;
+            if (requiredKind == LiquidKind.Waste)
+                next.Cleanliness = (ushort)Math.Min((int)next.Cleanliness, 1200);
+            if (next.LiquidMilliliters == 0) next.LiquidKind = LiquidKind.None;
+            if (!SetSlot(source, next)) return false;
+            try
+            {
+                // The synchronous sink sees the already-debited source. No notification
+                // or save is emitted until it has accepted the transfer.
+                if (acceptLiquid(original, amount))
+                {
+                    drainedMilliliters = amount;
+                    return true;
+                }
+            }
+            catch
+            {
+                SetSlot(source, original);
+                throw;
+            }
+            SetSlot(source, original);
+            return false;
+        }
         public ItemStackState Cursor => cursor;
         public InventorySlotReference CursorOrigin { get; private set; } = InventorySlotReference.Invalid;
         public byte SelectedHotbarIndex { get; private set; }
@@ -50,7 +88,22 @@ namespace Quieter.Inventory
                             stored.HiddenItemId,
                             ParseNodeId(stored.SourceNodeId),
                             stored.RevealAtPercent,
-                            ParseNodeId(stored.SampleId));
+                            ParseNodeId(stored.SampleId),
+                            ParseNodeId(stored.ItemInstanceId),
+                            stored.Freshness,
+                            stored.BiologicalContamination,
+                            stored.ToxinContamination,
+                            stored.Wetness,
+                            stored.Cleanliness,
+                            stored.LiquidMilliliters,
+                            (LiquidKind)stored.LiquidKind,
+                            stored.Equipped);
+                    if (catalog.TryGetItem(raw.ItemId, out var rawDefinition)
+                        && rawDefinition.RequiresInstanceId
+                        && raw.ItemInstanceId == 0)
+                    {
+                        raw.ItemInstanceId = ItemInstanceIdFactory.Create();
+                    }
                     if (catalog.TryGetItem(raw.ItemId, out var definition)
                         && definition.Kind == ItemKind.HiddenSample)
                     {
@@ -109,6 +162,16 @@ namespace Quieter.Inventory
                         SourceNodeId = stack.SourceNodeId == 0 ? null : stack.SourceNodeId.ToString(),
                         RevealAtPercent = stack.RevealAtPercent,
                         SampleId = stack.SampleId == 0 ? null : stack.SampleId.ToString(),
+                        ItemInstanceId = stack.ItemInstanceId == 0
+                            ? null : stack.ItemInstanceId.ToString(),
+                        Freshness = stack.Freshness,
+                        BiologicalContamination = stack.BiologicalContamination,
+                        ToxinContamination = stack.ToxinContamination,
+                        Wetness = stack.Wetness,
+                        Cleanliness = stack.Cleanliness,
+                        LiquidMilliliters = stack.LiquidMilliliters,
+                        LiquidKind = (byte)stack.LiquidKind,
+                        Equipped = stack.Equipped,
                     });
                 }
             }
@@ -434,7 +497,31 @@ namespace Quieter.Inventory
 
         public int AutoInsert(ItemStackState stack, PickupPlacementPriority priority)
         {
-            if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out _)) return stack.Quantity;
+            if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out var definition))
+                return stack.Quantity;
+            if (definition.RequiresInstanceId && stack.ItemInstanceId == 0)
+            {
+                var remainingUnique = (int)stack.Quantity;
+                while (remainingUnique > 0)
+                {
+                    var unique = stack.WithQuantity(1);
+                    unique.ItemInstanceId = ItemInstanceIdFactory.Create();
+                    var remainder = priority == PickupPlacementPriority.HotbarFirst
+                        ? InsertIntoRangeByPriority(
+                            inventory,
+                            unique,
+                            1,
+                            PickupPlacementPriority.HotbarFirst)
+                        : InsertIntoRangeByPriority(
+                            inventory,
+                            unique,
+                            1,
+                            PickupPlacementPriority.InventoryFirst);
+                    if (remainder > 0) break;
+                    remainingUnique--;
+                }
+                return remainingUnique;
+            }
             var quantity = (int)stack.Quantity;
             if (priority == PickupPlacementPriority.HotbarFirst)
             {
@@ -446,6 +533,119 @@ namespace Quieter.Inventory
             quantity = InsertIntoRange(inventory, stack, quantity, 0, InventoryLayout.MainSlotCount);
             return InsertIntoRange(inventory, stack, quantity,
                 InventoryLayout.FirstHotbarSlot, InventoryLayout.HotbarSlotCount);
+        }
+
+        public bool TryTransferTo(
+            InventorySlotReference sourceReference,
+            int requestedQuantity,
+            InventoryModel destination,
+            PickupPlacementPriority priority,
+            out ItemStackState transferred)
+        {
+            transferred = default;
+            if (destination == null || ReferenceEquals(this, destination)
+                || !cursor.IsEmpty || !destination.cursor.IsEmpty
+                || !TryGetArray(sourceReference, out var sourceSlots)
+                || sourceReference.Index >= sourceSlots.Length)
+            {
+                return false;
+            }
+
+            ref var source = ref sourceSlots[sourceReference.Index];
+            if (source.IsEmpty || requestedQuantity <= 0)
+            {
+                return false;
+            }
+
+            var amount = Math.Min(requestedQuantity, source.Quantity);
+            var candidate = source.WithQuantity(amount);
+            candidate.Equipped = false;
+
+            // Stage insertion on a copy. The source is changed only after we know the
+            // exact destination state, so a full inventory cannot duplicate loot.
+            var destinationCopy = new InventoryModel(destination.catalog);
+            Array.Copy(destination.inventory, destinationCopy.inventory,
+                destination.inventory.Length);
+            destinationCopy.SelectedHotbarIndex = destination.SelectedHotbarIndex;
+            var remainder = destinationCopy.AutoInsert(candidate, priority);
+            var moved = amount - remainder;
+            if (moved <= 0)
+            {
+                return false;
+            }
+
+            source.Quantity -= (ushort)moved;
+            if (source.Quantity == 0) source.Clear();
+            Array.Copy(destinationCopy.inventory, destination.inventory,
+                destination.inventory.Length);
+            transferred = candidate.WithQuantity(moved);
+            return true;
+        }
+
+        public bool SimulatePerishables(
+            float elapsedRealSeconds,
+            float ambientTemperatureC,
+            float humidity)
+        {
+            if (elapsedRealSeconds <= 0f) return false;
+            var changed = SimulatePerishableArray(
+                inventory, elapsedRealSeconds, ambientTemperatureC, humidity);
+            changed |= SimulatePerishableArray(
+                workbench, elapsedRealSeconds, ambientTemperatureC, humidity);
+            if (!cursor.IsEmpty && catalog.TryGetItem(cursor.ItemId, out var cursorItem))
+            {
+                var previous = cursor;
+                cursor = FoodDecayRules.Advance(
+                    cursor, cursorItem, elapsedRealSeconds, ambientTemperatureC, humidity);
+                changed |= !cursor.Equals(previous);
+            }
+            return changed;
+        }
+
+        public float CalculateCarriedMassKg()
+        {
+            var mass = 0f;
+            foreach (var stack in inventory)
+            {
+                if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out var definition))
+                    continue;
+                mass += definition.UnitMassKg * stack.Quantity
+                    + stack.LiquidMilliliters * 0.001f;
+            }
+            return mass;
+        }
+
+        private bool SimulatePerishableArray(
+            ItemStackState[] slots,
+            float elapsedRealSeconds,
+            float ambientTemperatureC,
+            float humidity)
+        {
+            var changed = false;
+            for (var index = 0; index < slots.Length; index++)
+            {
+                var previous = slots[index];
+                if (previous.IsEmpty || !catalog.TryGetItem(previous.ItemId, out var item))
+                    continue;
+                var current = FoodDecayRules.Advance(
+                    previous, item, elapsedRealSeconds, ambientTemperatureC, humidity);
+                if (current.Equals(previous)) continue;
+                slots[index] = current;
+                changed = true;
+            }
+            return changed;
+        }
+
+        public float CalculateUsedVolumeLiters()
+        {
+            var volume = 0f;
+            foreach (var stack in inventory)
+            {
+                if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out var definition))
+                    continue;
+                volume += definition.UnitVolumeLiters * stack.Quantity;
+            }
+            return volume;
         }
 
         public bool MatchesExactly(CraftingRecipe recipe)

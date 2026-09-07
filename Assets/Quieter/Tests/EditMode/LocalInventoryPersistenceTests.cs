@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Quieter.Inventory;
 using Quieter.Persistence;
+using Quieter.Survival;
 using Quieter.World;
 using UnityEngine;
 
@@ -47,6 +48,16 @@ namespace Quieter.Tests
                     RevealAtPercent = 50,
                     SampleId = "18446744073709550001",
                 },
+                new StoredInventorySlot
+                {
+                    SlotIndex = 2,
+                    ItemId = 39,
+                    Quantity = 1,
+                    ItemInstanceId = "18446744073709550002",
+                    Wetness = 2300,
+                    Cleanliness = 8100,
+                    Equipped = true,
+                },
             }, new[]
             {
                 new StoredInventorySlot
@@ -64,7 +75,7 @@ namespace Quieter.Tests
             var profile = await reopened.LoginAsync(steamId, "Collector", Vector3.zero);
 
             Assert.That(profile.SelectedHotbarIndex, Is.EqualTo(4));
-            Assert.That(profile.InventorySlots, Has.Count.EqualTo(2));
+            Assert.That(profile.InventorySlots, Has.Count.EqualTo(3));
             Assert.That(profile.InventorySlots[0].Quantity, Is.EqualTo(20));
             Assert.That(profile.InventorySlots[1].ItemId, Is.EqualTo(5));
             Assert.That(profile.InventorySlots[1].Condition, Is.EqualTo(83));
@@ -75,8 +86,46 @@ namespace Quieter.Tests
             Assert.That(profile.InventorySlots[1].RevealAtPercent, Is.EqualTo(50));
             Assert.That(profile.InventorySlots[1].SampleId,
                 Is.EqualTo("18446744073709550001"));
+            Assert.That(profile.InventorySlots[2].ItemId, Is.EqualTo(39));
+            Assert.That(profile.InventorySlots[2].Wetness, Is.EqualTo(2300));
+            Assert.That(profile.InventorySlots[2].Cleanliness, Is.EqualTo(8100));
+            Assert.That(profile.InventorySlots[2].Equipped, Is.True);
             Assert.That(profile.PendingItems, Has.Count.EqualTo(1));
             Assert.That(profile.PendingItems[0].SampleId, Is.EqualTo("9992"));
+        }
+
+        [Test]
+        public async Task AtomicSnapshot_KeepsBodyInventoryPositionTogetherAndRejectsResurrection()
+        {
+            const ulong steamId = 76561198000000251;
+            var repository = new LocalJsonRepository(path);
+            var profile = await repository.LoginAsync(steamId, "Survivor", Vector3.up * 8f);
+            var body = profile.Survival;
+            body.Revision = 2;
+            body.Physiology.Hydration = 0.3f;
+            var items = new[] { new StoredInventorySlot { SlotIndex = 0, ItemId = 30,
+                Quantity = 1, ItemInstanceId = "990", LiquidKind = 1, LiquidMilliliters = 1200 } };
+            await repository.SaveSnapshotAsync(steamId, new Vector3(20f, 8f, 0f), items,
+                Array.Empty<StoredInventorySlot>(), 0, body);
+            body.Revision = 1;
+            body.Physiology.Hydration = 1f;
+            await repository.SaveSnapshotAsync(steamId, Vector3.zero, Array.Empty<StoredInventorySlot>(),
+                Array.Empty<StoredInventorySlot>(), 0, body);
+            var restored = await new LocalJsonRepository(path).LoginAsync(steamId, "Survivor", Vector3.zero);
+            Assert.That(restored.Position.x, Is.EqualTo(20f));
+            Assert.That(restored.Survival.Physiology.Hydration, Is.EqualTo(0.3f));
+            Assert.That(restored.InventorySlots[0].LiquidMilliliters, Is.EqualTo(1200));
+            body.Revision = 3;
+            body.Physiology.LifeState = CharacterLifeState.Dead;
+            body.Physiology.DeathCause = DeathCause.BloodLoss;
+            await repository.SaveSnapshotAsync(steamId, restored.Position, items,
+                Array.Empty<StoredInventorySlot>(), 0, body);
+            body.Revision = 4;
+            body.Physiology.LifeState = CharacterLifeState.Conscious;
+            body.Physiology.DeathCause = DeathCause.None;
+            Assert.ThrowsAsync<InvalidOperationException>(async () => await repository.SaveSnapshotAsync(
+                steamId, Vector3.zero, Array.Empty<StoredInventorySlot>(),
+                Array.Empty<StoredInventorySlot>(), 0, body));
         }
 
         [Test]
@@ -163,19 +212,31 @@ namespace Quieter.Tests
         }
 
         [Test]
-        public async Task PersonalMapNotes_SurviveRestartAndRemainPlayerAndWorldScoped()
+        public async Task PhysicalMapNotes_SurviveRestartAndFollowItemBetweenPlayers()
         {
             const ulong firstSteamId = 76561198000000104;
             const ulong secondSteamId = 76561198000000105;
+            const string mapItemInstanceId = "18446744073709551001";
             var first = new LocalJsonRepository(path);
             var world = await first.GetOrCreateWorldAsync();
             await first.LoginAsync(firstSteamId, "Cartographer", Vector3.up * 8f);
             await first.LoginAsync(secondSteamId, "Stranger", Vector3.up * 8f);
+            await first.SaveInventoryAsync(firstSteamId, new[]
+            {
+                new StoredInventorySlot
+                {
+                    SlotIndex = 0,
+                    ItemId = 36,
+                    Quantity = 1,
+                    ItemInstanceId = mapItemInstanceId,
+                },
+            }, Array.Empty<StoredInventorySlot>(), 0);
             await first.SaveMapNotesAsync(firstSteamId, world.WorldId, new[]
             {
                 new StoredMapNote
                 {
                     WorldId = world.WorldId,
+                    MapItemInstanceId = mapItemInstanceId,
                     NoteId = "18446744073709551002",
                     X = 125.5f,
                     Z = -321.25f,
@@ -196,18 +257,28 @@ namespace Quieter.Tests
             Assert.That(owner.MapNotes[0].WorldId, Is.EqualTo(world.WorldId));
             Assert.That(stranger.MapNotes, Is.Empty);
 
-            await reopened.SaveMapNotesAsync(firstSteamId, world.WorldId + 1, new[]
+            await reopened.SaveInventoryAsync(
+                firstSteamId,
+                Array.Empty<StoredInventorySlot>(),
+                Array.Empty<StoredInventorySlot>(),
+                0);
+            await reopened.SaveInventoryAsync(secondSteamId, new[]
             {
-                new StoredMapNote
+                new StoredInventorySlot
                 {
-                    WorldId = world.WorldId + 1,
-                    NoteId = "77",
-                    Text = "Другой мир",
+                    SlotIndex = 0,
+                    ItemId = 36,
+                    Quantity = 1,
+                    ItemInstanceId = mapItemInstanceId,
                 },
-            });
-            var withSecondWorld = await reopened.LoginAsync(
+            }, Array.Empty<StoredInventorySlot>(), 0);
+            var previousOwner = await reopened.LoginAsync(
                 firstSteamId, "Cartographer", Vector3.zero);
-            Assert.That(withSecondWorld.MapNotes, Has.Count.EqualTo(2));
+            var newOwner = await reopened.LoginAsync(
+                secondSteamId, "Stranger", Vector3.zero);
+            Assert.That(previousOwner.MapNotes, Is.Empty);
+            Assert.That(newOwner.MapNotes, Has.Count.EqualTo(1));
+            Assert.That(newOwner.MapNotes[0].Text, Is.EqualTo("Большая глиняная залежь"));
         }
 
         [Test]

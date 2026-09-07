@@ -9,6 +9,7 @@ using Quieter.Core;
 using Quieter.Persistence;
 using Quieter.Player;
 using Quieter.World;
+using Quieter.Survival;
 using Quieter.Inventory;
 using Unity.Collections;
 using Unity.Netcode;
@@ -32,6 +33,7 @@ namespace Quieter.Networking
             public NetworkPlayer Player;
             public PlayerInventory Inventory;
             public PlayerResourceInteraction ResourceInteraction;
+            public PlayerSurvival Survival;
             public Task FinalSaveTask;
         }
 
@@ -44,10 +46,12 @@ namespace Quieter.Networking
             public List<StoredInventorySlot> PendingItems;
             public byte SelectedHotbarIndex;
             public Task KnowledgeSaveTask;
+            public CharacterSurvivalState Survival;
         }
 
         private readonly Dictionary<ulong, double> pendingClients = new();
         private readonly Dictionary<ulong, AuthenticatedClient> authenticatedClients = new();
+        private readonly Dictionary<ulong, AuthenticatedClient> offlineBodies = new();
         private readonly Dictionary<ulong, ulong> authenticatingSteamIds = new();
         private readonly HashSet<ulong> authenticatingClients = new();
         private readonly Dictionary<ulong, SemaphoreSlim> playerSaveGates = new();
@@ -138,6 +142,7 @@ namespace Quieter.Networking
         {
             ChangeStatus("Загрузка постоянного мира...");
             worldDefinition = await worldRepository.GetOrCreateWorldAsync(lifetime.Token);
+            FindAnyObjectByType<WorldWeatherService>()?.Initialize(worldDefinition.Seed);
             if (worldDefinition.GeneratorVersion != QuieterConstants.GeneratorVersion)
             {
                 throw new InvalidOperationException(
@@ -246,6 +251,7 @@ namespace Quieter.Networking
             hasPreparedClientPayload = true;
             authenticationSent = false;
             worldDefinition = await worldRepository.GetOrCreateWorldAsync(lifetime.Token);
+            FindAnyObjectByType<WorldWeatherService>()?.Initialize(worldDefinition.Seed);
             await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             await placedObjects.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, true);
@@ -540,6 +546,8 @@ namespace Quieter.Networking
                 var playerSave = authenticated.FinalSaveTask;
                 if (authenticated.Player != null)
                 {
+                    authenticated.Survival?.ServerSetOffline(true);
+                    offlineBodies[authenticated.SteamId] = authenticated;
                     var snapshot = CapturePlayerSaveSnapshot(
                         authenticated, lifetime.Token, true);
                     playerSave = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
@@ -659,19 +667,48 @@ namespace Quieter.Networking
                     displayName,
                     spawn,
                     lifetime.Token);
+                offlineBodies.TryGetValue(authentication.SteamId, out var offlineBody);
+                if (offlineBody != null
+                    && offlineBody.Player != null)
+                {
+                    profile.Position = offlineBody.Player.transform.position;
+                    profile.InventorySlots = offlineBody.Inventory?.CreateStoredSlotsSnapshot()
+                        ?? profile.InventorySlots;
+                    profile.PendingItems = offlineBody.Inventory?.CreateStoredPendingItemsSnapshot()
+                        ?? profile.PendingItems;
+                    profile.SelectedHotbarIndex = offlineBody.Inventory?.GetServerSelectedHotbarIndex()
+                        ?? profile.SelectedHotbarIndex;
+                    profile.Survival = offlineBody.Survival?.CreateServerSnapshot()
+                        ?? profile.Survival;
+                }
                 if (!pendingClients.ContainsKey(clientId))
                 {
                     serverAuthentication.EndSession(authentication.SteamId);
                     return;
+                }
+                if (offlineBody != null)
+                {
+                    offlineBodies.Remove(authentication.SteamId);
                 }
 
                 var position = ValidateSpawn(profile.Position, spawn);
                 worldStreamer.EnsureLoadedAround(position);
                 var instance = Instantiate(playerPrefab, position, Quaternion.identity);
                 var networkObject = instance.GetComponent<NetworkObject>();
+                networkObject.DontDestroyWithOwner = true;
                 networkObject.SpawnAsPlayerObject(clientId, true);
                 var player = instance.GetComponent<NetworkPlayer>();
                 player.AssignServerIdentity(authentication.SteamId, profile.DisplayName, position);
+                var playerSurvival = instance.GetComponent<PlayerSurvival>();
+                if (playerSurvival == null)
+                {
+                    throw new InvalidOperationException("Network player prefab has no PlayerSurvival.");
+                }
+                playerSurvival.InitializeServer(
+                    profile.Survival,
+                    authentication.SteamId,
+                    profile.DisplayName);
+                playerSurvival.ServerSetOffline(false);
                 var playerInventory = instance.GetComponent<PlayerInventory>();
                 if (playerInventory == null)
                 {
@@ -698,6 +735,7 @@ namespace Quieter.Networking
                 SpawnDevelopmentLoot(position, player.transform.eulerAngles.y);
 #endif
                 player.ServerDespawning += OnServerPlayerDespawning;
+                playerSurvival.ServerDied += OnServerPlayerDied;
                 pendingClients.Remove(clientId);
                 authenticatedClients[clientId] = new AuthenticatedClient
                 {
@@ -707,7 +745,17 @@ namespace Quieter.Networking
                     Player = player,
                     Inventory = playerInventory,
                     ResourceInteraction = resourceInteraction,
+                    Survival = playerSurvival,
                 };
+                if (offlineBody?.Player != null && offlineBody.Player.NetworkObject.IsSpawned)
+                {
+                    offlineBody.Player.ServerDespawning -= OnServerPlayerDespawning;
+                    if (offlineBody.Survival != null)
+                    {
+                        offlineBody.Survival.ServerDied -= OnServerPlayerDied;
+                    }
+                    offlineBody.Player.NetworkObject.Despawn(true);
+                }
                 SendWorldBootstrap(clientId);
                 resourceWorld.SendSnapshot(clientId);
                 placedObjects.SendSnapshot(clientId);
@@ -761,6 +809,7 @@ namespace Quieter.Networking
             }
 
             worldDefinition = definition;
+            FindAnyObjectByType<WorldWeatherService>()?.Initialize(worldDefinition.Seed);
             resourceWorld.InitializeClient(definition);
             placedObjects.InitializeClient(definition);
             worldStreamer.Initialize(
@@ -840,6 +889,7 @@ namespace Quieter.Networking
         private async Task SaveAllPlayerStateAsync(CancellationToken cancellationToken)
         {
             var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
+            clients.AddRange(offlineBodies.Values);
             foreach (var client in clients)
             {
                 if (client.Player != null)
@@ -919,14 +969,22 @@ namespace Quieter.Networking
             {
                 return;
             }
-            await playerRepository.SavePositionAsync(
-                snapshot.SteamId, snapshot.Position, cancellationToken);
-            await playerRepository.SaveInventoryAsync(
-                snapshot.SteamId,
-                snapshot.Slots,
-                snapshot.PendingItems,
-                snapshot.SelectedHotbarIndex,
-                cancellationToken);
+            if (playerRepository is IAtomicPlayerProfileRepository atomicRepository)
+            {
+                await atomicRepository.SaveSnapshotAsync(
+                    snapshot.SteamId, snapshot.Position, snapshot.Slots, snapshot.PendingItems,
+                    snapshot.SelectedHotbarIndex, snapshot.Survival, cancellationToken);
+            }
+            else
+            {
+                await playerRepository.SavePositionAsync(
+                    snapshot.SteamId, snapshot.Position, cancellationToken);
+                await playerRepository.SaveInventoryAsync(
+                    snapshot.SteamId, snapshot.Slots, snapshot.PendingItems,
+                    snapshot.SelectedHotbarIndex, cancellationToken);
+                await playerRepository.SaveSurvivalAsync(
+                    snapshot.SteamId, snapshot.Survival, cancellationToken);
+            }
             persistedPlayerSaveRevisions[snapshot.SteamId] = snapshot.Revision;
         }
 
@@ -945,8 +1003,16 @@ namespace Quieter.Networking
             var pendingItems = client.Inventory?.CreateStoredPendingItemsSnapshot()
                 ?? new List<StoredInventorySlot>();
             playerSaveRevisions.TryGetValue(client.SteamId, out var revision);
+            revision = System.Math.Max(
+                revision,
+                client.Survival?.ServerState?.Revision ?? 0);
             revision++;
             playerSaveRevisions[client.SteamId] = revision;
+            var survival = client.Survival?.CreateServerSnapshot();
+            if (survival != null)
+            {
+                survival.Revision = revision;
+            }
             return new PlayerSaveSnapshot
             {
                 SteamId = client.SteamId,
@@ -955,6 +1021,7 @@ namespace Quieter.Networking
                 Slots = slots,
                 PendingItems = pendingItems,
                 SelectedHotbarIndex = selected,
+                Survival = survival,
                 KnowledgeSaveTask = client.ResourceInteraction != null
                     ? client.ResourceInteraction.FlushKnowledgeAsync(cancellationToken)
                     : Task.CompletedTask,
@@ -1046,11 +1113,35 @@ namespace Quieter.Networking
                 }
 
                 player.ServerDespawning -= OnServerPlayerDespawning;
+                if (client.Survival != null)
+                {
+                    client.Survival.ServerDied -= OnServerPlayerDied;
+                }
                 var snapshot = CapturePlayerSaveSnapshot(client, lifetime.Token, true);
                 client.FinalSaveTask = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
                 TrackFinalSave(client.FinalSaveTask);
                 client.Player = null;
                 break;
+            }
+        }
+
+        private void OnServerPlayerDied(CharacterSurvivalState deceased)
+        {
+            foreach (var client in authenticatedClients.Values)
+            {
+                if (client.Survival == null || !client.Survival.ServerIsDead
+                    || client.Survival.ServerState?.CharacterId != deceased?.CharacterId)
+                    continue;
+                TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
+                return;
+            }
+            foreach (var client in offlineBodies.Values)
+            {
+                if (client.Survival == null || !client.Survival.ServerIsDead
+                    || client.Survival.ServerState?.CharacterId != deceased?.CharacterId)
+                    continue;
+                TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
+                return;
             }
         }
 
@@ -1073,6 +1164,7 @@ namespace Quieter.Networking
         private async Task SaveBeforeQuitAsync()
         {
             var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
+            clients.AddRange(offlineBodies.Values);
             foreach (var client in clients)
             {
                 try

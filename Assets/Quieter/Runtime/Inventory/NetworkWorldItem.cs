@@ -1,11 +1,14 @@
 using Unity.Netcode;
 using UnityEngine;
+using Quieter.Survival;
 
 namespace Quieter.Inventory
 {
     [RequireComponent(typeof(NetworkObject))]
     public sealed class NetworkWorldItem : NetworkBehaviour
     {
+        private const float PerishableTickSeconds = 5f;
+
         private readonly NetworkVariable<ItemStackState> stack = new(
             default,
             NetworkVariableReadPermission.Everyone,
@@ -15,6 +18,9 @@ namespace Quieter.Inventory
         private GameObject visual;
         private bool beingCollected;
         private ItemStackState serverStack;
+        private WorldWeatherService weatherService;
+        private float lastPerishableTickAt;
+        private float nextPerishableTickAt;
 
         public ItemStackState Stack => stack.Value;
 
@@ -22,6 +28,11 @@ namespace Quieter.Inventory
         {
             catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
             stack.OnValueChanged += OnStackChanged;
+            if (IsServer)
+            {
+                lastPerishableTickAt = Time.unscaledTime;
+                nextPerishableTickAt = lastPerishableTickAt + PerishableTickSeconds;
+            }
             RebuildVisual(stack.Value);
         }
 
@@ -91,9 +102,36 @@ namespace Quieter.Inventory
             return true;
         }
 
+        private void Update()
+        {
+            if (!IsServer || serverStack.IsEmpty || catalog == null
+                || Time.unscaledTime < nextPerishableTickAt
+                || !catalog.TryGetItem(serverStack.ItemId, out var item))
+            {
+                return;
+            }
+            var now = Time.unscaledTime;
+            var elapsed = Mathf.Max(0f, now - lastPerishableTickAt);
+            lastPerishableTickAt = now;
+            nextPerishableTickAt = now + PerishableTickSeconds;
+            weatherService ??= FindAnyObjectByType<WorldWeatherService>();
+            var environment = weatherService != null
+                ? weatherService.GetEnvironment(transform.position)
+                : SurvivalEnvironment.Temperate;
+            var current = FoodDecayRules.Advance(
+                serverStack,
+                item,
+                elapsed,
+                environment.AmbientTemperatureC,
+                environment.Humidity);
+            if (current.Equals(serverStack)) return;
+            serverStack = current;
+            stack.Value = current.ForReplication();
+        }
+
         private void OnStackChanged(ItemStackState previous, ItemStackState current)
         {
-            RebuildVisual(current);
+            if (previous.ItemId != current.ItemId) RebuildVisual(current);
         }
 
         private void RebuildVisual(ItemStackState current)

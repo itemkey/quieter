@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using Quieter.Core;
 using Quieter.World;
 using Quieter.Inventory;
+using Quieter.Survival;
 using Quieter.UI;
+using Quieter.Combat;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -86,6 +88,12 @@ namespace Quieter.Player
         private PlayerGait cameraGait;
         private uint nextInputSequence;
         private uint jumpPressId;
+        private uint attackPressId;
+        private uint attackReleaseId;
+        private uint dodgePressId;
+        private Vector2 sampledDodgeDirection;
+        private bool sampledAttackHeld;
+        private bool sampledBlockHeld;
         private uint serverSimulationTick;
         private int missingInputTicks;
         private double latestInputReceivedAt;
@@ -95,6 +103,8 @@ namespace Quieter.Player
         private TextMesh nameLabel;
         private PlayerInventory playerInventory;
         private PlayerResourceInteraction resourceInteraction;
+        private PlayerSurvival playerSurvival;
+        private PlayerCombat playerCombat;
 
         public ulong SteamId { get; private set; }
         public string DisplayName => displayName.Value.ToString();
@@ -107,6 +117,8 @@ namespace Quieter.Player
             movementMotor = new PlayerMovementMotor(characterController);
             playerInventory = GetComponent<PlayerInventory>();
             resourceInteraction = GetComponent<PlayerResourceInteraction>();
+            playerSurvival = GetComponent<PlayerSurvival>();
+            playerCombat = GetComponent<PlayerCombat>();
             if (presentationRoot != null)
             {
                 presentationLocalPosition = presentationRoot.localPosition;
@@ -208,7 +220,8 @@ namespace Quieter.Player
             }
 
             SampleInput();
-            if ((playerInventory == null || !playerInventory.IsInterfaceOpen)
+            if (!SurvivalView.IsCreationOpen
+                && (playerInventory == null || !playerInventory.IsInterfaceOpen)
                 && !ResourceMapView.IsOpen && !ResourceMapView.IsDepositOpen)
             {
                 UpdateLook();
@@ -239,7 +252,38 @@ namespace Quieter.Player
             if (IsServer)
             {
                 var input = IsOwner ? CreateInputFrame() : GetServerInputForTick();
+                playerSurvival?.ServerSetCarriedMass(
+                    playerInventory?.GetServerCarriedMassKg() ?? 0f);
                 SimulateFrame(ref simulatedState, input, deltaTime);
+                var exertion = CalculateExertion(input, simulatedState);
+                playerSurvival?.ServerSetExertion(exertion);
+                if (input.Movement.sqrMagnitude > 0.2f)
+                {
+                    if (input.Sprint)
+                    {
+                        playerSurvival?.ServerRegisterPractice(
+                            SkillId.Running, deltaTime, Mathf.Max(0.2f, exertion), 1f, 0f);
+                        playerSurvival?.ServerRegisterPhysicalLoad(
+                            CharacterAttributeId.AerobicCapacity, deltaTime, exertion);
+                        playerSurvival?.ServerRegisterPhysicalLoad(
+                            CharacterAttributeId.MuscularEndurance, deltaTime, exertion * 0.6f);
+                    }
+                    var carriedMass = playerInventory?.GetServerCarriedMassKg() ?? 0f;
+                    if (carriedMass > 18f)
+                    {
+                        playerSurvival?.ServerRegisterPractice(
+                            SkillId.LoadCarrying,
+                            deltaTime,
+                            Mathf.InverseLerp(18f, 55f, carriedMass),
+                            1f,
+                            0f);
+                    }
+                }
+                if (!wasGrounded && simulatedState.Grounded && previousVerticalVelocity < -2f)
+                {
+                    playerSurvival?.ServerRegisterLanding(-previousVerticalVelocity);
+                }
+                playerCombat?.ServerProcessInput(input);
                 simulatedState.ServerTick = ++serverSimulationTick;
                 if (IsOwner || input.Sequence > simulatedState.LastProcessedSequence)
                 {
@@ -319,12 +363,17 @@ namespace Quieter.Player
                     || frame.Sequence > simulatedState.LastProcessedSequence + PredictionHistorySize
                     || !IsFinite(frame.Movement.x)
                     || !IsFinite(frame.Movement.y)
+                    || !IsFinite(frame.DodgeDirection.x)
+                    || !IsFinite(frame.DodgeDirection.y)
+                    || double.IsNaN(frame.SampledServerTime)
+                    || double.IsInfinity(frame.SampledServerTime)
                     || !IsFinite(frame.Yaw))
                 {
                     continue;
                 }
 
                 frame.Movement = Vector2.ClampMagnitude(frame.Movement, 1f);
+                frame.DodgeDirection = Vector2.ClampMagnitude(frame.DodgeDirection, 1f);
                 frame.Yaw = Mathf.Repeat(frame.Yaw, 360f);
                 if (!serverInputQueue.ContainsKey(frame.Sequence))
                 {
@@ -380,6 +429,8 @@ namespace Quieter.Player
                 sampledMovement = Vector2.zero;
                 sampledSprint = false;
                 sampledCrouchHeld = false;
+                sampledAttackHeld = false;
+                sampledBlockHeld = false;
                 return;
             }
 
@@ -388,16 +439,46 @@ namespace Quieter.Player
             if (keyboard.sKey.isPressed) movement.y -= 1f;
             if (keyboard.dKey.isPressed) movement.x += 1f;
             if (keyboard.aKey.isPressed) movement.x -= 1f;
-            sampledMovement = ResourceMapView.IsOpen
+            sampledMovement = ResourceMapView.IsOpen || SurvivalView.IsCreationOpen
+                || SurvivalView.IsBodyOpen || SurvivalView.IsProgressionOpen
                 ? Vector2.zero
                 : Vector2.ClampMagnitude(movement, 1f);
             sampledSprint = !ResourceMapView.IsOpen && keyboard.leftShiftKey.isPressed;
-            var interfaceOpen = (playerInventory != null && playerInventory.IsInterfaceOpen)
+            var interfaceOpen = SurvivalView.IsCreationOpen || SurvivalView.IsBodyOpen
+                || SurvivalView.IsProgressionOpen
+                || (playerInventory != null && playerInventory.IsInterfaceOpen)
                 || ResourceMapView.IsOpen || ResourceMapView.IsDepositOpen;
             sampledCrouchHeld = !interfaceOpen && keyboard.leftCtrlKey.isPressed;
             if (!interfaceOpen && keyboard.spaceKey.wasPressedThisFrame)
             {
                 jumpPressId++;
+            }
+            var mouse = Mouse.current;
+            var combatInputAllowed = !interfaceOpen
+                && Cursor.lockState == CursorLockMode.Locked
+                && !(resourceInteraction?.ConsumesPrimaryAction ?? false);
+            sampledAttackHeld = combatInputAllowed && mouse?.leftButton.isPressed == true;
+            sampledBlockHeld = combatInputAllowed && mouse?.rightButton.isPressed == true;
+            if (combatInputAllowed && mouse?.leftButton.wasPressedThisFrame == true)
+            {
+                attackPressId++;
+            }
+            if (mouse?.leftButton.wasReleasedThisFrame == true)
+            {
+                attackReleaseId++;
+            }
+            sampledDodgeDirection = Vector2.zero;
+            var dodgeRequested = !interfaceOpen && keyboard.leftAltKey.isPressed
+                && (keyboard.wKey.wasPressedThisFrame
+                    || keyboard.sKey.wasPressedThisFrame
+                    || keyboard.aKey.wasPressedThisFrame
+                    || keyboard.dKey.wasPressedThisFrame);
+            if (dodgeRequested)
+            {
+                sampledDodgeDirection = sampledMovement.sqrMagnitude > 0.01f
+                    ? sampledMovement.normalized
+                    : Vector2.down;
+                dodgePressId++;
             }
         }
 
@@ -409,6 +490,15 @@ namespace Quieter.Player
                 Movement = sampledMovement,
                 Yaw = viewYaw,
                 JumpPressId = jumpPressId,
+                AttackPressId = attackPressId,
+                AttackReleaseId = attackReleaseId,
+                DodgePressId = dodgePressId,
+                DodgeDirection = sampledDodgeDirection,
+                SampledServerTime = NetworkManager != null
+                    ? NetworkManager.ServerTime.Time
+                    : Time.timeAsDouble,
+                AttackHeld = sampledAttackHeld,
+                BlockHeld = sampledBlockHeld,
                 Sprint = sampledSprint,
                 CrouchHeld = sampledCrouchHeld,
             };
@@ -454,6 +544,8 @@ namespace Quieter.Player
                 input.Movement = Vector2.zero;
                 input.Sprint = false;
                 input.CrouchHeld = false;
+                input.AttackHeld = false;
+                input.BlockHeld = false;
             }
 
             return input;
@@ -464,7 +556,10 @@ namespace Quieter.Player
             PlayerInputFrame input,
             float deltaTime)
         {
-            movementMotor.Simulate(ref state, input, deltaTime);
+            var capabilities = playerSurvival != null
+                ? playerSurvival.CurrentCapabilities
+                : CharacterCapabilities.Normal;
+            movementMotor.Simulate(ref state, input, deltaTime, capabilities);
             if (worldStreamer == null || !worldStreamer.IsInitialized)
             {
                 return;
@@ -478,6 +573,23 @@ namespace Quieter.Player
 
             state.Position = clamped;
             movementMotor.Warp(state);
+        }
+
+        private static float CalculateExertion(
+            PlayerInputFrame input,
+            PlayerNetworkState state)
+        {
+            if (input.Movement.sqrMagnitude < 0.01f)
+            {
+                return 0.05f;
+            }
+
+            if (!state.Grounded)
+            {
+                return 0.65f;
+            }
+
+            return input.Sprint ? 1f : state.Crouched ? 0.22f : 0.42f;
         }
 
         private void OnAuthoritativeStateChanged(
@@ -921,6 +1033,16 @@ namespace Quieter.Player
             {
                 LockCursor(!open);
             }
+        }
+
+        public void ServerApplyDodge(Vector2 localDirection, float speed)
+        {
+            if (!IsServer || localDirection.sqrMagnitude < 0.01f || speed <= 0f) return;
+            var local = Vector2.ClampMagnitude(localDirection, 1f);
+            var rotation = Quaternion.Euler(0f, simulatedState.Yaw, 0f);
+            var world = rotation * new Vector3(local.x, 0f, local.y);
+            simulatedState.Velocity.x = world.x * speed;
+            simulatedState.Velocity.z = world.z * speed;
         }
     }
 }

@@ -14,6 +14,8 @@ GameObject:
   - component: {fileID: 7381729430087833106}
   - component: {fileID: 8633803315811276370}
   - component: {fileID: 2372106358299587704}
+  - component: {fileID: 3224908481521705033}
+  - component: {fileID: 5413274838329031666}
   m_Layer: 0
   m_Name: NetworkPlayer
   m_TagString: Untagged
@@ -130,6 +132,32 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9b764db56c6d22c4e993d7360214f195, type: 3}
   m_Name:
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.World.PlayerResourceInteraction
+  ShowTopMostFoldoutHeaderGroup: 1
+--- !u!114 &3224908481521705033
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1248037524489756393}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7edfd4ce51bc44f3a3606773fc3d50b2, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Survival.PlayerSurvival
+  ShowTopMostFoldoutHeaderGroup: 1
+--- !u!114 &5413274838329031666
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1248037524489756393}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 73c0d663ab8d4aa6ae27a4a5adbf20b8, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Combat.PlayerCombat
   ShowTopMostFoldoutHeaderGroup: 1
 --- !u!1 &6819976647927637068
 GameObject:

@@ -49,6 +49,16 @@ namespace Quieter.Inventory
         Superior = 5,
     }
 
+    public enum LiquidKind : byte
+    {
+        None,
+        Water,
+        SaltWater,
+        Broth,
+        HerbalInfusion,
+        Waste,
+    }
+
     [Serializable]
     public struct InventorySlotReference : INetworkSerializable, IEquatable<InventorySlotReference>
     {
@@ -88,6 +98,15 @@ namespace Quieter.Inventory
         public ulong SourceNodeId;
         public byte RevealAtPercent;
         public ulong SampleId;
+        public ulong ItemInstanceId;
+        public ushort Freshness;
+        public ushort BiologicalContamination;
+        public ushort ToxinContamination;
+        public ushort Wetness;
+        public ushort Cleanliness;
+        public ushort LiquidMilliliters;
+        public LiquidKind LiquidKind;
+        public bool Equipped;
 
         public ItemStackState(
             ushort itemId,
@@ -97,7 +116,16 @@ namespace Quieter.Inventory
             ushort hiddenItemId = 0,
             ulong sourceNodeId = 0,
             byte revealAtPercent = 0,
-            ulong sampleId = 0)
+            ulong sampleId = 0,
+            ulong itemInstanceId = 0,
+            ushort freshness = 10000,
+            ushort biologicalContamination = 0,
+            ushort toxinContamination = 0,
+            ushort wetness = 0,
+            ushort cleanliness = 10000,
+            ushort liquidMilliliters = 0,
+            LiquidKind liquidKind = LiquidKind.None,
+            bool equipped = false)
         {
             ItemId = itemId;
             Quantity = (ushort)Math.Clamp(quantity, 0, ushort.MaxValue);
@@ -107,6 +135,15 @@ namespace Quieter.Inventory
             SourceNodeId = sourceNodeId;
             RevealAtPercent = revealAtPercent;
             SampleId = sampleId;
+            ItemInstanceId = itemInstanceId;
+            Freshness = (ushort)Math.Min(10000, (int)freshness);
+            BiologicalContamination = (ushort)Math.Min(10000, (int)biologicalContamination);
+            ToxinContamination = (ushort)Math.Min(10000, (int)toxinContamination);
+            Wetness = (ushort)Math.Min(10000, (int)wetness);
+            Cleanliness = (ushort)Math.Min(10000, (int)cleanliness);
+            LiquidMilliliters = liquidMilliliters;
+            LiquidKind = liquidKind;
+            Equipped = equipped;
             if (Quantity == 0)
             {
                 Clear();
@@ -126,6 +163,15 @@ namespace Quieter.Inventory
             SourceNodeId = 0;
             RevealAtPercent = 0;
             SampleId = 0;
+            ItemInstanceId = 0;
+            Freshness = 0;
+            BiologicalContamination = 0;
+            ToxinContamination = 0;
+            Wetness = 0;
+            Cleanliness = 0;
+            LiquidMilliliters = 0;
+            LiquidKind = LiquidKind.None;
+            Equipped = false;
         }
 
         public ItemStackState WithQuantity(int quantity) => new(
@@ -136,7 +182,16 @@ namespace Quieter.Inventory
             HiddenItemId,
             SourceNodeId,
             RevealAtPercent,
-            SampleId);
+            SampleId,
+            ItemInstanceId,
+            Freshness,
+            BiologicalContamination,
+            ToxinContamination,
+            Wetness,
+            Cleanliness,
+            LiquidMilliliters,
+            LiquidKind,
+            Equipped);
 
         public ItemStackState ForReplication()
         {
@@ -146,7 +201,16 @@ namespace Quieter.Inventory
                 Quantity,
                 sourceNodeId: SourceNodeId,
                 revealAtPercent: RevealAtPercent,
-                sampleId: SampleId);
+                sampleId: SampleId,
+                itemInstanceId: ItemInstanceId,
+                freshness: Freshness,
+                biologicalContamination: BiologicalContamination,
+                toxinContamination: ToxinContamination,
+                wetness: Wetness,
+                cleanliness: Cleanliness,
+                liquidMilliliters: LiquidMilliliters,
+                liquidKind: LiquidKind,
+                equipped: Equipped);
         }
 
         public bool CanStackWith(ItemStackState other) => !IsEmpty && !other.IsEmpty
@@ -157,7 +221,17 @@ namespace Quieter.Inventory
             && HiddenItemId == other.HiddenItemId
             && SourceNodeId == other.SourceNodeId
             && RevealAtPercent == other.RevealAtPercent
-            && SampleId == other.SampleId;
+            && SampleId == other.SampleId
+            && ItemInstanceId == 0
+            && other.ItemInstanceId == 0
+            && Freshness == other.Freshness
+            && BiologicalContamination == other.BiologicalContamination
+            && ToxinContamination == other.ToxinContamination
+            && Wetness == other.Wetness
+            && Cleanliness == other.Cleanliness
+            && LiquidMilliliters == other.LiquidMilliliters
+            && LiquidKind == other.LiquidKind
+            && Equipped == other.Equipped;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
@@ -169,6 +243,15 @@ namespace Quieter.Inventory
             serializer.SerializeValue(ref SourceNodeId);
             serializer.SerializeValue(ref RevealAtPercent);
             serializer.SerializeValue(ref SampleId);
+            serializer.SerializeValue(ref ItemInstanceId);
+            serializer.SerializeValue(ref Freshness);
+            serializer.SerializeValue(ref BiologicalContamination);
+            serializer.SerializeValue(ref ToxinContamination);
+            serializer.SerializeValue(ref Wetness);
+            serializer.SerializeValue(ref Cleanliness);
+            serializer.SerializeValue(ref LiquidMilliliters);
+            serializer.SerializeValue(ref LiquidKind);
+            serializer.SerializeValue(ref Equipped);
         }
 
         public bool Equals(ItemStackState other) => ItemId == other.ItemId
@@ -178,17 +261,39 @@ namespace Quieter.Inventory
             && HiddenItemId == other.HiddenItemId
             && SourceNodeId == other.SourceNodeId
             && RevealAtPercent == other.RevealAtPercent
-            && SampleId == other.SampleId;
+            && SampleId == other.SampleId
+            && ItemInstanceId == other.ItemInstanceId
+            && Freshness == other.Freshness
+            && BiologicalContamination == other.BiologicalContamination
+            && ToxinContamination == other.ToxinContamination
+            && Wetness == other.Wetness
+            && Cleanliness == other.Cleanliness
+            && LiquidMilliliters == other.LiquidMilliliters
+            && LiquidKind == other.LiquidKind
+            && Equipped == other.Equipped;
         public override bool Equals(object obj) => obj is ItemStackState other && Equals(other);
-        public override int GetHashCode() => HashCode.Combine(
-            ItemId,
-            Quantity,
-            Condition,
-            (byte)Quality,
-            HiddenItemId,
-            SourceNodeId,
-            RevealAtPercent,
-            SampleId);
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            hash.Add(ItemId);
+            hash.Add(Quantity);
+            hash.Add(Condition);
+            hash.Add((byte)Quality);
+            hash.Add(HiddenItemId);
+            hash.Add(SourceNodeId);
+            hash.Add(RevealAtPercent);
+            hash.Add(SampleId);
+            hash.Add(ItemInstanceId);
+            hash.Add(Freshness);
+            hash.Add(BiologicalContamination);
+            hash.Add(ToxinContamination);
+            hash.Add(Wetness);
+            hash.Add(Cleanliness);
+            hash.Add(LiquidMilliliters);
+            hash.Add((byte)LiquidKind);
+            hash.Add(Equipped);
+            return hash.ToHashCode();
+        }
         public override string ToString() => IsEmpty ? "Empty" : $"{ItemId} x{Quantity}";
     }
 
@@ -204,5 +309,24 @@ namespace Quieter.Inventory
         public string SourceNodeId;
         public byte RevealAtPercent;
         public string SampleId;
+        public string ItemInstanceId;
+        public ushort Freshness = 10000;
+        public ushort BiologicalContamination;
+        public ushort ToxinContamination;
+        public ushort Wetness;
+        public ushort Cleanliness = 10000;
+        public ushort LiquidMilliliters;
+        public byte LiquidKind;
+        public bool Equipped;
+    }
+
+    public static class ItemInstanceIdFactory
+    {
+        public static ulong Create()
+        {
+            var bytes = Guid.NewGuid().ToByteArray();
+            var value = BitConverter.ToUInt64(bytes, 0);
+            return value == 0 ? 1ul : value;
+        }
     }
 }

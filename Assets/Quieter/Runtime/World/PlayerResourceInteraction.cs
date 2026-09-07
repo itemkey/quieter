@@ -7,6 +7,7 @@ using Quieter.Inventory;
 using Quieter.Persistence;
 using Quieter.Player;
 using Quieter.UI;
+using Quieter.Survival;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -39,12 +40,18 @@ namespace Quieter.World
     [Serializable]
     public struct MapNoteNetworkState : INetworkSerializable, IEquatable<MapNoteNetworkState>
     {
+        public ulong MapItemInstanceId;
         public ulong NoteId;
         public Vector2 Position;
         public FixedString512Bytes Text;
 
-        public MapNoteNetworkState(ulong noteId, Vector2 position, string text)
+        public MapNoteNetworkState(
+            ulong mapItemInstanceId,
+            ulong noteId,
+            Vector2 position,
+            string text)
         {
+            MapItemInstanceId = mapItemInstanceId;
             NoteId = noteId;
             Position = position;
             Text = MapNoteRules.NormalizeText(text);
@@ -52,12 +59,14 @@ namespace Quieter.World
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
+            serializer.SerializeValue(ref MapItemInstanceId);
             serializer.SerializeValue(ref NoteId);
             serializer.SerializeValue(ref Position);
             serializer.SerializeValue(ref Text);
         }
 
-        public bool Equals(MapNoteNetworkState other) => NoteId == other.NoteId
+        public bool Equals(MapNoteNetworkState other) => MapItemInstanceId == other.MapItemInstanceId
+            && NoteId == other.NoteId
             && Position == other.Position && Text.Equals(other.Text);
     }
 
@@ -84,11 +93,13 @@ namespace Quieter.World
 
         private NetworkPlayer player;
         private PlayerInventory inventory;
+        private PlayerSurvival survival;
         private ResourceWorldService resourceWorld;
         private PlacedObjectWorldService placedObjects;
         private IPlayerProfileRepository repository;
         private ResourceNodeView focusedNode;
         private ResearchTableView focusedTable;
+        private SurvivalStructureView focusedStructure;
         private ulong localOpenTableId;
         private ulong serverOpenTableId;
         private ulong serverResearchTableId;
@@ -107,6 +118,15 @@ namespace Quieter.World
         private ulong steamId;
         private int worldId;
         private double nextMineAt;
+        private double nextWaterGatherAt;
+        private ulong serverBoilHearthId;
+        private ushort serverBoilItemId;
+        private ulong serverBoilItemInstanceId;
+        private double serverBoilCompletesAt;
+        private ItemStackState serverBoilContents;
+        private ulong serverRinseSourceId;
+        private ItemStackState serverRinseItem;
+        private double serverRinseCompletesAt;
         private float nextKnowledgeSaveAt;
         private bool knowledgeDirty;
         private bool saveRunning;
@@ -116,6 +136,7 @@ namespace Quieter.World
         private bool notesDirty;
         private float nextNoteMutationAt;
         private GameObject placementPreview;
+        private ushort placementItemId;
         private Vector3 placementPosition;
         private float placementYaw;
         private bool placementValid;
@@ -128,8 +149,12 @@ namespace Quieter.World
         public event Action Changed;
         public ResourceNodeView FocusedNode => focusedNode;
         public ResearchTableView FocusedTable => focusedTable;
+        public SurvivalStructureView FocusedStructure => focusedStructure;
+        public bool HasServerManualWork => serverBoilHearthId != 0 || serverRinseSourceId != 0;
         public ulong CurrentResearchTableId => localOpenTableId;
         public bool IsPlacementMode => placementPreview != null;
+        public bool ConsumesPrimaryAction => IsPlacementMode
+            || focusedNode != null && focusedNode.Descriptor.IsMineable;
         public bool PlacementHasSurface => placementHasSurface;
         public ItemStackState CurrentResearchTableInput =>
             placedObjects != null && localOpenTableId != 0
@@ -194,31 +219,52 @@ namespace Quieter.World
             if (IsOwner) SetFeedback(value, durationSeconds);
         }
 
-        public void RequestCreateMapNote(Vector2 position, string text)
+        public int CountMapNotes(ulong mapItemInstanceId)
         {
-            if (!IsOwner) return;
-            var normalized = MapNoteRules.NormalizeText(text);
-            if (normalized.Length == 0) return;
-            CreateMapNoteServerRpc(position, new FixedString512Bytes(normalized));
+            if (mapItemInstanceId == 0) return 0;
+            var count = 0;
+            foreach (var note in replicatedMapNotes)
+            {
+                if (note.MapItemInstanceId == mapItemInstanceId) count++;
+            }
+            return count;
         }
 
-        public void RequestUpdateMapNote(ulong noteId, Vector2 position, string text)
+        public void RequestCreateMapNote(ulong mapItemInstanceId, Vector2 position, string text)
         {
-            if (!IsOwner || noteId == 0) return;
+            if (!IsOwner || mapItemInstanceId == 0) return;
             var normalized = MapNoteRules.NormalizeText(text);
             if (normalized.Length == 0) return;
-            UpdateMapNoteServerRpc(noteId, position, new FixedString512Bytes(normalized));
+            CreateMapNoteServerRpc(
+                mapItemInstanceId, position, new FixedString512Bytes(normalized));
         }
 
-        public void RequestDeleteMapNote(ulong noteId)
+        public void RequestUpdateMapNote(
+            ulong mapItemInstanceId,
+            ulong noteId,
+            Vector2 position,
+            string text)
         {
-            if (IsOwner && noteId != 0) DeleteMapNoteServerRpc(noteId);
+            if (!IsOwner || mapItemInstanceId == 0 || noteId == 0) return;
+            var normalized = MapNoteRules.NormalizeText(text);
+            if (normalized.Length == 0) return;
+            UpdateMapNoteServerRpc(
+                mapItemInstanceId, noteId, position, new FixedString512Bytes(normalized));
+        }
+
+        public void RequestDeleteMapNote(ulong mapItemInstanceId, ulong noteId)
+        {
+            if (IsOwner && mapItemInstanceId != 0 && noteId != 0)
+            {
+                DeleteMapNoteServerRpc(mapItemInstanceId, noteId);
+            }
         }
 
         private void Awake()
         {
             player = GetComponent<NetworkPlayer>();
             inventory = GetComponent<PlayerInventory>();
+            survival = GetComponent<PlayerSurvival>();
         }
 
         public override void OnNetworkSpawn()
@@ -289,17 +335,25 @@ namespace Quieter.World
             {
                 foreach (var entry in storedNotes)
                 {
-                    if (serverMapNotes.Count >= MapNoteRules.MaximumNotesPerWorld) break;
-                    if (entry == null || !ulong.TryParse(entry.NoteId, out var noteId)
+                    if (entry == null
+                        || !ulong.TryParse(entry.MapItemInstanceId, out var mapItemInstanceId)
+                        || mapItemInstanceId == 0
+                        || !inventory.ContainsServerItemInstance(36, mapItemInstanceId)
+                        || !ulong.TryParse(entry.NoteId, out var noteId)
                         || noteId == 0 || (entry.WorldId != 0 && entry.WorldId != playerWorldId))
                     {
                         continue;
                     }
                     if (serverMapNotes.ContainsKey(noteId)) continue;
+                    if (CountServerMapNotes(mapItemInstanceId) >= MapNoteRules.MaximumNotesPerMap)
+                    {
+                        continue;
+                    }
                     var text = MapNoteRules.NormalizeText(entry.Text);
                     if (text.Length == 0) continue;
                     var position = ClampNotePosition(new Vector2(entry.X, entry.Z));
-                    var state = new MapNoteNetworkState(noteId, position, text);
+                    var state = new MapNoteNetworkState(
+                        mapItemInstanceId, noteId, position, text);
                     serverMapNotes[noteId] = state;
                     noteCreatedAt[noteId] = ParseStoredDate(entry.CreatedAtUtc);
                     noteUpdatedAt[noteId] = ParseStoredDate(entry.UpdatedAtUtc);
@@ -435,6 +489,7 @@ namespace Quieter.World
                 result.Add(new StoredMapNote
                 {
                     WorldId = worldId,
+                    MapItemInstanceId = pair.Value.MapItemInstanceId.ToString(),
                     NoteId = pair.Key.ToString(),
                     X = pair.Value.Position.x,
                     Z = pair.Value.Position.y,
@@ -446,6 +501,59 @@ namespace Quieter.World
                 });
             }
             return result;
+        }
+
+        public List<MapNoteNetworkState> ServerTakeMapDocument(ulong mapItemInstanceId)
+        {
+            var result = new List<MapNoteNetworkState>();
+            if (!IsServer || mapItemInstanceId == 0) return result;
+            var removedIds = new List<ulong>();
+            foreach (var pair in serverMapNotes)
+            {
+                if (pair.Value.MapItemInstanceId != mapItemInstanceId) continue;
+                result.Add(pair.Value);
+                removedIds.Add(pair.Key);
+            }
+            foreach (var noteId in removedIds)
+            {
+                serverMapNotes.Remove(noteId);
+                noteCreatedAt.Remove(noteId);
+                noteUpdatedAt.Remove(noteId);
+                for (var index = replicatedMapNotes.Count - 1; index >= 0; index--)
+                {
+                    if (replicatedMapNotes[index].NoteId == noteId)
+                    {
+                        replicatedMapNotes.RemoveAt(index);
+                    }
+                }
+            }
+            if (removedIds.Count > 0) MarkNotesDirty();
+            return result;
+        }
+
+        public void ServerReceiveMapDocument(
+            ulong mapItemInstanceId,
+            IReadOnlyList<MapNoteNetworkState> notes)
+        {
+            if (!IsServer || mapItemInstanceId == 0 || notes == null) return;
+            var now = DateTime.UtcNow;
+            foreach (var source in notes)
+            {
+                if (CountServerMapNotes(mapItemInstanceId) >= MapNoteRules.MaximumNotesPerMap)
+                    break;
+                var noteId = source.NoteId;
+                if (noteId == 0 || serverMapNotes.ContainsKey(noteId)) noteId = CreateMapNoteId();
+                var state = new MapNoteNetworkState(
+                    mapItemInstanceId,
+                    noteId,
+                    ClampNotePosition(source.Position),
+                    source.Text.ToString());
+                serverMapNotes[noteId] = state;
+                noteCreatedAt[noteId] = now;
+                noteUpdatedAt[noteId] = now;
+                replicatedMapNotes.Add(state);
+            }
+            MarkNotesDirty();
         }
 
         public Task FlushKnowledgeAsync(CancellationToken cancellationToken)
@@ -492,10 +600,13 @@ namespace Quieter.World
         }
 
         [ServerRpc]
-        private void CreateMapNoteServerRpc(Vector2 position, FixedString512Bytes requestedText)
+        private void CreateMapNoteServerRpc(
+            ulong mapItemInstanceId,
+            Vector2 position,
+            FixedString512Bytes requestedText)
         {
-            if (!CanMutateMapNotes()) return;
-            if (serverMapNotes.Count >= MapNoteRules.MaximumNotesPerWorld)
+            if (!CanMutateMapNotes(mapItemInstanceId)) return;
+            if (CountServerMapNotes(mapItemInstanceId) >= MapNoteRules.MaximumNotesPerMap)
             {
                 SendMapNoteFeedbackClientRpc("Достигнут лимит: 64 заметки.");
                 return;
@@ -508,28 +619,38 @@ namespace Quieter.World
             }
             var noteId = CreateMapNoteId();
             var now = DateTime.UtcNow;
-            var state = new MapNoteNetworkState(noteId, ClampNotePosition(position), text);
+            var state = new MapNoteNetworkState(
+                mapItemInstanceId, noteId, ClampNotePosition(position), text);
             serverMapNotes[noteId] = state;
             noteCreatedAt[noteId] = now;
             noteUpdatedAt[noteId] = now;
             replicatedMapNotes.Add(state);
+            survival?.ServerRegisterPractice(
+                SkillId.Cartography, 8f, 0.2f, 1f, 0f);
             MarkNotesDirty();
         }
 
         [ServerRpc]
         private void UpdateMapNoteServerRpc(
+            ulong mapItemInstanceId,
             ulong noteId,
             Vector2 position,
             FixedString512Bytes requestedText)
         {
-            if (!CanMutateMapNotes() || !serverMapNotes.ContainsKey(noteId)) return;
+            if (!CanMutateMapNotes(mapItemInstanceId)
+                || !serverMapNotes.TryGetValue(noteId, out var existing)
+                || existing.MapItemInstanceId != mapItemInstanceId)
+            {
+                return;
+            }
             var text = MapNoteRules.NormalizeText(requestedText.ToString());
             if (text.Length == 0)
             {
                 SendMapNoteFeedbackClientRpc("Введите текст заметки.");
                 return;
             }
-            var state = new MapNoteNetworkState(noteId, ClampNotePosition(position), text);
+            var state = new MapNoteNetworkState(
+                mapItemInstanceId, noteId, ClampNotePosition(position), text);
             serverMapNotes[noteId] = state;
             noteUpdatedAt[noteId] = DateTime.UtcNow;
             for (var index = 0; index < replicatedMapNotes.Count; index++)
@@ -542,9 +663,15 @@ namespace Quieter.World
         }
 
         [ServerRpc]
-        private void DeleteMapNoteServerRpc(ulong noteId)
+        private void DeleteMapNoteServerRpc(ulong mapItemInstanceId, ulong noteId)
         {
-            if (!CanMutateMapNotes() || !serverMapNotes.Remove(noteId)) return;
+            if (!CanMutateMapNotes(mapItemInstanceId)
+                || !serverMapNotes.TryGetValue(noteId, out var existing)
+                || existing.MapItemInstanceId != mapItemInstanceId
+                || !serverMapNotes.Remove(noteId))
+            {
+                return;
+            }
             noteCreatedAt.Remove(noteId);
             noteUpdatedAt.Remove(noteId);
             for (var index = replicatedMapNotes.Count - 1; index >= 0; index--)
@@ -558,12 +685,23 @@ namespace Quieter.World
             MarkNotesDirty();
         }
 
-        private bool CanMutateMapNotes()
+        private bool CanMutateMapNotes(ulong mapItemInstanceId)
         {
             if (!IsServer || resourceWorld == null) return false;
+            if (!inventory.ContainsServerItemInstance(36, mapItemInstanceId)) return false;
             if (Time.unscaledTime < nextNoteMutationAt) return false;
             nextNoteMutationAt = Time.unscaledTime + MapNoteRules.MutationCooldownSeconds;
             return true;
+        }
+
+        private int CountServerMapNotes(ulong mapItemInstanceId)
+        {
+            var count = 0;
+            foreach (var note in serverMapNotes.Values)
+            {
+                if (note.MapItemInstanceId == mapItemInstanceId) count++;
+            }
+            return count;
         }
 
         private Vector2 ClampNotePosition(Vector2 position) => resourceWorld == null
@@ -618,6 +756,8 @@ namespace Quieter.World
             if (IsServer)
             {
                 UpdateServerResearch();
+                UpdateServerBoiling();
+                UpdateServerRinsing();
                 if ((knowledgeDirty || notesDirty) && !saveRunning
                     && Time.unscaledTime >= nextKnowledgeSaveAt)
                 {
@@ -647,10 +787,20 @@ namespace Quieter.World
 
         private void UpdateOwnerInput()
         {
+            if (SurvivalView.IsCreationOpen || SurvivalView.IsBodyOpen
+                || SurvivalView.IsProgressionOpen)
+            {
+                focusedNode = null;
+                focusedTable = null;
+                focusedStructure = null;
+                DestroyPlacementPreview();
+                return;
+            }
             if (UpdatePlacement())
             {
                 focusedNode = null;
                 focusedTable = null;
+                focusedStructure = null;
                 return;
             }
             UpdateFocusedNode();
@@ -662,6 +812,13 @@ namespace Quieter.World
             var keyboard = Keyboard.current;
             if (keyboard == null) return;
 
+            if (focusedNode != null && focusedNode.Descriptor.IsWaterSource
+                && keyboard.rKey.wasPressedThisFrame)
+            {
+                BeginRinsingServerRpc(focusedNode.InstanceId);
+                return;
+            }
+
             if (focusedNode != null && focusedNode.Descriptor.IsLoosePickup
                 && keyboard.eKey.wasPressedThisFrame)
             {
@@ -669,9 +826,46 @@ namespace Quieter.World
                 return;
             }
 
+            if (focusedNode != null && focusedNode.Descriptor.IsWaterSource
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                GatherWaterServerRpc(focusedNode.InstanceId);
+                return;
+            }
+
             if (focusedTable != null && keyboard.eKey.wasPressedThisFrame)
             {
                 OpenResearchTableServerRpc(focusedTable.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
+                && focusedStructure.ItemId == SurvivalStructureRules.HearthItemId
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                var active = inventory.GetReplicatedSlot(new InventorySlotReference(
+                    InventorySlotArea.Inventory,
+                    InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
+                if (!active.IsEmpty && inventory.Catalog != null
+                    && inventory.Catalog.TryGetItem(active.ItemId, out var item)
+                    && item.Kind == ItemKind.LiquidContainer
+                    && active.LiquidKind == LiquidKind.Water
+                    && active.LiquidMilliliters > 0)
+                {
+                    BeginBoilingServerRpc(focusedStructure.ObjectId);
+                }
+                else
+                {
+                    FuelHearthServerRpc(focusedStructure.ObjectId);
+                }
+                return;
+            }
+
+            if (focusedStructure != null
+                && focusedStructure.ItemId == SurvivalStructureRules.UnlinedWastePitItemId
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                DumpWasteServerRpc(focusedStructure.ObjectId);
                 return;
             }
 
@@ -695,6 +889,7 @@ namespace Quieter.World
         {
             focusedNode = null;
             focusedTable = null;
+            focusedStructure = null;
             var camera = player.OwnerCamera;
             if (!WorldInteractionRaycast.TryGetClosest(
                     camera, transform, ResourceBalance.InteractionDistance, out var hit)) return;
@@ -705,6 +900,10 @@ namespace Quieter.World
                 return;
             }
             focusedTable = hit.collider.GetComponentInParent<ResearchTableView>();
+            if (focusedTable == null)
+            {
+                focusedStructure = hit.collider.GetComponentInParent<SurvivalStructureView>();
+            }
         }
 
         private bool UpdatePlacement()
@@ -712,11 +911,21 @@ namespace Quieter.World
             var active = inventory.GetReplicatedSlot(new InventorySlotReference(
                 InventorySlotArea.Inventory,
                 InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
-            if (active.ItemId != ResourceBalance.ResearchTableItemId)
+            if (active.IsEmpty || inventory.Catalog == null
+                || !inventory.Catalog.TryGetItem(active.ItemId, out var activeItem)
+                || activeItem.Kind != ItemKind.Placeable
+                || !SurvivalStructureRules.SupportsPlacement(active.ItemId))
             {
                 placementSuppressed = false;
                 DestroyPlacementPreview();
+                placementItemId = 0;
                 return false;
+            }
+            if (placementItemId != active.ItemId)
+            {
+                placementSuppressed = false;
+                DestroyPlacementPreview();
+                placementItemId = active.ItemId;
             }
             if (inventory.IsInterfaceOpen || ResourceMapView.IsOpen
                 || ResourceMapView.IsDepositOpen)
@@ -727,7 +936,9 @@ namespace Quieter.World
             if (placementSuppressed) return true;
             if (placementPreview == null)
             {
-                placementPreview = ResearchTableView.CreatePreview(transform);
+                placementPreview = placementItemId == ResourceBalance.ResearchTableItemId
+                    ? ResearchTableView.CreatePreview(transform)
+                    : SurvivalStructureView.CreatePreview(placementItemId, transform);
                 ResearchTableView.Tint(placementPreview, new Color(0.2f, 0.86f, 0.38f, 0.52f));
                 placementTintValid = true;
             }
@@ -750,7 +961,7 @@ namespace Quieter.World
             RefreshPlacementCandidate();
             if (mouse?.leftButton.wasPressedThisFrame == true && placementValid)
             {
-                PlaceResearchTableServerRpc(placementPosition, placementYaw);
+                PlaceObjectServerRpc(placementPosition, placementYaw, placementItemId);
             }
             return true;
         }
@@ -791,7 +1002,7 @@ namespace Quieter.World
                         <= ResourceBalance.PlacementDistance + 0.25f
                     && IsInsideWorld(placementPosition)
                     && HasPlacementLineOfSight(placementPosition)
-                    && !HasPlacementOverlap(placementPosition, placementYaw);
+                    && !HasPlacementOverlap(placementPosition, placementYaw, placementItemId);
                 break;
             }
             placementPreview.SetActive(placementHasSurface);
@@ -809,11 +1020,12 @@ namespace Quieter.World
             }
         }
 
-        private bool HasPlacementOverlap(Vector3 position, float yaw)
+        private bool HasPlacementOverlap(Vector3 position, float yaw, ushort itemId)
         {
+            var extents = SurvivalStructureRules.PlacementHalfExtents(itemId);
             var hits = Physics.OverlapBox(
-                position + Vector3.up * 0.58f,
-                new Vector3(0.82f, 0.5f, 0.42f),
+                position + Vector3.up * extents.y,
+                extents,
                 Quaternion.Euler(0f, yaw, 0f),
                 Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore);
@@ -849,32 +1061,44 @@ namespace Quieter.World
         }
 
         [ServerRpc]
-        private void PlaceResearchTableServerRpc(Vector3 position, float yaw)
+        private void PlaceObjectServerRpc(Vector3 position, float yaw, ushort itemId)
         {
-            if (!ValidatePlacementServer(position, yaw)
-                || inventory.ServerActiveStack.ItemId != ResourceBalance.ResearchTableItemId
-                || !placedObjects.TryPlace(position, yaw, out var objectId))
+            if (!ValidateObjectPlacementServer(position, yaw, itemId)
+                || inventory.ServerActiveStack.ItemId != itemId
+                || !SurvivalStructureRules.SupportsPlacement(itemId)
+                || !placedObjects.TryPlace(position, yaw, itemId, out var objectId))
             {
-                SendPlacementResultClientRpc(false, 0);
+                SendPlacementResultClientRpc(false, 0, itemId);
                 return;
             }
-            if (!inventory.TryConsumeActiveItemServer(ResourceBalance.ResearchTableItemId))
+            if (!inventory.TryConsumeActiveItemServer(itemId))
             {
                 placedObjects.TryDismantle(objectId, out _);
-                SendPlacementResultClientRpc(false, 0);
+                SendPlacementResultClientRpc(false, 0, itemId);
                 return;
             }
-            SendPlacementResultClientRpc(true, objectId);
+            survival?.ServerRegisterPractice(
+                SkillId.Construction, 8f, 0.22f, 1f, 0.25f);
+            SendPlacementResultClientRpc(true, objectId, itemId);
         }
 
-        private bool ValidatePlacementServer(Vector3 position, float yaw)
+        private bool ValidatePlacementServer(Vector3 position, float yaw) =>
+            ValidateObjectPlacementServer(
+                position, yaw, ResourceBalance.ResearchTableItemId);
+
+        private bool ValidateObjectPlacementServer(
+            Vector3 position,
+            float yaw,
+            ushort itemId)
         {
-            if (placedObjects == null || !float.IsFinite(position.x)
+            if (survival != null && !survival.CanPerformServerAction()
+                || placedObjects == null || !float.IsFinite(position.x)
                 || !float.IsFinite(position.y) || !float.IsFinite(position.z)
                 || !float.IsFinite(yaw)
                 || Vector3.Distance(transform.position + Vector3.up * 1.45f, position)
                     > ResourceBalance.PlacementDistance + 0.35f
-                || !IsInsideWorld(position))
+                || !IsInsideWorld(position)
+                || !SurvivalStructureRules.SupportsPlacement(itemId))
             {
                 return false;
             }
@@ -900,9 +1124,10 @@ namespace Quieter.World
             {
                 return false;
             }
+            var extents = SurvivalStructureRules.PlacementHalfExtents(itemId);
             var overlaps = Physics.OverlapBox(
-                position + Vector3.up * 0.58f,
-                new Vector3(0.82f, 0.5f, 0.42f),
+                position + Vector3.up * extents.y,
+                extents,
                 Quaternion.Euler(0f, yaw, 0f),
                 Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore);
@@ -944,19 +1169,151 @@ namespace Quieter.World
         }
 
         [ClientRpc]
-        private void SendPlacementResultClientRpc(bool success, ulong objectId)
+        private void SendPlacementResultClientRpc(
+            bool success,
+            ulong objectId,
+            ushort itemId)
         {
             if (!IsOwner) return;
+            var name = inventory.Catalog != null
+                && inventory.Catalog.TryGetItem(itemId, out var item)
+                    ? item.DisplayName
+                    : "постройка";
             if (success)
             {
                 placementSuppressed = false;
                 DestroyPlacementPreview();
-                SetFeedback("Исследовательский стол установлен.");
+                SetFeedback($"Установлено: {name}.");
             }
             else
             {
-                SetFeedback("Здесь нельзя установить исследовательский стол.");
+                SetFeedback($"Здесь нельзя установить: {name}.");
             }
+        }
+
+        [ServerRpc]
+        private void FuelHearthServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetState(objectId, out var position, out _, out _)
+                || Vector3.Distance(transform.position, position)
+                    > ResourceBalance.InteractionDistance + 0.5f)
+            {
+                SendFeedbackClientRpc(
+                    HarvestFeedbackCode.TargetUnavailable, 0, 0, ToolKind.None);
+                return;
+            }
+            var active = inventory.ServerActiveStack;
+            if (active.IsEmpty || !SurvivalStructureRules.IsFuel(active.ItemId))
+            {
+                SendHearthFeedbackClientRpc("Для очага нужны ветки или древесный уголь.");
+                return;
+            }
+            if (!placedObjects.CanAcceptFuel(objectId, active.ItemId))
+            {
+                SendHearthFeedbackClientRpc("Очаг заполнен или в нём лежит другое топливо.");
+                return;
+            }
+            var slot = new InventorySlotReference(
+                InventorySlotArea.Inventory,
+                InventoryLayout.FirstHotbarSlot + inventory.GetServerSelectedHotbarIndex());
+            if (!inventory.TryRemoveStackServer(slot, active.ItemId, 1, out var removed))
+                return;
+            if (!placedObjects.TryAddFuel(objectId, active.ItemId))
+            {
+                var remainder = inventory.InsertStackServer(removed);
+                if (remainder > 0) inventory.SpawnOverflowServer(
+                    removed.WithQuantity(remainder), transform.position);
+                return;
+            }
+            survival.ServerRegisterPractice(SkillId.Firekeeping, 4f, 0.2f, 1f, 0f);
+            SendHearthFeedbackClientRpc("Топливо добавлено. Очаг разгорелся.");
+        }
+
+        [ClientRpc]
+        private void SendHearthFeedbackClientRpc(string message)
+        {
+            if (IsOwner) SetFeedback(message);
+        }
+
+        [ServerRpc]
+        private void BeginBoilingServerRpc(ulong objectId)
+        {
+            var active = inventory?.ServerActiveStack ?? default;
+            if (HasServerManualWork || inventory == null || inventory.IsCrafting
+                || placedObjects == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(objectId, out var position)
+                || Vector3.Distance(transform.position, position)
+                    > ResourceBalance.InteractionDistance + 0.5f
+                || active.IsEmpty || active.ItemId != 30 || active.ItemInstanceId == 0
+                || active.LiquidKind != LiquidKind.Water
+                || active.LiquidMilliliters == 0)
+            {
+                SendHearthFeedbackClientRpc(
+                    "Для кипячения держите котелок с водой у горящего очага.");
+                return;
+            }
+            serverBoilHearthId = objectId;
+            serverBoilItemId = active.ItemId;
+            serverBoilItemInstanceId = active.ItemInstanceId;
+            serverBoilContents = active;
+            serverBoilCompletesAt = NetworkManager.ServerTime.Time
+                + 8d + active.LiquidMilliliters / 250d;
+            SendHearthFeedbackClientRpc(
+                "Вода нагревается. Оставайтесь у очага и держите сосуд в руках.");
+        }
+
+        private void UpdateServerBoiling()
+        {
+            if (serverBoilHearthId == 0) return;
+            var active = inventory?.ServerActiveStack ?? default;
+            if (placedObjects == null || survival == null || !survival.CanPerformServerAction()
+                || inventory.IsCrafting
+                || !placedObjects.CanInteract(serverBoilHearthId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(
+                    serverBoilHearthId, out var hearthPosition)
+                || Vector3.Distance(transform.position, hearthPosition)
+                    > ResourceBalance.InteractionDistance + 0.5f
+                || active.ItemId != serverBoilItemId
+                || active.ItemInstanceId != serverBoilItemInstanceId
+                || active.LiquidKind != LiquidKind.Water
+                || active.LiquidMilliliters != serverBoilContents.LiquidMilliliters
+                || active.BiologicalContamination != serverBoilContents.BiologicalContamination
+                || active.ToxinContamination != serverBoilContents.ToxinContamination
+                || active.Cleanliness != serverBoilContents.Cleanliness)
+            {
+                CancelServerBoiling("Кипячение прервано.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverBoilCompletesAt) return;
+            var succeeded = inventory.TryBoilActiveLiquidServer(
+                serverBoilItemId, serverBoilItemInstanceId);
+            serverBoilHearthId = 0;
+            serverBoilItemId = 0;
+            serverBoilItemInstanceId = 0;
+            serverBoilCompletesAt = 0d;
+            if (!succeeded)
+            {
+                SendHearthFeedbackClientRpc("Кипячение не удалось.");
+                return;
+            }
+            survival?.ServerRegisterPractice(SkillId.WaterSafety, 10f, 0.28f, 1f, 0f);
+            survival?.ServerRegisterPractice(SkillId.Cooking, 10f, 0.2f, 1f, 0f);
+            SendHearthFeedbackClientRpc(
+                "Вода прокипячена. Биологическое заражение уничтожено; токсины могли остаться.");
+        }
+
+        private void CancelServerBoiling(string message)
+        {
+            serverBoilHearthId = 0;
+            serverBoilItemId = 0;
+            serverBoilItemInstanceId = 0;
+            serverBoilCompletesAt = 0d;
+            SendHearthFeedbackClientRpc(message);
         }
 
         [ServerRpc]
@@ -1235,7 +1592,8 @@ namespace Quieter.World
 
         private bool ValidateTableInteraction(ResearchTableView table)
         {
-            if (table == null || Vector3.Distance(transform.position, table.transform.position)
+            if (survival != null && !survival.CanPerformServerAction()
+                || table == null || Vector3.Distance(transform.position, table.transform.position)
                     > ResourceBalance.InteractionDistance + 0.35f)
             {
                 return false;
@@ -1364,12 +1722,138 @@ namespace Quieter.World
                 return;
             }
             var quantity = node.Descriptor.Kind == WorldObjectKind.FiberPlant ? 2 : 1;
-            var overflow = GiveStack(
-                new ItemStackState(node.Descriptor.ResourceItemId, quantity), node.transform.position);
+            var collectedStack = ResourceBalance.IsWildFood(node.Descriptor.ResourceItemId)
+                ? ResourceBalance.CreateWildFoodStack(
+                    node.Descriptor.ResourceItemId, node.InstanceId)
+                : new ItemStackState(node.Descriptor.ResourceItemId, quantity);
+            var overflow = GiveStack(collectedStack, node.transform.position);
             SendLoosePickupResultClientRpc(
                 overflow > 0 ? PickupResultCode.CollectedWithOverflow : PickupResultCode.Collected,
                 node.Descriptor.ResourceItemId,
                 quantity);
+            survival?.ServerRegisterPractice(
+                SkillId.Foraging,
+                2f,
+                node.Descriptor.Kind == WorldObjectKind.FiberPlant ? 0.12f : 0.2f,
+                1f,
+                0f);
+        }
+
+        [ServerRpc]
+        private void GatherWaterServerRpc(ulong instanceId)
+        {
+            if (NetworkManager.ServerTime.Time < nextWaterGatherAt) return;
+            if (resourceWorld == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !resourceWorld.TryGetNode(instanceId, out var node)
+                || !node.Descriptor.IsWaterSource
+                || !ValidateInteraction(node))
+            {
+                SendWaterResultClientRpc(false, 0, "Источник недоступен.");
+                return;
+            }
+            ResourceBalance.SampleSpringWater(
+                instanceId, out var biological, out var toxins);
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            var rain = weather != null
+                ? weather.GetEnvironment(node.transform.position).Precipitation
+                : 0f;
+            placedObjects?.ApplyWasteContamination(
+                node.transform.position, rain, ref biological, ref toxins);
+            if (!inventory.TryFillActiveContainerServer(
+                    1000, biological, toxins, out var filled))
+            {
+                SendWaterResultClientRpc(
+                    false, 0, "Возьмите в руку неполный сосуд без другой жидкости.");
+                return;
+            }
+            nextWaterGatherAt = NetworkManager.ServerTime.Time + 2.5;
+            survival.ServerRegisterPractice(SkillId.WaterSafety, 3f, 0.18f, 1f, 0f);
+            SendWaterResultClientRpc(
+                true, filled, "На вид качество воды не определить. Кипячение снижает риск инфекции, но не удаляет токсины.");
+        }
+
+        [ServerRpc]
+        private void BeginRinsingServerRpc(ulong sourceId)
+        {
+            if (serverRinseSourceId != 0 || serverBoilHearthId != 0 || inventory == null
+                || inventory.IsCrafting || survival == null || !survival.CanPerformServerAction()
+                || resourceWorld == null || !resourceWorld.TryGetNode(sourceId, out var node)
+                || !node.Descriptor.IsWaterSource || !ValidateInteraction(node)) return;
+            var active = inventory.ServerActiveStack;
+            if (inventory.Catalog == null || !inventory.Catalog.TryGetItem(active.ItemId, out var item)
+                || !ItemHygieneRules.CanRinse(active, item))
+            {
+                SendHearthFeedbackClientRpc("Для мытья возьмите пустой сосуд, инструмент или снятую одежду.");
+                return;
+            }
+            serverRinseSourceId = sourceId;
+            serverRinseItem = active;
+            serverRinseCompletesAt = NetworkManager.ServerTime.Time + 8d;
+            SendHearthFeedbackClientRpc("Моете предмет. Сохраняйте доступ к источнику 8 секунд.");
+        }
+
+        private void UpdateServerRinsing()
+        {
+            if (serverRinseSourceId == 0) return;
+            if (inventory == null || inventory.IsCrafting
+                || survival == null || !survival.CanPerformServerAction()
+                || resourceWorld == null || !resourceWorld.TryGetNode(serverRinseSourceId, out var node)
+                || !ValidateInteraction(node) || !inventory.ServerActiveStack.Equals(serverRinseItem))
+            {
+                serverRinseSourceId = 0;
+                SendHearthFeedbackClientRpc("Мытьё прервано.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverRinseCompletesAt) return;
+            ResourceBalance.SampleSpringWater(serverRinseSourceId, out var biological, out var toxins);
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            var rain = weather != null ? weather.GetEnvironment(node.transform.position).Precipitation : 0f;
+            placedObjects?.ApplyWasteContamination(node.transform.position, rain, ref biological, ref toxins);
+            serverRinseSourceId = 0;
+            if (!inventory.TryRinseActiveItemServer(serverRinseItem, biological, toxins)) return;
+            survival.ServerRegisterPractice(SkillId.Sanitation, 8f, 0.22f, 1f, 0f);
+            SendHearthFeedbackClientRpc("Видимая грязь смыта. Мытьё сырой водой не обеззараживает предмет.");
+        }
+
+        [ClientRpc]
+        private void SendWaterResultClientRpc(bool success, ushort milliliters, string message)
+        {
+            if (!IsOwner) return;
+            SetFeedback(success ? $"Набрано {milliliters} мл. {message}" : message, 4f);
+        }
+
+        [ServerRpc]
+        private void DumpWasteServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetWastePitSpace(
+                    objectId, out var position, out var available)
+                || Vector3.Distance(transform.position, position)
+                    > ResourceBalance.InteractionDistance + 0.5f)
+            {
+                SendHearthFeedbackClientRpc("Яма недоступна или переполнена.");
+                return;
+            }
+            var active = inventory.ServerActiveStack;
+            if (active.IsEmpty || active.LiquidKind != LiquidKind.Waste
+                || active.LiquidMilliliters == 0)
+            {
+                SendHearthFeedbackClientRpc("Держите в руках сосуд с отходами.");
+                return;
+            }
+            var amount = (ushort)Mathf.Min(active.LiquidMilliliters, available);
+            if (!inventory.TryDepositActiveWasteServer(
+                    placedObjects, objectId, amount, out var drained))
+            {
+                SendHearthFeedbackClientRpc("Не удалось опорожнить сосуд.");
+                return;
+            }
+            survival.ServerRegisterPractice(SkillId.Sanitation, 5f, 0.24f, 1f, 0f);
+            SendHearthFeedbackClientRpc(
+                $"В яму слито {drained} мл. Сосуд остаётся грязным.");
         }
 
         [ClientRpc]
@@ -1435,6 +1919,26 @@ namespace Quieter.World
                 return;
             }
             if (node.Descriptor.IsResearchable) EnsureKnowledge(instanceId);
+            var workSkill = node.Descriptor.IsTree
+                ? SkillId.Woodcutting
+                : node.Descriptor.RequiredTool == ToolKind.Shovel
+                    ? SkillId.Excavation
+                    : SkillId.Mining;
+            var challenge = Mathf.Clamp01(node.Descriptor.Hardness / 5f);
+            survival?.ServerRegisterPractice(
+                workSkill,
+                ResourceBalance.MiningCooldownSeconds,
+                challenge,
+                completed ? 1f : 0.65f,
+                0f);
+            survival?.ServerRegisterPhysicalLoad(
+                CharacterAttributeId.MuscularEndurance,
+                ResourceBalance.MiningCooldownSeconds,
+                challenge);
+            survival?.ServerRegisterPhysicalLoad(
+                CharacterAttributeId.Strength,
+                ResourceBalance.MiningCooldownSeconds,
+                challenge * 0.75f);
             ushort awardedItem = 0;
             var awardedQuantity = 0;
             if (completed)
@@ -1594,7 +2098,8 @@ namespace Quieter.World
 
         private bool ValidateInteraction(ResourceNodeView node)
         {
-            if (node == null || !node.IsAvailable
+            if (survival != null && !survival.CanPerformServerAction()
+                || node == null || !node.IsAvailable
                 || Vector3.Distance(transform.position, node.transform.position)
                     > ResourceBalance.InteractionDistance + 0.35f)
             {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,6 +11,7 @@ using Quieter.Networking;
 using Quieter.Persistence;
 using Quieter.Player;
 using Quieter.World;
+using Quieter.Survival;
 using Unity.Netcode;
 using UnityEngine;
 
@@ -178,6 +180,58 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public async Task SurvivalStructures_PersistWasteAndExpiredFuelWithoutTableAccess()
+        {
+            var repository = new DelayedWorldRepository
+            {
+                StoredPlacedObjects = new[]
+                {
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "901", ItemId = SurvivalStructureRules.UnlinedWastePitItemId,
+                        X = 0f, Y = 20f, Z = 0f,
+                    },
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "902", ItemId = SurvivalStructureRules.HearthItemId,
+                        X = 100f, Y = 20f, Z = 0f,
+                        UpdatedAtUtc = DateTime.UtcNow.AddHours(-1).ToString("O"),
+                        Input = new StoredInventorySlot { ItemId = 2, Quantity = 1, Condition = 10000 },
+                    },
+                },
+            };
+            var managerObject = new GameObject("Sanitation server role");
+            objects.Add(managerObject);
+            var manager = managerObject.AddComponent<NetworkManager>();
+            SetNetworkServerRole(manager);
+            var serviceObject = new GameObject("Sanitation persistence");
+            objects.Add(serviceObject);
+            var service = serviceObject.AddComponent<PlacedObjectWorldService>();
+            service.Configure(manager);
+            await service.InitializeServerAsync(
+                WorldDefinition.CreateDefault(443322), repository, CancellationToken.None);
+            Assert.That(service.TryGetBurningHearth(902, out _), Is.False);
+            Assert.That(service.TryDepositWaste(901, 59000, 0.9f, 0.2f), Is.True);
+            Assert.That(service.TryDepositWaste(901, 2000, 1f, 1f), Is.False);
+            Assert.That(service.TryGetWastePitSpace(901, out _, out var available), Is.True);
+            Assert.That(available, Is.EqualTo(1000));
+            Assert.That(service.TryTakeInput(901, out _), Is.False);
+            Assert.That(service.TryDismantle(902, out _), Is.False);
+            Assert.That(service.TryInsertInput(902, new ItemStackState(
+                6, 1, hiddenItemId: 7, sourceNodeId: 1, sampleId: 2)), Is.False);
+            var biological = 0f;
+            var toxins = 0f;
+            service.ApplyWasteContamination(new Vector3(10f, 10f, 0f), 1f, ref biological, ref toxins);
+            Assert.That(biological, Is.GreaterThan(0f));
+            Assert.That(toxins, Is.GreaterThan(0f));
+            await service.FlushAsync(CancellationToken.None);
+            var saved = repository.PlacedObjectSaves.Last().Entries;
+            Assert.That(saved.Single(s => s.ObjectId == "901").Input.LiquidMilliliters, Is.EqualTo(59000));
+            Assert.That(saved.Single(s => s.ObjectId == "902").Input, Is.Null);
+            Assert.That(GetField<HashSet<ulong>>(service, "dirtyObjects"), Is.Empty);
+        }
+
+        [Test]
         public async Task PlayerSave_WaitsForActiveWriteThenCapturesFreshestState()
         {
             const ulong steamId = 76561198012345678;
@@ -239,7 +293,8 @@ namespace Quieter.Tests.EditMode
                 interaction, "noteUpdatedAt");
             knowledge[nodeId] = 1000;
             discovered[nodeId] = DateTime.UtcNow;
-            notes[noteId] = new MapNoteNetworkState(noteId, new Vector2(1f, 2f), "Первая");
+            notes[noteId] = new MapNoteNetworkState(
+                7001, noteId, new Vector2(1f, 2f), "Первая");
             created[noteId] = DateTime.UtcNow;
             updated[noteId] = DateTime.UtcNow;
             SetField(interaction, "knowledgeDirty", true);
@@ -251,7 +306,8 @@ namespace Quieter.Tests.EditMode
             var firstFlush = InvokeKnowledgeFlush(interaction);
             await AwaitStarted(repository.FirstKnowledgeSaveStarted);
             knowledge[nodeId] = 4200;
-            notes[noteId] = new MapNoteNetworkState(noteId, new Vector2(7f, 8f), "Новая");
+            notes[noteId] = new MapNoteNetworkState(
+                7001, noteId, new Vector2(7f, 8f), "Новая");
             updated[noteId] = DateTime.UtcNow;
             SetField(interaction, "knowledgeDirty", true);
             SetField(interaction, "notesDirty", true);
@@ -412,6 +468,12 @@ namespace Quieter.Tests.EditMode
                         {
                             ItemId = entry.Input.ItemId,
                             Quantity = entry.Input.Quantity,
+                            Condition = entry.Input.Condition,
+                            LiquidMilliliters = entry.Input.LiquidMilliliters,
+                            LiquidKind = entry.Input.LiquidKind,
+                            BiologicalContamination = entry.Input.BiologicalContamination,
+                            ToxinContamination = entry.Input.ToxinContamination,
+                            Cleanliness = entry.Input.Cleanliness,
                             HiddenItemId = entry.Input.HiddenItemId,
                             SourceNodeId = entry.Input.SourceNodeId,
                             RevealAtPercent = entry.Input.RevealAtPercent,
@@ -535,6 +597,12 @@ namespace Quieter.Tests.EditMode
                 return Task.CompletedTask;
             }
 
+            public Task SaveSurvivalAsync(
+                ulong steamId,
+                CharacterSurvivalState survival,
+                CancellationToken cancellationToken = default)
+                => Task.CompletedTask;
+
             private static TaskCompletionSource<bool> NewSignal() => new(
                 TaskCreationOptions.RunContinuationsAsynchronously);
         }
@@ -550,6 +618,7 @@ namespace Quieter.Tests.EditMode
         private sealed class SavedPlacedObjectBatch
         {
             private readonly IReadOnlyList<StoredPlacedObject> entries;
+            public IReadOnlyList<StoredPlacedObject> Entries => entries;
             public SavedPlacedObjectBatch(IReadOnlyList<StoredPlacedObject> values) =>
                 entries = values;
             public StoredPlacedObject Single => entries.Count == 1 ? entries[0] : null;

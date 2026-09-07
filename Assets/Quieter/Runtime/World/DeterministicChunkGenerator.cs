@@ -272,7 +272,11 @@ namespace Quieter.World
             }
 
             GenerateStarterForage(definition, coordinate, result);
+            GenerateStarterFood(definition, coordinate, result);
+            GenerateStarterSpring(definition, coordinate, result);
             GenerateLooseForage(definition, coordinate, result);
+            GenerateWildFood(definition, coordinate, result);
+            GenerateSprings(definition, coordinate, result);
             GenerateStoneOutcrop(definition, coordinate, result);
             GenerateDeposit(definition, coordinate, result);
             GenerateNonOreDeposit(definition, coordinate, result);
@@ -447,6 +451,123 @@ namespace Quieter.World
             }
         }
 
+        private static void GenerateStarterFood(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            for (var index = 0; index < 12; index++)
+            {
+                var angle = (43f + index * 137.50776f) * Mathf.Deg2Rad;
+                var radius = 21f + (index % 4) * 4.2f;
+                var worldX = Mathf.Cos(angle) * radius;
+                var worldZ = Mathf.Sin(angle) * radius;
+                if (!WorldPointBelongsToChunk(definition, coordinate, worldX, worldZ)) continue;
+                var itemId = index < 5
+                    ? ResourceBalance.WildBerriesItemId
+                    : index < 9
+                        ? ResourceBalance.EdibleRootsItemId
+                        : ResourceBalance.WildMushroomsItemId;
+                var instanceId = Hash64(
+                    definition.Seed ^ unchecked((long)0xE7037ED1A0B428DBUL),
+                    index,
+                    itemId,
+                    0);
+                AddLoosePickup(
+                    definition, result, instanceId, itemId, worldX, worldZ, 1800);
+            }
+        }
+
+        private static void GenerateWildFood(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            var hash = Hash64(
+                definition.Seed ^ unchecked((long)0x8EBC6AF09C88C6E3UL),
+                coordinate.X,
+                coordinate.Z,
+                0);
+            if (hash % 100UL >= 58UL) return;
+            var position = CandidatePosition(definition, coordinate, hash, 3f);
+            if (position.x * position.x + position.z * position.z < 42f * 42f
+                || !IsFarEnoughFromObjects(position, result, 1.6f))
+            {
+                return;
+            }
+            var roll = (hash >> 48) % 100UL;
+            var itemId = roll < 45UL
+                ? ResourceBalance.WildBerriesItemId
+                : roll < 80UL
+                    ? ResourceBalance.EdibleRootsItemId
+                    : ResourceBalance.WildMushroomsItemId;
+            AddLoosePickup(
+                definition, result, hash, itemId, position.x, position.z, 2400);
+        }
+
+        private static void GenerateStarterSpring(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            const float worldX = -11f;
+            const float worldZ = 25f;
+            if (!WorldPointBelongsToChunk(definition, coordinate, worldX, worldZ)) return;
+            var id = Hash64(
+                definition.Seed ^ unchecked((long)0xC6BC279692B5C323UL),
+                0,
+                0,
+                0);
+            AddSpring(definition, result, id, worldX, worldZ);
+        }
+
+        private static void GenerateSprings(
+            WorldDefinition definition,
+            ChunkCoord coordinate,
+            ICollection<WorldObjectSpawn> result)
+        {
+            var hash = Hash64(
+                definition.Seed ^ unchecked((long)0xD1B54A32D192ED03UL),
+                coordinate.X,
+                coordinate.Z,
+                0);
+            if (hash % 100UL >= 9UL) return;
+            var position = CandidatePosition(definition, coordinate, hash, 4f);
+            if (position.x * position.x + position.z * position.z < 45f * 45f
+                || !IsFarEnoughFromObjects(position, result, 3f))
+            {
+                return;
+            }
+            AddSpring(definition, result, hash, position.x, position.z);
+        }
+
+        private static void AddSpring(
+            WorldDefinition definition,
+            ICollection<WorldObjectSpawn> result,
+            ulong instanceId,
+            float worldX,
+            float worldZ)
+        {
+            var worldY = SampleWorldHeight(definition, worldX, worldZ);
+            var descriptor = new ResourceNodeDescriptor(
+                WorldObjectKind.Spring,
+                0,
+                ResourceCategory.Forage,
+                DepositRichness.Ordinary,
+                DepositReserveSize.Huge,
+                ushort.MaxValue,
+                ResourceQuality.None,
+                1,
+                requiredTool: ToolKind.None);
+            result.Add(new WorldObjectSpawn(
+                instanceId,
+                new WorldObjectTypeId(0),
+                new Vector3(worldX, worldY + 0.04f, worldZ),
+                Quaternion.Euler(0f, (instanceId & 0xFFUL) / 255f * 360f, 0f),
+                new Vector3(1.8f, 0.18f, 1.55f),
+                descriptor));
+        }
+
         private static void GenerateLooseForage(
             WorldDefinition definition,
             ChunkCoord coordinate,
@@ -471,7 +592,8 @@ namespace Quieter.World
             ulong instanceId,
             ushort itemId,
             float worldX,
-            float worldZ)
+            float worldZ,
+            ushort respawnSeconds = 600)
         {
             var worldY = SampleWorldHeight(definition, worldX, worldZ);
             var descriptor = new ResourceNodeDescriptor(
@@ -483,15 +605,23 @@ namespace Quieter.World
                 1,
                 ResourceQuality.None,
                 1,
-                respawnSeconds: 600);
-            var scale = itemId == 1
-                ? new Vector3(0.34f, 0.22f, 0.3f)
-                : new Vector3(0.62f, 0.12f, 0.12f);
+                respawnSeconds: respawnSeconds);
+            var scale = itemId switch
+            {
+                1 => new Vector3(0.34f, 0.22f, 0.3f),
+                2 => new Vector3(0.62f, 0.12f, 0.12f),
+                ResourceBalance.WildBerriesItemId => new Vector3(0.7f, 0.58f, 0.7f),
+                ResourceBalance.EdibleRootsItemId => new Vector3(0.48f, 0.46f, 0.48f),
+                ResourceBalance.WildMushroomsItemId => new Vector3(0.42f, 0.36f, 0.42f),
+                _ => new Vector3(0.3f, 0.3f, 0.3f),
+            };
             result.Add(new WorldObjectSpawn(
                 instanceId,
                 new WorldObjectTypeId(0),
                 new Vector3(worldX, worldY + scale.y * 0.5f, worldZ),
-                Quaternion.Euler(itemId == 2 ? 8f : 0f, (instanceId & 0xFFUL) / 255f * 360f, itemId == 2 ? 82f : 0f),
+                Quaternion.Euler(itemId == 2 ? 8f : 0f,
+                    (instanceId & 0xFFUL) / 255f * 360f,
+                    itemId == 2 ? 82f : 0f),
                 scale,
                 descriptor));
         }

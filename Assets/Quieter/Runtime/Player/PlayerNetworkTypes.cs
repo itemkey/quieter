@@ -9,6 +9,13 @@ namespace Quieter.Player
         public Vector2 Movement;
         public float Yaw;
         public uint JumpPressId;
+        public uint AttackPressId;
+        public uint AttackReleaseId;
+        public uint DodgePressId;
+        public Vector2 DodgeDirection;
+        public double SampledServerTime;
+        public bool AttackHeld;
+        public bool BlockHeld;
         public bool Sprint;
         public bool CrouchHeld;
 
@@ -18,6 +25,13 @@ namespace Quieter.Player
             serializer.SerializeValue(ref Movement);
             serializer.SerializeValue(ref Yaw);
             serializer.SerializeValue(ref JumpPressId);
+            serializer.SerializeValue(ref AttackPressId);
+            serializer.SerializeValue(ref AttackReleaseId);
+            serializer.SerializeValue(ref DodgePressId);
+            serializer.SerializeValue(ref DodgeDirection);
+            serializer.SerializeValue(ref SampledServerTime);
+            serializer.SerializeValue(ref AttackHeld);
+            serializer.SerializeValue(ref BlockHeld);
             serializer.SerializeValue(ref Sprint);
             serializer.SerializeValue(ref CrouchHeld);
         }

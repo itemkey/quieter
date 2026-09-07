@@ -29,3 +29,10 @@ MonoBehaviour:
   toolKind: 0
   toolTier: 0
   maximumDurability: 0
+  unitMassKg: 0.2
+  unitVolumeLiters: 0.25
+  caloriesPerUnit: 0
+  proteinGramsPerUnit: 0
+  micronutrientsPerUnit: 0
+  waterLitersPerUnit: 0
+  liquidCapacityMilliliters: 0

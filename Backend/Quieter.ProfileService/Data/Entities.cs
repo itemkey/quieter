@@ -23,10 +23,50 @@ public sealed class PlayerEntity
     public DateTime CreatedAtUtc { get; set; }
     public DateTime LastSeenAtUtc { get; set; }
     public byte SelectedHotbarIndex { get; set; }
+    public Guid? CurrentCharacterId { get; set; }
+    public CharacterEntity? CurrentCharacter { get; set; }
     public List<PlayerInventorySlotEntity> InventorySlots { get; set; } = [];
     public List<PlayerPendingItemEntity> PendingItems { get; set; } = [];
     public List<PlayerDepositKnowledgeEntity> DepositKnowledge { get; set; } = [];
-    public List<PlayerMapNoteEntity> MapNotes { get; set; } = [];
+}
+
+public sealed class CharacterEntity
+{
+    public Guid CharacterId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string SurvivalJson { get; set; } = "{}";
+    public long Revision { get; set; }
+    public byte LifeState { get; set; }
+    public byte DeathCause { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime UpdatedAtUtc { get; set; }
+    public PlayerEntity? ControllingPlayer { get; set; }
+    public List<CharacterItemEntity> Items { get; set; } = [];
+}
+
+public sealed class CharacterItemEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte StorageArea { get; set; } // 0: carried inventory, 1: pending overflow.
+    public ushort SlotIndex { get; set; }
+    public ushort ItemId { get; set; }
+    public ushort Quantity { get; set; }
+    public ushort Condition { get; set; }
+    public byte Quality { get; set; }
+    public ushort HiddenItemId { get; set; }
+    public decimal? SourceNodeId { get; set; }
+    public byte RevealAtPercent { get; set; }
+    public decimal? SampleId { get; set; }
+    public decimal? ItemInstanceId { get; set; }
+    public ushort Freshness { get; set; } = 10000;
+    public ushort BiologicalContamination { get; set; }
+    public ushort ToxinContamination { get; set; }
+    public ushort Wetness { get; set; }
+    public ushort Cleanliness { get; set; } = 10000;
+    public ushort LiquidMilliliters { get; set; }
+    public byte LiquidKind { get; set; }
+    public bool Equipped { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
 }
 
 public sealed class WorldResourceNodeEntity
@@ -63,6 +103,15 @@ public sealed class PlayerInventorySlotEntity
     public decimal? SourceNodeId { get; set; }
     public byte RevealAtPercent { get; set; }
     public decimal? SampleId { get; set; }
+    public decimal? ItemInstanceId { get; set; }
+    public ushort Freshness { get; set; } = 10000;
+    public ushort BiologicalContamination { get; set; }
+    public ushort ToxinContamination { get; set; }
+    public ushort Wetness { get; set; }
+    public ushort Cleanliness { get; set; } = 10000;
+    public ushort LiquidMilliliters { get; set; }
+    public byte LiquidKind { get; set; }
+    public bool Equipped { get; set; }
     public PlayerEntity Player { get; set; } = null!;
 }
 
@@ -78,6 +127,15 @@ public sealed class PlayerPendingItemEntity
     public decimal? SourceNodeId { get; set; }
     public byte RevealAtPercent { get; set; }
     public decimal? SampleId { get; set; }
+    public decimal? ItemInstanceId { get; set; }
+    public ushort Freshness { get; set; } = 10000;
+    public ushort BiologicalContamination { get; set; }
+    public ushort ToxinContamination { get; set; }
+    public ushort Wetness { get; set; }
+    public ushort Cleanliness { get; set; } = 10000;
+    public ushort LiquidMilliliters { get; set; }
+    public byte LiquidKind { get; set; }
+    public bool Equipped { get; set; }
     public PlayerEntity Player { get; set; } = null!;
 }
 
@@ -98,6 +156,15 @@ public sealed class WorldPlacedObjectEntity
     public decimal? InputSourceNodeId { get; set; }
     public byte InputRevealAtPercent { get; set; }
     public decimal? InputSampleId { get; set; }
+    public decimal? InputItemInstanceId { get; set; }
+    public ushort InputFreshness { get; set; } = 10000;
+    public ushort InputBiologicalContamination { get; set; }
+    public ushort InputToxinContamination { get; set; }
+    public ushort InputWetness { get; set; }
+    public ushort InputCleanliness { get; set; } = 10000;
+    public ushort InputLiquidMilliliters { get; set; }
+    public byte InputLiquidKind { get; set; }
+    public bool InputEquipped { get; set; }
     public DateTime CreatedAtUtc { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
     public WorldEntity World { get; set; } = null!;
@@ -107,12 +174,12 @@ public sealed class PlayerMapNoteEntity
 {
     public decimal SteamId { get; set; }
     public int WorldId { get; set; }
+    public decimal MapItemInstanceId { get; set; }
     public decimal NoteId { get; set; }
     public float X { get; set; }
     public float Z { get; set; }
     public string Text { get; set; } = string.Empty;
     public DateTime CreatedAtUtc { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
-    public PlayerEntity Player { get; set; } = null!;
     public WorldEntity World { get; set; } = null!;
 }

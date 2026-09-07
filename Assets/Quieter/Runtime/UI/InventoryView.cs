@@ -145,6 +145,7 @@ namespace Quieter.UI
             RefreshPickupPrompt();
             RefreshInterfaceFeedback();
             if (!requestedOpen) return;
+            if (WorkbenchMode) RefreshCraftButton();
 
             if (cursorRoot != null && Mouse.current != null)
             {
@@ -672,6 +673,8 @@ namespace Quieter.UI
                 if (ingredient.Item == null) continue;
                 value += $"{ingredient.Quantity} × {ingredient.Item.DisplayName}\n";
             }
+            if (recipe.WorkSeconds > 0f) value += $"\nВремя работы: {recipe.WorkSeconds:0} с";
+            if (recipe.RequiresBurningHearth) value += "\nТребуется горящий очаг рядом";
             return value + "\nТочный набор без лишних предметов";
         }
 
@@ -710,6 +713,10 @@ namespace Quieter.UI
         private void RefreshCraftButton()
         {
             if (craftButton == null) return;
+            var label = craftButton.GetComponentInChildren<Text>();
+            if (label != null) label.text = inventory != null && inventory.IsCrafting
+                ? $"РАБОТА: {inventory.CraftSecondsRemaining:0} с"
+                : "ИЗГОТОВИТЬ";
             craftButton.interactable = selectedRecipeId != 0 && WorkbenchMode
                 && inventory != null && inventory.CanCraftLocally(selectedRecipeId);
         }
@@ -882,9 +889,12 @@ namespace Quieter.UI
         private string ResolveStackDisplayName(ItemStackState stack, ItemDefinition item)
         {
             if (item == null) return string.Empty;
-            return item.Kind == ItemKind.HiddenSample && resourceInteraction != null
+            var name = item.Kind == ItemKind.HiddenSample && resourceInteraction != null
                 ? resourceInteraction.GetSampleDisplayName(stack)
                 : item.DisplayName;
+            return item.Kind == ItemKind.Clothing && stack.Equipped
+                ? name + " [надето]"
+                : name;
         }
 
         private void SelectResearchTableTab(ResearchTableTab tab)
@@ -1500,6 +1510,24 @@ namespace Quieter.UI
             {
                 itemInfoStats.text = $"Прочность: {stack.Condition}/{item.MaximumDurability}";
             }
+            else if (item.Kind == ItemKind.Clothing)
+            {
+                itemInfoStats.text = (stack.Equipped ? "Надето" : "Не надето")
+                    + $"    Намокание: {stack.Wetness / 100}%"
+                    + $"    Чистота: {stack.Cleanliness / 100}%";
+            }
+            else if (item.Kind == ItemKind.Food)
+            {
+                itemInfoStats.text = $"Количество: {stack.Quantity}    Состояние: "
+                    + FoodConditionName(stack.Freshness);
+            }
+            else if (item.Kind == ItemKind.LiquidContainer)
+            {
+                itemInfoStats.text = stack.LiquidMilliliters == 0
+                    ? $"Пусто    Вместимость: {item.LiquidCapacityMilliliters} мл"
+                    : $"{LiquidName(stack)}: {stack.LiquidMilliliters} мл"
+                        + $" / {item.LiquidCapacityMilliliters} мл";
+            }
             else if (stack.Quality != ResourceQuality.None && item.Kind != ItemKind.HiddenSample)
             {
                 itemInfoStats.text = $"Количество: {stack.Quantity}    Качество: "
@@ -1512,6 +1540,25 @@ namespace Quieter.UI
             itemInfoRoot.gameObject.SetActive(requestedOpen);
             PositionItemInfoCard(slot);
         }
+
+        private static string FoodConditionName(ushort freshness)
+        {
+            if (freshness >= 8000) return "свежее";
+            if (freshness >= 5500) return "лежалое";
+            if (freshness >= 3000) return "сомнительное";
+            if (freshness > 0) return "явно испорченное";
+            return "гнилое";
+        }
+
+        private static string LiquidName(ItemStackState stack) => stack.LiquidKind switch
+        {
+            LiquidKind.Water => "Вода",
+            LiquidKind.SaltWater => "Солёная вода",
+            LiquidKind.Broth => "Бульон",
+            LiquidKind.HerbalInfusion => "Травяной настой",
+            LiquidKind.Waste => "Отходы",
+            _ => "Жидкость",
+        };
 
         private void PositionItemInfoCard(InventorySlotView slot)
         {
@@ -1715,6 +1762,12 @@ namespace Quieter.UI
         {
             if (pickupPrompt == null) return;
             var pickup = !requestedOpen ? inventory?.FocusedPickup : null;
+            if (!requestedOpen && pickup == null && inventory?.HasFocusedCorpse == true)
+            {
+                pickupPrompt.gameObject.SetActive(true);
+                pickupPrompt.text = "[E] Обыскать тело";
+                return;
+            }
             if (pickup == null || pickup.Stack.IsEmpty || inventory.Catalog == null
                 || !inventory.Catalog.TryGetItem(pickup.Stack.ItemId, out var item))
             {

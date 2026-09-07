@@ -5,6 +5,7 @@ using Quieter.Persistence;
 using Quieter.UI;
 using Quieter.World;
 using Quieter.Inventory;
+using Quieter.Survival;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
 using UnityEngine;
@@ -112,6 +113,7 @@ namespace Quieter.Core
             var worldStreamer = worldObject.AddComponent<WorldStreamer>();
             var resourceWorld = worldObject.AddComponent<ResourceWorldService>();
             var placedObjects = worldObject.AddComponent<PlacedObjectWorldService>();
+            worldObject.AddComponent<WorldWeatherService>();
 
             IWorldRepository worldRepository;
             IPlayerProfileRepository playerRepository;
@@ -190,6 +192,7 @@ namespace Quieter.Core
 #if !UNITY_SERVER
             gameObject.AddComponent<InventoryView>();
             gameObject.AddComponent<ResourceMapView>();
+            gameObject.AddComponent<SurvivalView>();
 #endif
 
             if (arguments.IsServer)

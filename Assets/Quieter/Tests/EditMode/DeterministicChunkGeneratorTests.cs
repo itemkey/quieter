@@ -130,7 +130,8 @@ namespace Quieter.Tests
                     + item.Position.z * item.Position.z >= 38f * 38f
                     || item.Resource.Kind == WorldObjectKind.LoosePickup
                     || item.Resource.Kind == WorldObjectKind.Tree
-                    || item.Resource.Kind == WorldObjectKind.FiberPlant),
+                    || item.Resource.Kind == WorldObjectKind.FiberPlant
+                    || item.Resource.Kind == WorldObjectKind.Spring),
                 Is.True);
         }
 
@@ -210,7 +211,7 @@ namespace Quieter.Tests
         }
 
         [Test]
-        public void LocalWorldMigration_PreservesSeedAndUpgradesGeneratorVersion()
+        public void OldLocalWorld_RequiresExplicitResetAndIsNotModified()
         {
             var path = Path.Combine(
                 Path.GetTempPath(),
@@ -234,14 +235,13 @@ namespace Quieter.Tests
                     + "  \"Players\": []\n"
                     + "}\n");
 
+                var before = File.ReadAllText(path);
                 var repository = new LocalJsonRepository(path);
-                var world = repository.GetOrCreateWorldAsync().GetAwaiter().GetResult();
+                var exception = Assert.Throws<InvalidDataException>(() =>
+                    repository.GetOrCreateWorldAsync().GetAwaiter().GetResult());
 
-                Assert.That(world.Seed, Is.EqualTo(987654321));
-                Assert.That(world.GeneratorVersion, Is.EqualTo(QuieterConstants.GeneratorVersion));
-                StringAssert.Contains(
-                    $"\"GeneratorVersion\": {QuieterConstants.GeneratorVersion}",
-                    File.ReadAllText(path));
+                StringAssert.Contains("явный сброс мира", exception.Message);
+                Assert.That(File.ReadAllText(path), Is.EqualTo(before));
             }
             finally
             {

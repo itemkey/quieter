@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Quieter.Survival;
 using UnityEngine;
 
 namespace Quieter.Inventory
@@ -38,6 +39,9 @@ namespace Quieter.Inventory
         [SerializeField] private List<Ingredient> ingredients = new();
         [SerializeField] private ItemDefinition output;
         [SerializeField, Min(1)] private ushort outputQuantity = 1;
+        [SerializeField, Min(0f)] private float workSeconds;
+        [SerializeField] private bool requiresBurningHearth;
+        [SerializeField] private SkillId practiceSkill = SkillId.Toolmaking;
 
         public ushort RecipeId => recipeId;
         public string DisplayName => displayName;
@@ -45,11 +49,16 @@ namespace Quieter.Inventory
         public IReadOnlyList<Ingredient> Ingredients => ingredients;
         public ItemDefinition Output => output;
         public ushort OutputQuantity => outputQuantity;
+        public float WorkSeconds => Mathf.Max(0f, workSeconds);
+        public bool RequiresBurningHearth => requiresBurningHearth;
+        public SkillId PracticeSkill => practiceSkill;
 
 #if UNITY_EDITOR
         public void Configure(ushort id, string recipeName,
             IReadOnlyList<Ingredient> required, ItemDefinition result, ushort resultQuantity,
-            CraftingCategory recipeCategory = CraftingCategory.Tools)
+            CraftingCategory recipeCategory = CraftingCategory.Tools,
+            float durationSeconds = 0f, bool needsHearth = false,
+            SkillId skill = SkillId.Toolmaking)
         {
             recipeId = id;
             displayName = recipeName;
@@ -57,6 +66,9 @@ namespace Quieter.Inventory
             ingredients = new List<Ingredient>(required);
             output = result;
             outputQuantity = (ushort)Mathf.Max(1, resultQuantity);
+            workSeconds = Mathf.Max(0f, durationSeconds);
+            requiresBurningHearth = needsHearth;
+            practiceSkill = skill;
         }
 #endif
     }
