@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: ClothRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
   recipeId: 12
-  displayName: "Ткань"
+  displayName: "\u0422\u043A\u0430\u043D\u044C"
   category: 0
   ingredients:
   - Item: {fileID: 11400000, guid: 08779be56f36c19448712bf5a34cbcd3, type: 2}

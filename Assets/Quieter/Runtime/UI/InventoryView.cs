@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using Quieter.Inventory;
+using Quieter.Survival;
 using Quieter.World;
 using Unity.Netcode;
 using UnityEngine;
@@ -36,6 +37,7 @@ namespace Quieter.UI
         private readonly List<(CraftingRecipe Recipe, Button Button)> recipeButtons = new();
         private readonly List<GameObject> researchHistoryCards = new();
         private PlayerInventory inventory;
+        private PlayerSurvival survival;
         private PlayerResourceInteraction resourceInteraction;
         private GameObject canvasRoot;
         private GameObject hotbarRoot;
@@ -166,6 +168,9 @@ namespace Quieter.UI
             if (resourceInteraction != null) resourceInteraction.Changed -= Refresh;
             inventory = next;
             if (inventory != null) inventory.Changed += Refresh;
+            survival = playerObject != null
+                ? playerObject.GetComponent<PlayerSurvival>()
+                : null;
             resourceInteraction = playerObject != null
                 ? playerObject.GetComponent<PlayerResourceInteraction>()
                 : null;
@@ -727,7 +732,7 @@ namespace Quieter.UI
             panel.name = "ItemInfoCard";
             panel.raycastTarget = false;
             itemInfoRoot = panel.rectTransform;
-            itemInfoRoot.sizeDelta = new Vector2(300f, 178f);
+            itemInfoRoot.sizeDelta = new Vector2(300f, 204f);
 
             itemInfoIcon = CreatePanel(itemInfoRoot, Color.gray);
             itemInfoIcon.raycastTarget = false;
@@ -747,7 +752,7 @@ namespace Quieter.UI
             itemInfoStats.raycastTarget = false;
             itemInfoStats.color = new Color(0.62f, 0.72f, 0.82f);
             SetAnchoredRect(itemInfoStats.rectTransform, new Vector2(0f, 0f),
-                new Vector2(16f, 12f), new Vector2(268f, 26f), new Vector2(0f, 0f));
+                new Vector2(16f, 12f), new Vector2(268f, 52f), new Vector2(0f, 0f));
             itemInfoRoot.gameObject.SetActive(false);
         }
 
@@ -1513,13 +1518,15 @@ namespace Quieter.UI
             else if (item.Kind == ItemKind.Clothing)
             {
                 itemInfoStats.text = (stack.Equipped ? "Надето" : "Не надето")
+                    + $"    Слой: {ClothingLayerName(item.ClothingLayer)}"
                     + $"    Намокание: {stack.Wetness / 100}%"
                     + $"    Чистота: {stack.Cleanliness / 100}%";
             }
             else if (item.Kind == ItemKind.Food)
             {
                 itemInfoStats.text = $"Количество: {stack.Quantity}    Состояние: "
-                    + FoodConditionName(stack.Freshness);
+                    + FoodConditionName(stack.Freshness)
+                    + "\n" + DescribeFoodSafety(stack);
             }
             else if (item.Kind == ItemKind.LiquidContainer)
             {
@@ -1549,6 +1556,73 @@ namespace Quieter.UI
             if (freshness > 0) return "явно испорченное";
             return "гнилое";
         }
+
+        private string DescribeFoodSafety(ItemStackState stack)
+        {
+            var botany = GetOwnerSkillLevel(SkillId.Botany);
+            var sanitation = GetOwnerSkillLevel(SkillId.Sanitation);
+            var toxins = stack.ToxinContamination / 10000f;
+            var biological = stack.BiologicalContamination / 10000f;
+
+            string identity;
+            if (stack.ItemId == ResourceBalance.WildMushroomsItemId)
+            {
+                identity = botany switch
+                {
+                    < 2 => "Вид гриба определить не удаётся.",
+                    < 5 when toxins >= 0.6f => "Признаки похожи на опасный гриб.",
+                    < 5 => "Похож на съедобный, но уверенности нет.",
+                    _ when toxins >= 0.35f => "Ботанические признаки указывают на сильную ядовитость.",
+                    _ when toxins >= 0.08f => "Есть сомнительные признаки; употребление рискованно.",
+                    _ => "Узнаваемый съедобный вид без явных ядовитых признаков.",
+                };
+            }
+            else if (ResourceBalance.IsWildFood(stack.ItemId))
+            {
+                identity = botany < 2
+                    ? "Дикое растение распознано лишь приблизительно."
+                    : toxins >= 0.25f
+                        ? "Есть признаки природной токсичности."
+                        : "Явных ядовитых признаков не видно.";
+            }
+            else
+            {
+                identity = "Происхождение пищи известно.";
+            }
+
+            var hygiene = sanitation switch
+            {
+                < 2 when biological >= 0.55f => " На поверхности заметна грязь.",
+                < 2 => " Чистоту на глаз оценить трудно.",
+                < 5 when biological >= 0.35f => " Пища выглядит загрязнённой.",
+                < 5 => " Явного загрязнения не видно.",
+                _ when biological >= 0.2f => " Вероятна опасная биологическая грязь.",
+                _ => " Признаков значимого загрязнения не видно.",
+            };
+            return identity + hygiene;
+        }
+
+        private int GetOwnerSkillLevel(SkillId skill)
+        {
+            if (survival == null) return 0;
+            for (var index = 0; index < survival.ProgressionEntryCount; index++)
+            {
+                var entry = survival.GetProgressionEntry(index);
+                if (!entry.Attribute && entry.Id == (byte)skill) return entry.Level;
+            }
+            return 0;
+        }
+
+        private static string ClothingLayerName(ClothingLayer layer) => layer switch
+        {
+            ClothingLayer.BaseBody => "нательный",
+            ClothingLayer.MidBody => "средний",
+            ClothingLayer.OuterBody => "наружный",
+            ClothingLayer.Head => "голова",
+            ClothingLayer.Hands => "руки",
+            ClothingLayer.Feet => "ноги",
+            _ => "не определён",
+        };
 
         private static string LiquidName(ItemStackState stack) => stack.LiquidKind switch
         {
@@ -1765,7 +1839,20 @@ namespace Quieter.UI
             if (!requestedOpen && pickup == null && inventory?.HasFocusedCorpse == true)
             {
                 pickupPrompt.gameObject.SetActive(true);
-                pickupPrompt.text = "[E] Обыскать тело";
+                var stage = inventory.FocusedCorpseStage switch
+                {
+                    CorpseDecayStage.EarlyDecay => "начавшее разлагаться тело",
+                    CorpseDecayStage.ActiveDecay => "сильно разложившееся тело",
+                    CorpseDecayStage.AdvancedDecay => "разложившиеся останки",
+                    CorpseDecayStage.DryRemains => "сухие останки",
+                    CorpseDecayStage.Buried => "погребённые останки",
+                    CorpseDecayStage.Cremated => "сожжённые останки",
+                    _ => "свежее тело",
+                };
+                pickupPrompt.text = inventory.FocusedCorpseItemsSealed
+                    ? $"{stage}: вещи запечатаны в могиле"
+                    : $"{stage}    [E] Обыскать    [B] Погребсти лопатой"
+                        + "    [C] Сжечь у горящего очага";
                 return;
             }
             if (pickup == null || pickup.Stack.IsEmpty || inventory.Catalog == null

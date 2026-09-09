@@ -16,6 +16,15 @@ namespace Quieter.World
         Spring = 6,
     }
 
+    public enum ResourceSearchKind : byte
+    {
+        Water,
+        Food,
+        Forage,
+        Logging,
+        Mining,
+    }
+
     public enum ResearchResultTone : byte
     {
         None = 0,
@@ -213,11 +222,14 @@ namespace Quieter.World
     {
         public int WorldId;
         public string ObjectId;
+        public string OwnerAccountId;
+        public string AssignedCharacterId;
         public ushort ItemId;
         public float X;
         public float Y;
         public float Z;
         public float Yaw;
+        public bool Locked;
         public StoredInventorySlot Input;
         public string CreatedAtUtc;
         public string UpdatedAtUtc;
@@ -289,6 +301,11 @@ namespace Quieter.World
         public const ushort WildBerriesItemId = 25;
         public const ushort EdibleRootsItemId = 26;
         public const ushort WildMushroomsItemId = 27;
+        public const ushort MedicinalHerbsItemId = 28;
+        public const ushort WildNutsItemId = 68;
+        public const ushort CookedRootsItemId = 69;
+        public const ushort CookedMushroomsItemId = 70;
+        public const ushort RoastedNutsItemId = 71;
         public const float InteractionDistance = 3f;
         public const float PlacementDistance = 10f;
         public const float MiningCooldownSeconds = 0.8f;
@@ -307,12 +324,50 @@ namespace Quieter.World
         public static readonly byte[] DurabilityCost = { 1, 1, 2, 2, 3 };
 
         public static bool IsWildFood(ushort itemId) => itemId is
-            WildBerriesItemId or EdibleRootsItemId or WildMushroomsItemId;
+            WildBerriesItemId or EdibleRootsItemId or WildMushroomsItemId
+                or WildNutsItemId;
+
+        public static bool IsWildForage(ushort itemId) =>
+            IsWildFood(itemId) || itemId == MedicinalHerbsItemId;
+
+        public static bool TryGetCookedFoodItemId(ushort rawItemId, out ushort cookedItemId)
+        {
+            cookedItemId = rawItemId switch
+            {
+                EdibleRootsItemId => CookedRootsItemId,
+                WildMushroomsItemId => CookedMushroomsItemId,
+                WildNutsItemId => RoastedNutsItemId,
+                _ => (ushort)0,
+            };
+            return cookedItemId != 0;
+        }
+
+        public static ItemStackState CookSolidFood(ItemStackState raw, ushort cookedItemId)
+        {
+            if (raw.IsEmpty || !TryGetCookedFoodItemId(raw.ItemId, out var expected)
+                || expected != cookedItemId)
+            {
+                return default;
+            }
+            return new ItemStackState(
+                cookedItemId,
+                raw.Quantity,
+                itemInstanceId: raw.ItemInstanceId,
+                freshness: raw.Freshness,
+                // Thorough heat destroys almost all living contamination but
+                // neither reverses spoilage nor neutralises unknown plant toxins.
+                biologicalContamination: (ushort)Mathf.CeilToInt(
+                    raw.BiologicalContamination * 0.02f),
+                toxinContamination: raw.ToxinContamination,
+                cleanliness: raw.Cleanliness);
+        }
 
         public static ItemStackState CreateWildFoodStack(ushort itemId, ulong instanceId)
         {
             if (!IsWildFood(itemId)) return new ItemStackState(itemId, 1);
-            var freshness = (ushort)(9200 + (instanceId >> 8) % 801UL);
+            var freshness = itemId == WildNutsItemId
+                ? (ushort)(9700 + (instanceId >> 8) % 301UL)
+                : (ushort)(9200 + (instanceId >> 8) % 801UL);
             var biological = (ushort)(180 + (instanceId >> 24) % 1021UL);
             ushort toxins = 0;
             if (itemId == WildMushroomsItemId)

@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: ChamberPotRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
   recipeId: 11
-  displayName: "Ночной горшок"
+  displayName: "\u041D\u043E\u0447\u043D\u043E\u0439 \u0433\u043E\u0440\u0448\u043E\u043A"
   category: 0
   ingredients:
   - Item: {fileID: 11400000, guid: 45847805ec117f64f82bc1bea4bc37b5, type: 2}

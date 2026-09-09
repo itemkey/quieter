@@ -139,11 +139,13 @@ namespace Quieter.Tests
                 {
                     WorldId = world.WorldId,
                     ObjectId = "18446744073709550002",
+                    OwnerAccountId = "76561198000000103",
                     ItemId = 24,
                     X = 12.5f,
                     Y = 4.25f,
                     Z = -8.75f,
                     Yaw = 45f,
+                    Locked = false,
                     Input = new StoredInventorySlot
                     {
                         ItemId = 6,
@@ -163,6 +165,7 @@ namespace Quieter.Tests
             Assert.That(objects, Has.Count.EqualTo(1));
             Assert.That(objects[0].ObjectId, Is.EqualTo("18446744073709550002"));
             Assert.That(objects[0].Yaw, Is.EqualTo(45f));
+            Assert.That(objects[0].OwnerAccountId, Is.EqualTo("76561198000000103"));
             Assert.That(objects[0].Input.ItemId, Is.EqualTo(6));
             Assert.That(objects[0].Input.HiddenItemId, Is.EqualTo(11));
             Assert.That(objects[0].Input.SourceNodeId, Is.EqualTo("445566"));
@@ -299,6 +302,235 @@ namespace Quieter.Tests
             Assert.That(profile.MapNotes, Is.Empty);
             Assert.That(profile.SelectedHotbarIndex, Is.Zero);
             Assert.That(profile.Position, Is.EqualTo(new Vector3(1f, 8f, 2f)));
+        }
+
+        [Test]
+        public async Task NewStranger_KeepsOldBodyAndItemsAcrossRepositoryRestart()
+        {
+            const ulong steamId = 76561198000000122;
+            var repository = new LocalJsonRepository(path);
+            var first = await repository.LoginAsync(steamId, "Mortal", new Vector3(0f, 8f, 0f));
+            first.Survival.Revision = 5;
+            first.Survival.Physiology.LifeState = CharacterLifeState.Dead;
+            first.Survival.Physiology.DeathCause = DeathCause.BloodLoss;
+            var bodyItem = new[]
+            {
+                new StoredInventorySlot
+                {
+                    SlotIndex = 0, ItemId = 36, Quantity = 1, ItemInstanceId = "901",
+                },
+            };
+            await repository.SaveSnapshotAsync(
+                steamId, new Vector3(14f, 7f, -9f), bodyItem,
+                Array.Empty<StoredInventorySlot>(), 0, first.Survival);
+            var operationId = Guid.NewGuid().ToString("D");
+            var replacement = await repository.CreateNewStrangerAsync(
+                steamId, operationId, first.Survival.CharacterId, 5,
+                new Vector3(0f, 8f, 0f));
+            var retry = await repository.CreateNewStrangerAsync(
+                steamId, operationId, first.Survival.CharacterId, 5,
+                new Vector3(100f, 8f, 100f));
+
+            Assert.That(retry.Survival.CharacterId, Is.EqualTo(replacement.Survival.CharacterId));
+            Assert.That(replacement.InventorySlots, Is.Empty);
+            Assert.That(replacement.Survival.CreationCompleted, Is.False);
+
+            var reopened = new LocalJsonRepository(path);
+            var bodies = await reopened.LoadWorldCharactersAsync();
+            Assert.That(bodies, Has.Count.EqualTo(1));
+            Assert.That(bodies[0].SteamId, Is.Zero);
+            Assert.That(bodies[0].Position, Is.EqualTo(new Vector3(14f, 7f, -9f)));
+            Assert.That(bodies[0].InventorySlots, Has.Count.EqualTo(1));
+            Assert.That(bodies[0].InventorySlots[0].ItemInstanceId, Is.EqualTo("901"));
+            var loggedIn = await reopened.LoginAsync(steamId, "Mortal", Vector3.zero);
+            Assert.That(loggedIn.Survival.CharacterId, Is.EqualTo(replacement.Survival.CharacterId));
+        }
+
+        [Test]
+        public async Task CharacterPairTransfer_IsAtomicAndIdempotentInLocalWorld()
+        {
+            const ulong steamId = 76561198000000123;
+            var repository = new LocalJsonRepository(path);
+            var first = await repository.LoginAsync(steamId, "Looter", Vector3.up * 8f);
+            first.Survival.Revision = 2;
+            first.Survival.Physiology.LifeState = CharacterLifeState.Dead;
+            first.Survival.Physiology.DeathCause = DeathCause.BloodLoss;
+            var item = new StoredInventorySlot
+            {
+                SlotIndex = 0, ItemId = 36, Quantity = 1, ItemInstanceId = "902",
+            };
+            await repository.SaveSnapshotAsync(steamId, new Vector3(5f, 8f, 5f),
+                new[] { item }, Array.Empty<StoredInventorySlot>(), 0, first.Survival);
+            var next = await repository.CreateNewStrangerAsync(
+                steamId, Guid.NewGuid().ToString("D"), first.Survival.CharacterId, 2,
+                Vector3.up * 8f);
+            var body = (await repository.LoadWorldCharactersAsync())[0];
+            body.Survival.Revision++;
+            next.Survival.Revision = 1;
+            var operationId = Guid.NewGuid().ToString("D");
+            var source = new CharacterPersistenceSnapshot
+            {
+                Position = body.Position, Slots = Array.Empty<StoredInventorySlot>(),
+                PendingItems = Array.Empty<StoredInventorySlot>(), Survival = body.Survival,
+            };
+            var destination = new CharacterPersistenceSnapshot
+            {
+                Position = next.Position, Slots = new[] { item },
+                PendingItems = Array.Empty<StoredInventorySlot>(), Survival = next.Survival,
+            };
+
+            await repository.SaveCharacterPairAsync(operationId, source, steamId, destination);
+            await repository.SaveCharacterPairAsync(operationId, source, steamId, destination);
+
+            var reopened = new LocalJsonRepository(path);
+            Assert.That((await reopened.LoadWorldCharactersAsync())[0].InventorySlots, Is.Empty);
+            var controlled = await reopened.LoginAsync(steamId, "Looter", Vector3.zero);
+            Assert.That(controlled.InventorySlots, Has.Count.EqualTo(1));
+            Assert.That(controlled.InventorySlots[0].ItemInstanceId, Is.EqualTo("902"));
+        }
+
+        [Test]
+        public async Task RegisteredHeir_AtomicallyKeepsEachBodiesOwnInventory()
+        {
+            const ulong steamId = 76561198000000131;
+            var repository = new LocalJsonRepository(path);
+            var world = await repository.GetOrCreateWorldAsync();
+            var owner = await repository.LoginAsync(steamId, "Owner", Vector3.up * 8f);
+            owner.Survival.Revision = 1;
+            await repository.SaveSnapshotAsync(steamId, owner.Position, new[]
+            {
+                new StoredInventorySlot
+                {
+                    SlotIndex = 0, ItemId = 49, Quantity = 1, ItemInstanceId = "991",
+                },
+            }, Array.Empty<StoredInventorySlot>(), 0, owner.Survival);
+            var heirState = new CharacterSurvivalState
+            {
+                CharacterId = Guid.NewGuid().ToString("D"),
+                CharacterName = "Heir",
+                ControlKind = CharacterControlKind.ContractedNpc,
+                CreationCompleted = true,
+                Revision = 1,
+                WorkerContract = new WorkerContractState
+                {
+                    Active = true,
+                    Voluntary = true,
+                    EmployerAccountId = steamId.ToString(),
+                    FulfilledContractGameSeconds =
+                        LivingWorldSimulation.RequiredHeirContractGameSeconds,
+                },
+            };
+            heirState.EnsureInitialized();
+            heirState.Relationships.Add(new RelationshipState
+            {
+                TargetCharacterId = owner.Survival.CharacterId,
+                VoluntaryLoyalty = true,
+                PersonalRequestsCompleted = 3,
+            });
+            await repository.CreateWorldNpcAsync("Heir", new CharacterPersistenceSnapshot
+            {
+                Position = new Vector3(45f, 8f, 7f),
+                Slots = new[] { new StoredInventorySlot { SlotIndex = 0, ItemId = 25, Quantity = 2 } },
+                PendingItems = Array.Empty<StoredInventorySlot>(),
+                Survival = heirState,
+            });
+            await repository.SavePlacedObjectsAsync(world.WorldId, new[]
+            {
+                new StoredPlacedObject
+                {
+                    WorldId = world.WorldId, ObjectId = "992", ItemId = 48,
+                    OwnerAccountId = steamId.ToString(),
+                    AssignedCharacterId = heirState.CharacterId,
+                },
+            });
+
+            var registered = await repository.RegisterHeirAsync(
+                steamId, heirState.CharacterId, 0);
+            Assert.That(registered.RegisteredHeirCharacterId,
+                Is.EqualTo(heirState.CharacterId));
+            owner = await repository.LoginAsync(steamId, "Owner", Vector3.zero);
+            owner.Survival.Revision = 2;
+            owner.Survival.Physiology.LifeState = CharacterLifeState.Dead;
+            owner.Survival.Physiology.DeathCause = DeathCause.BloodLoss;
+            await repository.SaveSnapshotAsync(steamId, owner.Position, owner.InventorySlots,
+                owner.PendingItems, owner.SelectedHotbarIndex, owner.Survival);
+            var operation = Guid.NewGuid().ToString("D");
+            var assumed = await repository.AssumeRegisteredHeirAsync(
+                steamId, operation, owner.Survival.CharacterId, 2);
+            var retry = await repository.AssumeRegisteredHeirAsync(
+                steamId, operation, owner.Survival.CharacterId, 2);
+
+            Assert.That(assumed.Survival.CharacterId, Is.EqualTo(heirState.CharacterId));
+            Assert.That(retry.Survival.CharacterId, Is.EqualTo(heirState.CharacterId));
+            Assert.That(assumed.Position, Is.EqualTo(new Vector3(45f, 8f, 7f)));
+            Assert.That(assumed.InventorySlots[0].ItemId, Is.EqualTo(25));
+            var oldBody = (await new LocalJsonRepository(path).LoadWorldCharactersAsync())[0];
+            Assert.That(oldBody.InventorySlots[0].ItemId, Is.EqualTo(49));
+        }
+
+        [Test]
+        public async Task CapturedLife_BecomesDetachedForcedNpcWhenNewStrangerStarts()
+        {
+            const ulong steamId = 76561198000000124;
+            var repository = new LocalJsonRepository(path);
+            var first = await repository.LoginAsync(steamId, "Captured", Vector3.up * 8f);
+            first.Survival.Revision = 3;
+            first.Survival.ControlKind = CharacterControlKind.ForcedNpc;
+            var item = new StoredInventorySlot
+            {
+                SlotIndex = 0, ItemId = 30, Quantity = 1, ItemInstanceId = "903",
+            };
+            await repository.SaveSnapshotAsync(steamId, new Vector3(7f, 8f, 2f),
+                new[] { item }, Array.Empty<StoredInventorySlot>(), 0, first.Survival);
+            var restoredPlayerState = JsonUtility.FromJson<CharacterSurvivalState>(
+                JsonUtility.ToJson(first.Survival));
+            restoredPlayerState.Revision = 4;
+            restoredPlayerState.ControlKind = CharacterControlKind.Player;
+            Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await repository.SaveSnapshotAsync(steamId, Vector3.zero,
+                    Array.Empty<StoredInventorySlot>(), Array.Empty<StoredInventorySlot>(),
+                    0, restoredPlayerState));
+
+            var next = await repository.CreateNewStrangerAsync(steamId,
+                Guid.NewGuid().ToString("D"), first.Survival.CharacterId, 3,
+                Vector3.up * 8f);
+            Assert.That(next.Survival.CharacterId, Is.Not.EqualTo(first.Survival.CharacterId));
+            var bodies = await new LocalJsonRepository(path).LoadWorldCharactersAsync();
+            Assert.That(bodies, Has.Count.EqualTo(1));
+            Assert.That(bodies[0].Survival.ControlKind,
+                Is.EqualTo(CharacterControlKind.ForcedNpc));
+            Assert.That(bodies[0].InventorySlots[0].ItemInstanceId, Is.EqualTo("903"));
+        }
+
+        [Test]
+        public async Task FreeNpcCreation_IsIdempotentAndSurvivesRestart()
+        {
+            var repository = new LocalJsonRepository(path);
+            var survival = new CharacterSurvivalState
+            {
+                CharacterId = Guid.NewGuid().ToString("D"),
+                CharacterName = "Mira",
+                ControlKind = CharacterControlKind.FreeNpc,
+                CreationCompleted = true,
+                Revision = 1,
+            };
+            survival.EnsureInitialized();
+            var snapshot = new CharacterPersistenceSnapshot
+            {
+                Position = new Vector3(80f, 0f, -70f),
+                Slots = new[] { new StoredInventorySlot { SlotIndex = 0, ItemId = 25, Quantity = 3 } },
+                PendingItems = Array.Empty<StoredInventorySlot>(),
+                SelectedHotbarIndex = 0,
+                Survival = survival,
+            };
+            var first = await repository.CreateWorldNpcAsync("Mira", snapshot);
+            var retry = await repository.CreateWorldNpcAsync("Changed", snapshot);
+            Assert.That(retry.Survival.CharacterId, Is.EqualTo(first.Survival.CharacterId));
+            var loaded = await new LocalJsonRepository(path).LoadWorldCharactersAsync();
+            Assert.That(loaded, Has.Count.EqualTo(1));
+            Assert.That(loaded[0].SteamId, Is.Zero);
+            Assert.That(loaded[0].Survival.ControlKind,
+                Is.EqualTo(CharacterControlKind.FreeNpc));
         }
     }
 }

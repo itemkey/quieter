@@ -13,7 +13,8 @@ MonoBehaviour:
   m_Name: UnlinedWastePitRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
   recipeId: 9
-  displayName: "\u041D\u0435\u043E\u0431\u043B\u0438\u0446\u043E\u0432\u0430\u043D\u043D\u0430\u044F \u0432\u044B\u0433\u0440\u0435\u0431\u043D\u0430\u044F \u044F\u043C\u0430"
+  displayName: "\u041D\u0435\u043E\u0431\u043B\u0438\u0446\u043E\u0432\u0430\u043D\u043D\u0430\u044F
+    \u0432\u044B\u0433\u0440\u0435\u0431\u043D\u0430\u044F \u044F\u043C\u0430"
   category: 2
   ingredients:
   - Item: {fileID: 11400000, guid: 8b5771b4673410a4c955b61d872249ea, type: 2}
@@ -22,3 +23,6 @@ MonoBehaviour:
     Quantity: 2
   output: {fileID: 11400000, guid: a3cfe23bcd3c47fe97edb8f2371f2d5d, type: 2}
   outputQuantity: 1
+  workSeconds: 0
+  requiresBurningHearth: 0
+  practiceSkill: 16

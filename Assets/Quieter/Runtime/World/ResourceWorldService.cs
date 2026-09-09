@@ -36,6 +36,31 @@ namespace Quieter.World
             return streamer != null && streamer.TryGetResourceNode(instanceId, out node);
         }
 
+        public bool TryFindClosestAvailableNode(
+            Vector3 origin,
+            float maximumDistance,
+            ResourceSearchKind search,
+            out ResourceNodeView node)
+        {
+            node = null;
+            if (streamer == null || maximumDistance <= 0f) return false;
+            var bestDistanceSquared = maximumDistance * maximumDistance;
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            foreach (var candidate in streamer.LoadedResourceNodes)
+            {
+                if (candidate == null || !MatchesSearch(candidate.Descriptor, search)) continue;
+                var state = GetState(candidate);
+                if (!state.IsAvailable(now)) continue;
+                var difference = candidate.transform.position - origin;
+                difference.y = 0f;
+                var distanceSquared = difference.sqrMagnitude;
+                if (distanceSquared >= bestDistanceSquared) continue;
+                bestDistanceSquared = distanceSquared;
+                node = candidate;
+            }
+            return node != null;
+        }
+
         public void Configure(NetworkManager manager, WorldStreamer worldStreamer)
         {
             if (configured) return;
@@ -337,6 +362,22 @@ namespace Quieter.World
             if (streamer == null || !streamer.TryGetResourceNode(instanceId, out var view)) return;
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             view.ApplyState(state.RemainingReserves, state.IsAvailable(now));
+        }
+
+        private static bool MatchesSearch(
+            ResourceNodeDescriptor descriptor,
+            ResourceSearchKind search)
+        {
+            return search switch
+            {
+                ResourceSearchKind.Water => descriptor.IsWaterSource,
+                ResourceSearchKind.Food => descriptor.IsLoosePickup
+                    && ResourceBalance.IsWildFood(descriptor.ResourceItemId),
+                ResourceSearchKind.Forage => descriptor.IsLoosePickup,
+                ResourceSearchKind.Logging => descriptor.IsTree,
+                ResourceSearchKind.Mining => descriptor.IsMineable && !descriptor.IsTree,
+                _ => false,
+            };
         }
 
         private void OnDestroy()

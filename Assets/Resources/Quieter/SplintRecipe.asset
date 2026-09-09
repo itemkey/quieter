@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: SplintRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
   recipeId: 13
-  displayName: "Деревянная шина"
+  displayName: "\u0414\u0435\u0440\u0435\u0432\u044F\u043D\u043D\u0430\u044F \u0448\u0438\u043D\u0430"
   category: 0
   ingredients:
   - Item: {fileID: 11400000, guid: 8b5771b4673410a4c955b61d872249ea, type: 2}

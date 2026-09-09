@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using NUnit.Framework;
 using Quieter.Survival;
 using UnityEngine;
@@ -111,6 +112,28 @@ namespace Quieter.Tests.EditMode
             LivingWorldSimulation.Bury(corpse);
             Assert.That(corpse.Stage, Is.EqualTo(CorpseDecayStage.Buried));
             Assert.That(corpse.ItemsSealedByBurial, Is.True);
+
+            var cremated = new CorpseState
+            {
+                DiedAtUtcTicks = died.Ticks,
+                BiologicalContamination = 1f,
+            };
+            LivingWorldSimulation.Cremate(cremated);
+            Assert.That(cremated.Stage, Is.EqualTo(CorpseDecayStage.Cremated));
+            Assert.That(cremated.OrganicItemsDestroyed, Is.True);
+            Assert.That(cremated.BiologicalContamination, Is.Zero);
+        }
+
+        [Test]
+        public void DeadCharacterState_AlwaysOwnsPersistentCorpseRecord()
+        {
+            var state = new CharacterSurvivalState
+            {
+                CharacterId = "dead-character",
+                Physiology = new PhysiologyState { LifeState = CharacterLifeState.Dead },
+            };
+            state.EnsureInitialized();
+            Assert.That(state.Corpse, Is.Not.Null);
         }
 
         [Test]
@@ -120,6 +143,117 @@ namespace Quieter.Tests.EditMode
             var observed = LivingWorldSimulation.RevealSkillRange(7, 21);
             Assert.That(unseen, Is.EqualTo((0, 10)));
             Assert.That(observed, Is.EqualTo((7, 7)));
+        }
+
+        [Test]
+        public void ContractsRewardKeptPromisesAndBreachesCanMakeWorkersLeave()
+        {
+            var contract = new WorkerContractState
+            {
+                Active = true, Voluntary = true, DailyRationCalories = 1800f,
+                PromisedSafety = 0.7f,
+            };
+            var relationship = new RelationshipState { Trust = 0.5f, Loyalty = 0.4f };
+            Assert.That(LivingWorldSimulation.EvaluateContractDay(
+                contract, relationship, 1800f, 0.8f, 0.9f),
+                Is.EqualTo(WorkerResponseKind.Stay));
+            Assert.That(contract.FulfilledContractGameSeconds,
+                Is.EqualTo(LivingWorldSimulation.GameSecondsPerDay));
+            Assert.That(relationship.Trust, Is.GreaterThan(0.5f));
+
+            relationship.Resentment = 1f;
+            for (var day = 0; day < 3; day++)
+                LivingWorldSimulation.EvaluateContractDay(
+                    contract, relationship, 0f, 0f, 0.99f);
+            Assert.That(LivingWorldSimulation.EvaluateContractDay(
+                contract, relationship, 0f, 0f, 0f),
+                Is.EqualTo(WorkerResponseKind.Leave));
+        }
+
+        [Test]
+        public void WorkerBookPriorities_EnableDisableAndSelectTheHighestJob()
+        {
+            var contract = new WorkerContractState
+            {
+                Active = true,
+                AllowedJobs = new List<WorkerJobKind>
+                {
+                    WorkerJobKind.Mining,
+                    WorkerJobKind.Foraging,
+                },
+            };
+            contract.EnsureInitialized();
+            Assert.That(LivingWorldSimulation.AdjustJobPriority(
+                contract, WorkerJobKind.Foraging, 2), Is.EqualTo(3));
+            Assert.That(LivingWorldSimulation.TrySelectPriorityJob(
+                contract, WorkerJobKind.Mining, out var selected), Is.True);
+            Assert.That(selected, Is.EqualTo(WorkerJobKind.Foraging));
+
+            Assert.That(LivingWorldSimulation.AdjustJobPriority(
+                contract, WorkerJobKind.Foraging, -3), Is.Zero);
+            CollectionAssert.DoesNotContain(contract.AllowedJobs, WorkerJobKind.Foraging);
+            Assert.That(LivingWorldSimulation.TrySelectPriorityJob(
+                contract, WorkerJobKind.Foraging, out selected), Is.True);
+            Assert.That(selected, Is.EqualTo(WorkerJobKind.Mining));
+        }
+
+        [Test]
+        public void MissingPromisedPaymentCountsAsAContractBreach()
+        {
+            var contract = new WorkerContractState
+            {
+                Active = true,
+                Voluntary = true,
+                DailyRationCalories = 1800f,
+                PromisedSafety = 0.6f,
+                PaymentItemId = 25,
+                PaymentQuantity = 2,
+            };
+            var relationship = new RelationshipState { Trust = 0.7f, Loyalty = 0.5f };
+
+            LivingWorldSimulation.EvaluateContractDay(
+                contract, relationship, 2000f, 0.9f, 0.99f,
+                paymentDelivered: false);
+
+            Assert.That(contract.ConsecutiveBreaches, Is.EqualTo(1));
+            Assert.That(contract.FulfilledContractGameSeconds, Is.Zero);
+            Assert.That(relationship.Trust, Is.LessThan(0.7f));
+        }
+
+        [Test]
+        public void NpcDecisionsPutImmediateNeedsAheadOfScheduledWork()
+        {
+            var physiology = new PhysiologyState
+            {
+                Hydration = 0.4f,
+                StomachFullness = 0.2f,
+                EnergyReserve = 0.3f,
+                SleepDebt = 0.9f,
+            };
+            Assert.That(LivingWorldSimulation.ChooseNpcActivity(
+                physiology, false, false, false, true, true),
+                Is.EqualTo(NpcActivityKind.SeekWater));
+            physiology.Hydration = 0.9f;
+            Assert.That(LivingWorldSimulation.ChooseNpcActivity(
+                physiology, true, false, false, true, true),
+                Is.EqualTo(NpcActivityKind.SeekFood));
+            physiology.StomachFullness = 0.8f;
+            physiology.EnergyReserve = 0.8f;
+            Assert.That(LivingWorldSimulation.ChooseNpcActivity(
+                physiology, true, true, false, true, true),
+                Is.EqualTo(NpcActivityKind.Rest));
+            physiology.SleepDebt = 0.1f;
+            Assert.That(LivingWorldSimulation.ChooseNpcActivity(
+                physiology, true, true, false, true, true),
+                Is.EqualTo(NpcActivityKind.Work));
+        }
+
+        [Test]
+        public void OvernightWorkSchedulesWrapAcrossMidnight()
+        {
+            Assert.That(LivingWorldSimulation.IsWithinWorkHours(23f, 20f, 4f), Is.True);
+            Assert.That(LivingWorldSimulation.IsWithinWorkHours(2f, 20f, 4f), Is.True);
+            Assert.That(LivingWorldSimulation.IsWithinWorkHours(12f, 20f, 4f), Is.False);
         }
 
         [Test]

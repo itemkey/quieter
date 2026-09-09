@@ -33,6 +33,7 @@ namespace Quieter.Tests.EditMode
             var trees = new List<WorldObjectSpawn>();
             var plants = new List<WorldObjectSpawn>();
             var food = new List<WorldObjectSpawn>();
+            var forage = new List<WorldObjectSpawn>();
             var springs = new List<WorldObjectSpawn>();
             for (var z = 0; z < definition.ChunkCountZ; z++)
             {
@@ -49,6 +50,8 @@ namespace Quieter.Tests.EditMode
                         item => item.Resource.Kind == WorldObjectKind.FiberPlant));
                     food.AddRange(first.Where(item =>
                         ResourceBalance.IsWildFood(item.Resource.ResourceItemId)));
+                    forage.AddRange(first.Where(item =>
+                        ResourceBalance.IsWildForage(item.Resource.ResourceItemId)));
                     springs.AddRange(first.Where(item => item.Resource.IsWaterSource));
                 }
             }
@@ -67,6 +70,20 @@ namespace Quieter.Tests.EditMode
                     + item.Position.z * item.Position.z < 38f * 38f),
                 Is.GreaterThanOrEqualTo(12));
             Assert.That(food.Count, Is.InRange(450, 750));
+            Assert.That(food.Select(item => item.Resource.ResourceItemId).Distinct(),
+                Is.EquivalentTo(new[]
+                {
+                    ResourceBalance.WildBerriesItemId,
+                    ResourceBalance.EdibleRootsItemId,
+                    ResourceBalance.WildMushroomsItemId,
+                    ResourceBalance.WildNutsItemId,
+                }));
+            Assert.That(forage.Any(item => item.Resource.ResourceItemId
+                == ResourceBalance.MedicinalHerbsItemId), Is.True);
+            Assert.That(forage.Count(item => item.Position.x * item.Position.x
+                    + item.Position.z * item.Position.z < 38f * 38f
+                    && item.Resource.ResourceItemId == ResourceBalance.MedicinalHerbsItemId),
+                Is.GreaterThanOrEqualTo(3));
             Assert.That(springs.Count, Is.InRange(70, 120));
             Assert.That(springs.Count(item => item.Position.x * item.Position.x
                     + item.Position.z * item.Position.z < 38f * 38f),
@@ -93,11 +110,36 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public void HearthCooking_KillsBiologicalContaminationButPreservesPlantToxins()
+        {
+            var raw = new ItemStackState(
+                ResourceBalance.WildMushroomsItemId,
+                2,
+                itemInstanceId: 991,
+                freshness: 7200,
+                biologicalContamination: 5000,
+                toxinContamination: 6800,
+                cleanliness: 8400);
+
+            var cooked = ResourceBalance.CookSolidFood(
+                raw, ResourceBalance.CookedMushroomsItemId);
+
+            Assert.That(cooked.ItemId, Is.EqualTo(ResourceBalance.CookedMushroomsItemId));
+            Assert.That(cooked.Quantity, Is.EqualTo(2));
+            Assert.That(cooked.ItemInstanceId, Is.EqualTo(991));
+            Assert.That(cooked.Freshness, Is.EqualTo(7200));
+            Assert.That(cooked.BiologicalContamination, Is.EqualTo(100));
+            Assert.That(cooked.ToxinContamination, Is.EqualTo(6800));
+            Assert.That(ResourceBalance.CookSolidFood(
+                raw, ResourceBalance.CookedRootsItemId).IsEmpty, Is.True);
+        }
+
+        [Test]
         public void PlacementAndResearchNetworking_UseUpdatedStableContracts()
         {
             Assert.That(ResourceBalance.PlacementDistance, Is.EqualTo(10f));
             Assert.That(ResourceBalance.ResearchDurationSeconds, Is.EqualTo(6f));
-            Assert.That(QuieterConstants.ProtocolVersion, Is.EqualTo(13));
+            Assert.That(QuieterConstants.ProtocolVersion, Is.EqualTo(15));
             Assert.That(QuieterConstants.GeneratorVersion, Is.EqualTo(7));
             var catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
             Assert.That(catalog.TryGetRecipe(6, out var leanTo), Is.True);
@@ -109,6 +151,75 @@ namespace Quieter.Tests.EditMode
             Assert.That(bucket.Output.ItemId, Is.EqualTo(38));
             Assert.That(wastePit.Output.ItemId,
                 Is.EqualTo(SurvivalStructureRules.UnlinedWastePitItemId));
+        }
+
+        [Test]
+        public void BaseBuildingCatalog_ContainsEveryPhysicalStructureRecipe()
+        {
+            var catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            Assert.That(catalog, Is.Not.Null);
+            for (ushort itemId = SurvivalStructureRules.FloorItemId;
+                 itemId <= SurvivalStructureRules.LinedWastePitItemId;
+                 itemId++)
+            {
+                Assert.That(catalog.TryGetItem(itemId, out var item), Is.True,
+                    $"Missing building item {itemId}");
+                Assert.That(item.Kind, Is.EqualTo(ItemKind.Placeable));
+            }
+            for (ushort recipeId = 17; recipeId <= 29; recipeId++)
+            {
+                Assert.That(catalog.TryGetRecipe(recipeId, out var recipe), Is.True,
+                    $"Missing building recipe {recipeId}");
+                Assert.That(recipe.Category, Is.EqualTo(CraftingCategory.Structures));
+            }
+        }
+
+        [Test]
+        public void ModularBuildingParts_SnapToHalfMeterGridAndCardinalRotation()
+        {
+            var snapped = SurvivalStructureRules.SnapPlacement(
+                new Vector3(12.24f, 3.2f, -5.76f), SurvivalStructureRules.WallItemId);
+            Assert.That(snapped, Is.EqualTo(new Vector3(12f, 3.2f, -6f)));
+            Assert.That(SurvivalStructureRules.SnapYaw(
+                137f, SurvivalStructureRules.WallItemId), Is.EqualTo(180f));
+            Assert.That(SurvivalStructureRules.AllowsModularOverlap(
+                SurvivalStructureRules.WallItemId,
+                SurvivalStructureRules.FloorItemId), Is.True);
+            Assert.That(SurvivalStructureRules.AllowsModularOverlap(
+                SurvivalStructureRules.WallItemId,
+                SurvivalStructureRules.WallItemId), Is.False);
+        }
+
+        [Test]
+        public void SanitationConnections_RequireNearbyNonRisingDrainOrPit()
+        {
+            var fixture = new Vector3(0f, 10f, 0f);
+            Assert.That(SurvivalStructureRules.CanConnectSanitation(
+                SurvivalStructureRules.LatrineItemId, fixture,
+                SurvivalStructureRules.DrainItemId, new Vector3(2f, 9.8f, 0f)), Is.True);
+            Assert.That(SurvivalStructureRules.CanConnectSanitation(
+                SurvivalStructureRules.DrainItemId, new Vector3(2f, 9.8f, 0f),
+                SurvivalStructureRules.LinedWastePitItemId,
+                new Vector3(4.5f, 9.4f, 0f)), Is.True);
+            Assert.That(SurvivalStructureRules.CanConnectSanitation(
+                SurvivalStructureRules.LatrineItemId, fixture,
+                SurvivalStructureRules.DrainItemId, new Vector3(2f, 10.5f, 0f)), Is.False);
+            Assert.That(SurvivalStructureRules.CanConnectSanitation(
+                SurvivalStructureRules.LatrineItemId, fixture,
+                SurvivalStructureRules.DrainItemId, new Vector3(3f, 9.8f, 0f)), Is.False);
+        }
+
+        [Test]
+        public void LinedPitLeaksFarLessAndWaterStorageHasBoundedCapacity()
+        {
+            Assert.That(SurvivalStructureRules.WasteLeakageMultiplier(
+                SurvivalStructureRules.UnlinedWastePitItemId), Is.EqualTo(1f));
+            Assert.That(SurvivalStructureRules.WasteLeakageMultiplier(
+                SurvivalStructureRules.LinedWastePitItemId), Is.EqualTo(0.08f));
+            Assert.That(SurvivalStructureRules.WaterStorageCapacity(
+                SurvivalStructureRules.WashBasinItemId), Is.EqualTo(6000));
+            Assert.That(SurvivalStructureRules.WaterStorageCapacity(
+                SurvivalStructureRules.BarrelItemId), Is.EqualTo(60000));
         }
 
         [Test]
@@ -166,10 +277,29 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public void HoldingCell_UsesRotatedInteriorAndLockableDoorCollider()
+        {
+            var position = new Vector3(5000f, 1000f, 5000f);
+            Assert.That(SurvivalStructureRules.IsInsideHoldingCell(
+                position + new Vector3(1.5f, 1f, 0f), position, 90f), Is.True);
+            Assert.That(SurvivalStructureRules.IsInsideHoldingCell(
+                position + new Vector3(0f, 1f, 1.9f), position, 90f), Is.False);
+
+            var cell = SurvivalStructureView.Create(16,
+                SurvivalStructureRules.HoldingCellItemId, position, 0f, null, false);
+            assets.Add(cell.gameObject);
+            var door = cell.transform.Find("DoorCollision").GetComponent<Collider>();
+            cell.ApplyState(default, false);
+            Assert.That(door.enabled, Is.False);
+            cell.ApplyState(default, true);
+            Assert.That(door.enabled, Is.True);
+        }
+
+        [Test]
         public void SurvivalCrafts_RequireTimeAndPotteryRequiresFire()
         {
             var catalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
-            for (ushort recipeId = 10; recipeId <= 13; recipeId++)
+            for (ushort recipeId = 10; recipeId <= 14; recipeId++)
             {
                 Assert.That(catalog.TryGetRecipe(recipeId, out var recipe), Is.True);
                 Assert.That(recipe.WorkSeconds, Is.GreaterThanOrEqualTo(20f));

@@ -82,6 +82,7 @@ namespace Quieter.Player
         private float remoteCrouchBlend;
         private float verticalCameraOffset;
         private float verticalCameraPitch;
+        private float baseCameraFieldOfView = 60f;
         private float viewYaw;
         private float pitch;
         private float bobPhase;
@@ -100,6 +101,9 @@ namespace Quieter.Player
         private bool sampledSprint;
         private bool sampledCrouchHeld;
         private bool hasServerInput;
+        private PlayerInputFrame autonomousServerInput;
+        private uint autonomousAttackId = 0x80000000u;
+        private double autonomousInputUntil;
         private TextMesh nameLabel;
         private PlayerInventory playerInventory;
         private PlayerResourceInteraction resourceInteraction;
@@ -129,6 +133,10 @@ namespace Quieter.Player
             if (cameraPivot != null)
             {
                 cameraEyeHeight = cameraPivot.localPosition.y;
+            }
+            if (ownerCamera != null)
+            {
+                baseCameraFieldOfView = Mathf.Max(20f, ownerCamera.fieldOfView);
             }
         }
 
@@ -220,7 +228,8 @@ namespace Quieter.Player
             }
 
             SampleInput();
-            if (!SurvivalView.IsCreationOpen
+            if (!SurvivalView.IsCreationOpen && !SurvivalView.IsDeathOpen
+                && !SurvivalView.IsWorkerBookOpen
                 && (playerInventory == null || !playerInventory.IsInterfaceOpen)
                 && !ResourceMapView.IsOpen && !ResourceMapView.IsDepositOpen)
             {
@@ -230,6 +239,7 @@ namespace Quieter.Player
             {
                 if (!(resourceInteraction?.TryCancelPlacement() ?? false)
                     && !ResourceMapView.TryClose()
+                    && !SurvivalView.TryCloseWorkerBook()
                     && (playerInventory == null || !playerInventory.TryCloseInterface()))
                 {
                     LockCursor(Cursor.lockState != CursorLockMode.Locked);
@@ -251,7 +261,10 @@ namespace Quieter.Player
             var deltaTime = 1f / QuieterConstants.MovementSimulationRate;
             if (IsServer)
             {
-                var input = IsOwner ? CreateInputFrame() : GetServerInputForTick();
+                var autonomous = IsAutonomousCharacter();
+                var input = autonomous
+                    ? GetAutonomousInputForTick()
+                    : IsOwner ? CreateInputFrame() : GetServerInputForTick();
                 playerSurvival?.ServerSetCarriedMass(
                     playerInventory?.GetServerCarriedMassKg() ?? 0f);
                 SimulateFrame(ref simulatedState, input, deltaTime);
@@ -283,7 +296,7 @@ namespace Quieter.Player
                 {
                     playerSurvival?.ServerRegisterLanding(-previousVerticalVelocity);
                 }
-                playerCombat?.ServerProcessInput(input);
+                playerCombat?.ServerProcessInput(input, autonomous);
                 simulatedState.ServerTick = ++serverSimulationTick;
                 if (IsOwner || input.Sequence > simulatedState.LastProcessedSequence)
                 {
@@ -345,6 +358,55 @@ namespace Quieter.Player
             previousSimulationPosition = spawnPosition;
             currentSimulationPosition = spawnPosition;
             authoritativeState.Value = simulatedState;
+        }
+
+        public void ServerWarpTo(Vector3 position)
+        {
+            if (!IsServer || !IsFinite(position.x) || !IsFinite(position.y) || !IsFinite(position.z)) return;
+            simulatedState.Position = position;
+            simulatedState.Velocity = Vector3.zero;
+            simulatedState.Grounded = false;
+            movementMotor.Warp(simulatedState);
+            previousSimulationPosition = position;
+            currentSimulationPosition = position;
+            authoritativeState.Value = simulatedState;
+        }
+
+        public void ServerSetAutonomousInput(
+            Vector2 movement,
+            float yaw,
+            bool sprint,
+            bool attack = false,
+            bool block = false,
+            float validSeconds = 1.25f)
+        {
+            if (!IsServer || !IsAutonomousCharacter()
+                || !IsFinite(movement.x) || !IsFinite(movement.y) || !IsFinite(yaw))
+                return;
+            autonomousServerInput.Movement = Vector2.ClampMagnitude(movement, 1f);
+            autonomousServerInput.Yaw = Mathf.Repeat(yaw, 360f);
+            autonomousServerInput.Sprint = sprint;
+            autonomousServerInput.BlockHeld = block;
+            autonomousServerInput.AttackHeld = false;
+            if (attack)
+            {
+                autonomousAttackId++;
+                autonomousServerInput.AttackPressId = autonomousAttackId;
+                autonomousServerInput.AttackReleaseId = autonomousAttackId;
+            }
+            var now = NetworkManager != null
+                ? NetworkManager.ServerTime.Time : Time.timeAsDouble;
+            autonomousInputUntil = now + Mathf.Clamp(validSeconds, 0.1f, 5f);
+        }
+
+        public void ServerClearAutonomousInput()
+        {
+            if (!IsServer) return;
+            autonomousServerInput.Movement = Vector2.zero;
+            autonomousServerInput.Sprint = false;
+            autonomousServerInput.AttackHeld = false;
+            autonomousServerInput.BlockHeld = false;
+            autonomousInputUntil = 0d;
         }
 
         [ServerRpc(Delivery = RpcDelivery.Unreliable)]
@@ -441,11 +503,13 @@ namespace Quieter.Player
             if (keyboard.aKey.isPressed) movement.x -= 1f;
             sampledMovement = ResourceMapView.IsOpen || SurvivalView.IsCreationOpen
                 || SurvivalView.IsBodyOpen || SurvivalView.IsProgressionOpen
+                || SurvivalView.IsWorkerBookOpen
                 ? Vector2.zero
                 : Vector2.ClampMagnitude(movement, 1f);
             sampledSprint = !ResourceMapView.IsOpen && keyboard.leftShiftKey.isPressed;
             var interfaceOpen = SurvivalView.IsCreationOpen || SurvivalView.IsBodyOpen
                 || SurvivalView.IsProgressionOpen
+                || SurvivalView.IsWorkerBookOpen
                 || (playerInventory != null && playerInventory.IsInterfaceOpen)
                 || ResourceMapView.IsOpen || ResourceMapView.IsDepositOpen;
             sampledCrouchHeld = !interfaceOpen && keyboard.leftCtrlKey.isPressed;
@@ -534,6 +598,30 @@ namespace Quieter.Player
             var held = latestServerInput;
             held.Sequence = simulatedState.LastProcessedSequence;
             return ApplyInputTimeout(held);
+        }
+
+        private PlayerInputFrame GetAutonomousInputForTick()
+        {
+            var now = NetworkManager != null
+                ? NetworkManager.ServerTime.Time : Time.timeAsDouble;
+            var input = autonomousServerInput;
+            if (now > autonomousInputUntil)
+            {
+                input.Movement = Vector2.zero;
+                input.Sprint = false;
+                input.AttackHeld = false;
+                input.BlockHeld = false;
+            }
+            input.Sequence = simulatedState.LastProcessedSequence + 1;
+            input.SampledServerTime = now;
+            return input;
+        }
+
+        private bool IsAutonomousCharacter()
+        {
+            var state = playerSurvival?.ServerState;
+            return state != null && state.ControlKind is CharacterControlKind.FreeNpc
+                or CharacterControlKind.ContractedNpc or CharacterControlKind.ForcedNpc;
         }
 
         private PlayerInputFrame ApplyInputTimeout(PlayerInputFrame input)
@@ -751,10 +839,31 @@ namespace Quieter.Player
             cameraPivot.position = bodyPosition
                 + Vector3.up * (cameraEyeHeight + renderedStepOffset + verticalCameraOffset)
                 + viewRotation * bobPose.PositionOffset;
-            cameraPivot.rotation = Quaternion.Euler(
+            var cameraRotation = Quaternion.Euler(
                 pitch + bobPose.RotationOffset.x + verticalCameraPitch,
                 viewYaw + bobPose.RotationOffset.y,
                 bobPose.RotationOffset.z);
+            var symptoms = playerSurvival != null
+                ? playerSurvival.OwnerCondition.Symptoms
+                : SymptomFlags.None;
+            if (ClientPreferences.CameraShakeEnabled)
+            {
+                var shake = ConditionCameraEffects.CalculateShake(symptoms, Time.unscaledTime);
+                cameraPivot.position += cameraRotation * shake.Position;
+                cameraRotation *= Quaternion.Euler(shake.Rotation);
+            }
+            cameraPivot.rotation = cameraRotation;
+
+            if (ownerCamera != null)
+            {
+                var targetFieldOfView = ClientPreferences.FocusEffectsEnabled
+                    ? ConditionCameraEffects.CalculateFieldOfView(baseCameraFieldOfView, symptoms)
+                    : baseCameraFieldOfView;
+                ownerCamera.fieldOfView = Mathf.Lerp(
+                    ownerCamera.fieldOfView,
+                    targetFieldOfView,
+                    1f - Mathf.Exp(-5f * Time.unscaledDeltaTime));
+            }
         }
 
         private void CommitPendingCameraStep()

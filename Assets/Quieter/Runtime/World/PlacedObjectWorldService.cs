@@ -18,9 +18,12 @@ namespace Quieter.World
         private sealed class RuntimeObject
         {
             public ulong ObjectId;
+            public string OwnerAccountId = string.Empty;
+            public string AssignedCharacterId = string.Empty;
             public ushort ItemId;
             public Vector3 Position;
             public float Yaw;
+            public bool Locked;
             public ItemStackState Input;
             public ulong BusyClientId = ulong.MaxValue;
             public DateTime CreatedAtUtc;
@@ -79,9 +82,12 @@ namespace Quieter.World
                 var runtime = new RuntimeObject
                 {
                     ObjectId = objectId,
+                    OwnerAccountId = entry.OwnerAccountId ?? string.Empty,
+                    AssignedCharacterId = entry.AssignedCharacterId ?? string.Empty,
                     ItemId = entry.ItemId,
                     Position = new Vector3(entry.X, entry.Y, entry.Z),
                     Yaw = entry.Yaw,
+                    Locked = entry.Locked && SurvivalStructureRules.SupportsLock(entry.ItemId),
                     Input = FromStoredStack(entry.Input),
                     CreatedAtUtc = ParseDate(entry.CreatedAtUtc),
                     UpdatedAtUtc = ParseDate(entry.UpdatedAtUtc),
@@ -142,6 +148,20 @@ namespace Quieter.World
             return false;
         }
 
+        public bool TryGetStructureSecurity(
+            ulong objectId, out bool locked, out bool ownedBySomeone)
+        {
+            if (objects.TryGetValue(objectId, out var state))
+            {
+                locked = state.Locked;
+                ownedBySomeone = !string.IsNullOrWhiteSpace(state.OwnerAccountId);
+                return true;
+            }
+            locked = false;
+            ownedBySomeone = false;
+            return false;
+        }
+
         public bool IsResearchTable(ulong objectId) => objects.TryGetValue(objectId, out var state)
             && state.ItemId == ResourceBalance.ResearchTableItemId;
 
@@ -149,6 +169,7 @@ namespace Quieter.World
             Vector3 position,
             float yaw,
             ushort itemId,
+            string ownerAccountId,
             out ulong objectId)
         {
             objectId = 0;
@@ -167,6 +188,7 @@ namespace Quieter.World
             var state = new RuntimeObject
             {
                 ObjectId = objectId,
+                OwnerAccountId = ownerAccountId ?? string.Empty,
                 ItemId = itemId,
                 Position = position,
                 Yaw = Mathf.Repeat(yaw, 360f),
@@ -181,8 +203,222 @@ namespace Quieter.World
             return true;
         }
 
+        public bool TryPlace(
+            Vector3 position, float yaw, ushort itemId, out ulong objectId) =>
+            TryPlace(position, yaw, itemId, string.Empty, out objectId);
+
         public bool TryPlace(Vector3 position, float yaw, out ulong objectId) => TryPlace(
-            position, yaw, ResourceBalance.ResearchTableItemId, out objectId);
+            position, yaw, ResourceBalance.ResearchTableItemId, string.Empty, out objectId);
+
+        public bool TryAssignNearestOwnedBed(
+            Vector3 position, string ownerAccountId, string characterId,
+            out ulong objectId, out string error)
+        {
+            objectId = 0;
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer
+                || string.IsNullOrWhiteSpace(ownerAccountId)
+                || string.IsNullOrWhiteSpace(characterId))
+            {
+                error = "Кровать нельзя назначить.";
+                return false;
+            }
+            RuntimeObject closest = null;
+            var closestSquared = 12f * 12f;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.BedItemId
+                    || !string.Equals(state.OwnerAccountId, ownerAccountId,
+                        StringComparison.Ordinal)
+                    || !string.IsNullOrWhiteSpace(state.AssignedCharacterId)
+                        && !string.Equals(state.AssignedCharacterId, characterId,
+                            StringComparison.OrdinalIgnoreCase)) continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                closest = state;
+            }
+            if (closest == null)
+            {
+                error = "Рядом нет свободной принадлежащей вам кровати.";
+                return false;
+            }
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.BedItemId
+                    || state.ObjectId == closest.ObjectId
+                    || !string.Equals(state.OwnerAccountId, ownerAccountId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(state.AssignedCharacterId, characterId,
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                state.AssignedCharacterId = string.Empty;
+                Touch(state);
+            }
+            closest.AssignedCharacterId = characterId;
+            Touch(closest);
+            objectId = closest.ObjectId;
+            return true;
+        }
+
+        public bool HasOwnedBedAssigned(string ownerAccountId, string characterId)
+        {
+            if (string.IsNullOrWhiteSpace(ownerAccountId)
+                || string.IsNullOrWhiteSpace(characterId)) return false;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId == SurvivalStructureRules.BedItemId
+                    && string.Equals(state.OwnerAccountId, ownerAccountId,
+                        StringComparison.Ordinal)
+                    && string.Equals(state.AssignedCharacterId, characterId,
+                        StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        public bool TrySetHoldingCellLocked(
+            ulong objectId, string actorAccountId, bool locked, out string error)
+        {
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.HoldingCellItemId)
+            {
+                error = "Камера больше не существует.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(actorAccountId)
+                || !string.Equals(state.OwnerAccountId, actorAccountId, StringComparison.Ordinal))
+            {
+                error = "Замок принадлежит другому владельцу.";
+                return false;
+            }
+            if (state.Locked == locked) return true;
+            state.Locked = locked;
+            Touch(state);
+            return true;
+        }
+
+        public bool TrySetOwnedStructureLocked(
+            ulong objectId, string actorAccountId, bool locked, out string error)
+        {
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer
+                || !objects.TryGetValue(objectId, out var state)
+                || !SurvivalStructureRules.SupportsLock(state.ItemId))
+            {
+                error = "Замок больше не существует.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(actorAccountId)
+                || !string.Equals(state.OwnerAccountId, actorAccountId, StringComparison.Ordinal))
+            {
+                error = "Замок принадлежит другому владельцу.";
+                return false;
+            }
+            if (state.Locked == locked) return true;
+            state.Locked = locked;
+            Touch(state);
+            return true;
+        }
+
+        public bool TryInsertChestItem(
+            ulong objectId, string actorAccountId, ItemStackState stack, out string error)
+        {
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer || stack.IsEmpty
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.ChestItemId)
+            {
+                error = "Сундук недоступен.";
+                return false;
+            }
+            if (state.Locked && !string.Equals(
+                    state.OwnerAccountId, actorAccountId ?? string.Empty, StringComparison.Ordinal))
+            {
+                error = "Сундук заперт владельцем.";
+                return false;
+            }
+            if (!state.Input.IsEmpty)
+            {
+                error = "В этом простом сундуке уже занят отсек.";
+                return false;
+            }
+            state.Input = stack;
+            Touch(state);
+            return true;
+        }
+
+        public bool TryTakeChestItem(
+            ulong objectId, string actorAccountId, out ItemStackState stack, out string error)
+        {
+            stack = default;
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.ChestItemId)
+            {
+                error = "Сундук недоступен.";
+                return false;
+            }
+            if (state.Locked && !string.Equals(
+                    state.OwnerAccountId, actorAccountId ?? string.Empty, StringComparison.Ordinal))
+            {
+                error = "Сундук заперт владельцем.";
+                return false;
+            }
+            if (state.Input.IsEmpty)
+            {
+                error = "Сундук пуст.";
+                return false;
+            }
+            stack = state.Input;
+            state.Input = default;
+            Touch(state);
+            return true;
+        }
+
+        public bool TryFindOwnedLockedHoldingCell(
+            Vector3 position, string ownerAccountId, out ulong objectId)
+        {
+            objectId = 0;
+            if (string.IsNullOrWhiteSpace(ownerAccountId)) return false;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.HoldingCellItemId || !state.Locked
+                    || !string.Equals(state.OwnerAccountId, ownerAccountId, StringComparison.Ordinal)
+                    || !SurvivalStructureRules.IsInsideHoldingCell(
+                        position, state.Position, state.Yaw)) continue;
+                objectId = state.ObjectId;
+                return true;
+            }
+            return false;
+        }
+
+        public bool IsInsideOwnedLockedHoldingCell(
+            ulong objectId, Vector3 position, string ownerAccountId)
+        {
+            return objectId != 0 && objects.TryGetValue(objectId, out var state)
+                && state.ItemId == SurvivalStructureRules.HoldingCellItemId && state.Locked
+                && string.Equals(state.OwnerAccountId, ownerAccountId, StringComparison.Ordinal)
+                && SurvivalStructureRules.IsInsideHoldingCell(position, state.Position, state.Yaw);
+        }
+
+        public bool TryRemoveJustPlaced(ulong objectId, string ownerAccountId)
+        {
+            if (networkManager == null || !networkManager.IsServer
+                || !objects.TryGetValue(objectId, out var state) || state.IsBusy
+                || !state.Input.IsEmpty
+                || !string.Equals(state.OwnerAccountId, ownerAccountId ?? string.Empty,
+                    StringComparison.Ordinal)) return false;
+            objects.Remove(objectId);
+            if (views.Remove(objectId, out var view) && view != null) Destroy(view.gameObject);
+            if (structureViews.Remove(objectId, out var structure) && structure != null)
+                Destroy(structure.gameObject);
+            MarkDirty(objectId, fullSave: true);
+            BroadcastSnapshot();
+            Changed?.Invoke();
+            return true;
+        }
 
         public bool CanAcceptFuel(ulong objectId, ushort itemId)
         {
@@ -238,6 +474,70 @@ namespace Quieter.World
             return objectId != 0;
         }
 
+        public bool TryFindClosestOwnedStructure(
+            ushort itemId, Vector3 position, float radius, string ownerAccountId,
+            out ulong objectId, out Vector3 structurePosition)
+        {
+            objectId = 0;
+            structurePosition = default;
+            var closestSquared = Mathf.Max(0f, radius) * Mathf.Max(0f, radius);
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != itemId
+                    || !string.Equals(state.OwnerAccountId, ownerAccountId ?? string.Empty,
+                        StringComparison.Ordinal)) continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                objectId = state.ObjectId;
+                structurePosition = state.Position;
+            }
+            return objectId != 0;
+        }
+
+        public bool TryFindClosestOwnedWastePit(
+            Vector3 position, float radius, string ownerAccountId,
+            out ulong objectId, out Vector3 pitPosition)
+        {
+            objectId = 0;
+            pitPosition = default;
+            var closestSquared = Mathf.Max(0f, radius) * Mathf.Max(0f, radius);
+            foreach (var state in objects.Values)
+            {
+                if (!SurvivalStructureRules.IsWastePit(state.ItemId)
+                    || !string.Equals(state.OwnerAccountId, ownerAccountId ?? string.Empty,
+                        StringComparison.Ordinal)) continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                objectId = state.ObjectId;
+                pitPosition = state.Position;
+            }
+            return objectId != 0;
+        }
+
+        public bool CanPlaceStructure(Vector3 position, ushort itemId)
+        {
+            if (!SurvivalStructureRules.SupportsPlacement(itemId) || definition.WorldId == 0
+                || position.x < definition.WorldMinimum.x + 1f
+                || position.x > definition.WorldMaximum.x - 1f
+                || position.z < definition.WorldMinimum.z + 1f
+                || position.z > definition.WorldMaximum.z - 1f) return false;
+            var radius = Mathf.Max(
+                SurvivalStructureRules.PlacementHalfExtents(itemId).x,
+                SurvivalStructureRules.PlacementHalfExtents(itemId).z);
+            foreach (var state in objects.Values)
+            {
+                var other = SurvivalStructureRules.PlacementHalfExtents(state.ItemId);
+                var otherRadius = Mathf.Max(other.x, other.z);
+                var delta = state.Position - position;
+                delta.y = 0f;
+                if (delta.sqrMagnitude < Mathf.Pow(radius + otherRadius + 0.35f, 2f))
+                    return false;
+            }
+            return true;
+        }
+
         public bool CanInteract(ulong objectId, Transform actor, float maximumDistance)
         {
             if (actor == null || !objects.TryGetValue(objectId, out var state)
@@ -264,7 +564,7 @@ namespace Quieter.World
             position = default;
             availableMilliliters = 0;
             if (!objects.TryGetValue(objectId, out var state)
-                || state.ItemId != SurvivalStructureRules.UnlinedWastePitItemId)
+                || !SurvivalStructureRules.IsWastePit(state.ItemId))
             {
                 return false;
             }
@@ -275,6 +575,180 @@ namespace Quieter.World
             availableMilliliters = (ushort)Mathf.Max(
                 0, SurvivalStructureRules.WastePitCapacityMilliliters - contents);
             return availableMilliliters > 0;
+        }
+
+        public bool TryRouteSanitaryWaste(
+            ulong fixtureObjectId,
+            ushort milliliters,
+            float biologicalLoad,
+            float toxinLoad,
+            out ulong destinationPitId,
+            out string error)
+        {
+            destinationPitId = 0;
+            error = string.Empty;
+            if (networkManager == null || !networkManager.IsServer || milliliters == 0
+                || !objects.TryGetValue(fixtureObjectId, out var fixture)
+                || !SurvivalStructureRules.IsSanitaryFixture(fixture.ItemId))
+            {
+                error = "Санитарный узел недоступен.";
+                return false;
+            }
+
+            var frontier = new Queue<RuntimeObject>();
+            var visited = new HashSet<ulong> { fixture.ObjectId };
+            frontier.Enqueue(fixture);
+            while (frontier.Count > 0)
+            {
+                var current = frontier.Dequeue();
+                foreach (var candidate in objects.Values)
+                {
+                    if (visited.Contains(candidate.ObjectId)
+                        || !string.Equals(candidate.OwnerAccountId, fixture.OwnerAccountId,
+                            StringComparison.Ordinal)
+                        || !SurvivalStructureRules.CanConnectSanitation(
+                            current.ItemId, current.Position,
+                            candidate.ItemId, candidate.Position)) continue;
+                    visited.Add(candidate.ObjectId);
+                    if (SurvivalStructureRules.IsWastePit(candidate.ItemId))
+                    {
+                        if (!TryDepositWaste(candidate.ObjectId, milliliters,
+                                biologicalLoad, toxinLoad))
+                        {
+                            error = "Выгребная яма переполнена.";
+                            return false;
+                        }
+                        destinationPitId = candidate.ObjectId;
+                        return true;
+                    }
+                    if (candidate.ItemId == SurvivalStructureRules.DrainItemId)
+                        frontier.Enqueue(candidate);
+                }
+            }
+            error = "Нет непрерывного уклона от санитарного узла к выгребной яме.";
+            return false;
+        }
+
+        public bool TryStoreWater(
+            ulong objectId,
+            ushort milliliters,
+            float biologicalLoad,
+            float toxinLoad)
+        {
+            if (networkManager == null || !networkManager.IsServer || milliliters == 0
+                || !float.IsFinite(biologicalLoad) || !float.IsFinite(toxinLoad)
+                || !objects.TryGetValue(objectId, out var state)
+                || !SurvivalStructureRules.StoresWater(state.ItemId)) return false;
+            var capacity = SurvivalStructureRules.WaterStorageCapacity(state.ItemId);
+            var oldVolume = state.Input.LiquidKind == LiquidKind.Water
+                ? state.Input.LiquidMilliliters : 0;
+            if (oldVolume + milliliters > capacity
+                || !state.Input.IsEmpty && state.Input.LiquidKind is not (
+                    LiquidKind.None or LiquidKind.Water))
+                return false;
+            var newVolume = oldVolume + milliliters;
+            var mixedBiological = (state.Input.BiologicalContamination / 10000f
+                    * oldVolume + Mathf.Clamp01(biologicalLoad) * milliliters)
+                / newVolume;
+            var mixedToxins = (state.Input.ToxinContamination / 10000f
+                    * oldVolume + Mathf.Clamp01(toxinLoad) * milliliters)
+                / newVolume;
+            state.Input = new ItemStackState(
+                30, 1, freshness: 10000,
+                biologicalContamination: (ushort)Mathf.RoundToInt(
+                    mixedBiological * 10000f),
+                toxinContamination: (ushort)Mathf.RoundToInt(mixedToxins * 10000f),
+                cleanliness: 10000,
+                liquidMilliliters: (ushort)newVolume,
+                liquidKind: LiquidKind.Water);
+            Touch(state);
+            return true;
+        }
+
+        public bool TryGetWaterStorage(
+            ulong objectId,
+            out Vector3 position,
+            out ushort storedMilliliters,
+            out ushort availableMilliliters)
+        {
+            position = default;
+            storedMilliliters = 0;
+            availableMilliliters = 0;
+            if (!objects.TryGetValue(objectId, out var state)
+                || !SurvivalStructureRules.StoresWater(state.ItemId)) return false;
+            position = state.Position;
+            storedMilliliters = state.Input.LiquidKind == LiquidKind.Water
+                ? state.Input.LiquidMilliliters : (ushort)0;
+            availableMilliliters = (ushort)Mathf.Max(0,
+                SurvivalStructureRules.WaterStorageCapacity(state.ItemId)
+                - storedMilliliters);
+            return true;
+        }
+
+        public bool TryDrawStoredWater(
+            ulong objectId,
+            ushort requestedMilliliters,
+            Func<ushort, float, float, bool> receiver,
+            out ushort transferredMilliliters)
+        {
+            transferredMilliliters = 0;
+            if (networkManager == null || !networkManager.IsServer
+                || requestedMilliliters == 0 || receiver == null
+                || !objects.TryGetValue(objectId, out var state)
+                || !SurvivalStructureRules.StoresWater(state.ItemId)
+                || state.Input.LiquidKind != LiquidKind.Water
+                || state.Input.LiquidMilliliters == 0) return false;
+            var amount = (ushort)Mathf.Min(requestedMilliliters,
+                state.Input.LiquidMilliliters);
+            if (!receiver(amount,
+                    state.Input.BiologicalContamination / 10000f,
+                    state.Input.ToxinContamination / 10000f)) return false;
+            state.Input.LiquidMilliliters -= amount;
+            if (state.Input.LiquidMilliliters == 0) state.Input.LiquidKind = LiquidKind.None;
+            transferredMilliliters = amount;
+            Touch(state);
+            return true;
+        }
+
+        public bool TryConsumeBasinWater(
+            ulong objectId,
+            ushort milliliters,
+            out float biologicalLoad,
+            out float toxinLoad)
+        {
+            biologicalLoad = 0f;
+            toxinLoad = 0f;
+            if (networkManager == null || !networkManager.IsServer || milliliters == 0
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.WashBasinItemId
+                || state.Input.LiquidKind != LiquidKind.Water
+                || state.Input.LiquidMilliliters < milliliters) return false;
+            biologicalLoad = state.Input.BiologicalContamination / 10000f;
+            toxinLoad = state.Input.ToxinContamination / 10000f;
+            state.Input.LiquidMilliliters -= milliliters;
+            state.Input.BiologicalContamination = (ushort)Mathf.Max(
+                state.Input.BiologicalContamination, 800);
+            state.Input.Cleanliness = (ushort)Mathf.Max(0, state.Input.Cleanliness - 250);
+            if (state.Input.LiquidMilliliters == 0) state.Input.LiquidKind = LiquidKind.None;
+            Touch(state);
+            return true;
+        }
+
+        public bool TrySampleWellWater(
+            ulong objectId,
+            float rainIntensity,
+            out float biologicalLoad,
+            out float toxinLoad)
+        {
+            biologicalLoad = 0f;
+            toxinLoad = 0f;
+            if (!objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.WellItemId) return false;
+            ResourceBalance.SampleSpringWater(
+                objectId ^ 0x7F4A7C15UL, out biologicalLoad, out toxinLoad);
+            ApplyWasteContamination(
+                state.Position, rainIntensity, ref biologicalLoad, ref toxinLoad);
+            return true;
         }
 
         public bool TryDepositWaste(
@@ -323,7 +797,7 @@ namespace Quieter.World
         {
             foreach (var state in objects.Values)
             {
-                if (state.ItemId != SurvivalStructureRules.UnlinedWastePitItemId
+                if (!SurvivalStructureRules.IsWastePit(state.ItemId)
                     || state.Input.LiquidKind != LiquidKind.Waste
                     || state.Input.LiquidMilliliters == 0)
                 {
@@ -336,6 +810,8 @@ namespace Quieter.World
                     state.Input.BiologicalContamination / 10000f,
                     state.Input.ToxinContamination / 10000f,
                     rainIntensity);
+                var lining = SurvivalStructureRules.WasteLeakageMultiplier(state.ItemId);
+                leakage = (leakage.Biological * lining, leakage.Toxins * lining);
                 biologicalLoad = Mathf.Clamp01(biologicalLoad + leakage.Biological);
                 toxinLoad = Mathf.Clamp01(toxinLoad + leakage.Toxins);
             }
@@ -349,6 +825,8 @@ namespace Quieter.World
             var windProtection = 0f;
             var externalHeat = environment.ExternalHeat;
             var smokeConcentration = environment.SmokeConcentration;
+            var modularRoof = false;
+            var surroundingWalls = 0;
             foreach (var state in objects.Values)
             {
                 if (state.ItemId == SurvivalStructureRules.LeanToItemId)
@@ -362,6 +840,28 @@ namespace Quieter.World
                         windProtection = Mathf.Max(windProtection, 0.48f);
                     }
                 }
+                else if (state.ItemId == SurvivalStructureRules.RoofItemId)
+                {
+                    var local = Quaternion.Euler(0f, -state.Yaw, 0f)
+                        * (position - state.Position);
+                    if (Mathf.Abs(local.x) <= 2.05f && Mathf.Abs(local.z) <= 2.05f
+                        && local.y >= -0.4f && local.y <= 3.2f) modularRoof = true;
+                }
+                else if (state.ItemId is SurvivalStructureRules.WallItemId
+                    or SurvivalStructureRules.DoorwayItemId)
+                {
+                    var delta = state.Position - position;
+                    delta.y = 0f;
+                    if (delta.sqrMagnitude <= 2.8f * 2.8f
+                        && Mathf.Abs(state.Position.y - position.y) <= 1.2f)
+                        surroundingWalls++;
+                }
+            }
+            if (modularRoof)
+            {
+                rainProtection = Mathf.Max(rainProtection, 0.98f);
+                windProtection = Mathf.Max(windProtection,
+                    surroundingWalls >= 4 ? 0.92f : surroundingWalls >= 2 ? 0.62f : 0.25f);
             }
             // Resolve shelter first so smoke does not depend on placement/load order.
             foreach (var state in objects.Values)
@@ -378,7 +878,8 @@ namespace Quieter.World
                             1.15f * proximity);
                         smokeConcentration = Mathf.Max(
                             smokeConcentration,
-                            proximity * (rainProtection > 0f ? 0.13f : 0.045f)
+                            proximity * (modularRoof && surroundingWalls >= 4
+                                ? 0.34f : rainProtection > 0f ? 0.13f : 0.045f)
                                 * Mathf.Lerp(1f, 0.45f,
                                     Mathf.InverseLerp(
                                         0f, 8f, environment.WindMetersPerSecond)));
@@ -615,11 +1116,14 @@ namespace Quieter.World
                 {
                     WorldId = definition.WorldId,
                     ObjectId = state.ObjectId.ToString(),
+                    OwnerAccountId = state.OwnerAccountId,
+                    AssignedCharacterId = state.AssignedCharacterId,
                     ItemId = state.ItemId,
                     X = state.Position.x,
                     Y = state.Position.y,
                     Z = state.Position.z,
                     Yaw = state.Yaw,
+                    Locked = state.Locked,
                     Input = ToStoredStack(state.Input),
                     CreatedAtUtc = state.CreatedAtUtc.ToString("O"),
                     UpdatedAtUtc = state.UpdatedAtUtc.ToString("O"),
@@ -650,6 +1154,8 @@ namespace Quieter.World
                     writer.WriteValueSafe(state.Position);
                     writer.WriteValueSafe(state.Yaw);
                     writer.WriteValueSafe(state.IsBusy);
+                    writer.WriteValueSafe(state.Locked);
+                    writer.WriteValueSafe(new FixedString64Bytes(state.AssignedCharacterId));
                     WriteSafeStack(ref writer, state.Input.ForReplication());
                 }
                 if (targets == null)
@@ -682,6 +1188,8 @@ namespace Quieter.World
                 reader.ReadValueSafe(out Vector3 position);
                 reader.ReadValueSafe(out float yaw);
                 reader.ReadValueSafe(out bool busy);
+                reader.ReadValueSafe(out bool locked);
+                reader.ReadValueSafe(out FixedString64Bytes assignedCharacterId);
                 var input = ReadSafeStack(ref reader);
                 var state = new RuntimeObject
                 {
@@ -689,6 +1197,8 @@ namespace Quieter.World
                     ItemId = itemId,
                     Position = position,
                     Yaw = yaw,
+                    Locked = locked,
+                    AssignedCharacterId = assignedCharacterId.ToString(),
                     Input = input,
                     BusyClientId = busy ? 0UL : ulong.MaxValue,
                 };
@@ -742,7 +1252,7 @@ namespace Quieter.World
                     structure.transform.SetPositionAndRotation(
                         state.Position, Quaternion.Euler(0f, state.Yaw, 0f));
                 }
-                structure.ApplyState(state.Input.ForReplication());
+                structure.ApplyState(state.Input.ForReplication(), state.Locked);
                 return;
             }
             if (!views.TryGetValue(state.ObjectId, out var view) || view == null)
@@ -766,7 +1276,7 @@ namespace Quieter.World
             if (structureViews.TryGetValue(state.ObjectId, out var structure)
                 && structure != null)
             {
-                structure.ApplyState(state.Input.ForReplication());
+                structure.ApplyState(state.Input.ForReplication(), state.Locked);
                 return;
             }
             if (views.TryGetValue(state.ObjectId, out var view) && view != null)

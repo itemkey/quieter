@@ -11,7 +11,8 @@ using UnityEngine.Networking;
 
 namespace Quieter.Persistence
 {
-    public sealed class HttpProfileRepository : IWorldRepository, IAtomicPlayerProfileRepository
+    public sealed class HttpProfileRepository : IWorldRepository, IPersistentCharacterRepository,
+        IInheritanceRepository
     {
         [Serializable]
         private sealed class WorldResponse
@@ -54,6 +55,8 @@ namespace Quieter.Persistence
             public string survivalJson;
             public string characterId;
             public long survivalRevision;
+            public string registeredHeirCharacterId;
+            public long estateRevision;
         }
 
         [Serializable]
@@ -112,6 +115,84 @@ namespace Quieter.Persistence
         }
 
         [Serializable]
+        private sealed class WorldCharacterListResponse
+        {
+            public ProfileResponse[] characters;
+        }
+
+        [Serializable]
+        private sealed class NewStrangerRequest
+        {
+            public string operationId;
+            public string previousCharacterId;
+            public long expectedRevision;
+            public PositionRequest position;
+        }
+
+        [Serializable]
+        private sealed class CharacterPairSnapshotRequest
+        {
+            public string operationId;
+            public SnapshotRequest source;
+            public string destinationSteamId;
+            public SnapshotRequest destination;
+        }
+
+        [Serializable]
+        private sealed class CreateWorldNpcRequest
+        {
+            public string name;
+            public SnapshotRequest snapshot;
+        }
+
+        [Serializable]
+        private sealed class RegisterHeirRequest
+        {
+            public string heirCharacterId;
+            public long expectedEstateRevision;
+        }
+
+        [Serializable]
+        private sealed class AssumeHeirRequest
+        {
+            public string operationId;
+            public string deceasedCharacterId;
+            public long expectedRevision;
+        }
+
+        [Serializable]
+        private sealed class CreateHeirOfferRequest
+        {
+            public string operationId;
+            public string recipientSteamId;
+            public string deceasedCharacterId;
+            public long expectedDonorEstateRevision;
+        }
+
+        [Serializable]
+        private sealed class AcceptHeirOfferRequest
+        {
+            public string operationId;
+            public string deceasedCharacterId;
+            public long expectedRevision;
+        }
+
+        [Serializable]
+        private sealed class HeirOfferResponse
+        {
+            public string offerId;
+            public string donorSteamId;
+            public string donorDisplayName;
+            public string recipientSteamId;
+            public string deceasedCharacterId;
+            public string heirCharacterId;
+            public string heirName;
+            public string offeredAtUtc;
+            public string acceptanceStartedAtUtc;
+            public string expiresAtUtc;
+        }
+
+        [Serializable]
         private sealed class ResourceNodeResponse
         {
             public string instanceId;
@@ -129,11 +210,14 @@ namespace Quieter.Persistence
         private sealed class PlacedObjectResponse
         {
             public string objectId;
+            public string ownerAccountId;
+            public string assignedCharacterId;
             public ushort itemId;
             public float x;
             public float y;
             public float z;
             public float yaw;
+            public bool locked;
             public InventorySlotResponse input;
             public string createdAtUtc;
             public string updatedAtUtc;
@@ -229,23 +313,22 @@ namespace Quieter.Persistence
                 JsonUtility.ToJson(payload));
             var responseText = await SendAsync(request, cancellationToken);
             var response = JsonUtility.FromJson<ProfileResponse>(responseText);
-            return new PlayerProfile
+            return ToProfile(response);
+        }
+
+        public async Task<IReadOnlyList<PlayerProfile>> LoadWorldCharactersAsync(
+            CancellationToken cancellationToken = default)
+        {
+            using var request = UnityWebRequest.Get(baseUrl + "/internal/world/characters");
+            var responseText = await SendAsync(request, cancellationToken);
+            var response = JsonUtility.FromJson<WorldCharacterListResponse>(responseText);
+            var result = new List<PlayerProfile>();
+            if (response?.characters == null) return result;
+            foreach (var character in response.characters)
             {
-                SteamId = ulong.Parse(response.steamId),
-                DisplayName = response.displayName,
-                Position = new Vector3(response.positionX, response.positionY, response.positionZ),
-                CreatedAtUtc = ParseDate(response.createdAtUtc),
-                LastSeenAtUtc = ParseDate(response.lastSeenAtUtc),
-                InventorySlots = ToStoredSlots(response.inventorySlots),
-                PendingItems = ToStoredSlots(response.pendingItems),
-                SelectedHotbarIndex = response.selectedHotbarIndex,
-                DepositKnowledge = ToStoredKnowledge(response.depositKnowledge),
-                MapNotes = ToStoredMapNotes(response.mapNotes),
-                Survival = ParseSurvival(
-                    response.survivalJson,
-                    response.characterId,
-                    response.survivalRevision),
-            };
+                if (character != null) result.Add(ToProfile(character));
+            }
+            return result;
         }
 
         public async Task<IReadOnlyList<StoredResourceNodeState>> LoadResourceNodeStatesAsync(
@@ -315,11 +398,14 @@ namespace Quieter.Persistence
                 {
                     WorldId = worldId,
                     ObjectId = entry.objectId,
+                    OwnerAccountId = entry.ownerAccountId,
+                    AssignedCharacterId = entry.assignedCharacterId,
                     ItemId = entry.itemId,
                     X = entry.x,
                     Y = entry.y,
                     Z = entry.z,
                     Yaw = entry.yaw,
+                    Locked = entry.locked,
                     Input = ToStoredSlot(entry.input),
                     CreatedAtUtc = entry.createdAtUtc,
                     UpdatedAtUtc = entry.updatedAtUtc,
@@ -342,11 +428,14 @@ namespace Quieter.Persistence
                     entries.Add(new PlacedObjectResponse
                     {
                         objectId = entry.ObjectId,
+                        ownerAccountId = entry.OwnerAccountId,
+                        assignedCharacterId = entry.AssignedCharacterId,
                         itemId = entry.ItemId,
                         x = entry.X,
                         y = entry.Y,
                         z = entry.Z,
                         yaw = entry.Yaw,
+                        locked = entry.Locked,
                         input = ToSlotResponse(entry.Input),
                         createdAtUtc = entry.CreatedAtUtc,
                         updatedAtUtc = entry.UpdatedAtUtc,
@@ -512,6 +601,207 @@ namespace Quieter.Persistence
             await SendAsync(request, cancellationToken);
         }
 
+        public async Task SaveDetachedCharacterAsync(
+            Vector3 position, IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems, byte selectedHotbarIndex,
+            CharacterSurvivalState survival, CancellationToken cancellationToken = default)
+        {
+            if (survival == null || string.IsNullOrWhiteSpace(survival.CharacterId))
+                throw new ArgumentException("Detached character identity is required.", nameof(survival));
+            var payload = CreateSnapshotPayload(
+                position, slots, pendingItems, selectedHotbarIndex, survival);
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/world/characters/{survival.CharacterId}/snapshot",
+                UnityWebRequest.kHttpVerbPUT, JsonUtility.ToJson(payload));
+            await SendAsync(request, cancellationToken);
+        }
+
+        public async Task<PlayerProfile> CreateNewStrangerAsync(
+            ulong steamId, string operationId, string previousCharacterId,
+            long expectedRevision, Vector3 spawn,
+            CancellationToken cancellationToken = default)
+        {
+            var payload = new NewStrangerRequest
+            {
+                operationId = operationId,
+                previousCharacterId = previousCharacterId,
+                expectedRevision = expectedRevision,
+                position = new PositionRequest { x = spawn.x, y = spawn.y, z = spawn.z },
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/players/{steamId}/new-stranger",
+                UnityWebRequest.kHttpVerbPOST, JsonUtility.ToJson(payload));
+            return ToProfile(JsonUtility.FromJson<ProfileResponse>(
+                await SendAsync(request, cancellationToken)));
+        }
+
+        public async Task SaveCharacterPairAsync(
+            string operationId, CharacterPersistenceSnapshot source,
+            ulong destinationSteamId, CharacterPersistenceSnapshot destination,
+            CancellationToken cancellationToken = default)
+        {
+            if (source?.Survival == null || destination?.Survival == null)
+                throw new ArgumentException("Both character snapshots are required.");
+            var payload = new CharacterPairSnapshotRequest
+            {
+                operationId = operationId,
+                source = CreateSnapshotPayload(source.Position, source.Slots, source.PendingItems,
+                    source.SelectedHotbarIndex, source.Survival),
+                destinationSteamId = destinationSteamId.ToString(),
+                destination = CreateSnapshotPayload(destination.Position, destination.Slots,
+                    destination.PendingItems, destination.SelectedHotbarIndex, destination.Survival),
+            };
+            var json = JsonUtility.ToJson(payload);
+            Exception lastError = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using var request = CreateJsonRequest(
+                        baseUrl + "/internal/world/character-transfer",
+                        UnityWebRequest.kHttpVerbPOST, json);
+                    await SendAsync(request, cancellationToken);
+                    return;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception exception) { lastError = exception; }
+            }
+            throw new InvalidOperationException(
+                "Character transfer could not be confirmed after idempotent retries.", lastError);
+        }
+
+        public async Task<PlayerProfile> CreateWorldNpcAsync(
+            string name, CharacterPersistenceSnapshot snapshot,
+            CancellationToken cancellationToken = default)
+        {
+            if (snapshot?.Survival == null)
+                throw new ArgumentException("NPC snapshot is missing.", nameof(snapshot));
+            var payload = new CreateWorldNpcRequest
+            {
+                name = name,
+                snapshot = CreateSnapshotPayload(
+                    snapshot.Position, snapshot.Slots, snapshot.PendingItems,
+                    snapshot.SelectedHotbarIndex, snapshot.Survival),
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/world/npcs", UnityWebRequest.kHttpVerbPOST,
+                JsonUtility.ToJson(payload));
+            return ToProfile(JsonUtility.FromJson<ProfileResponse>(
+                await SendAsync(request, cancellationToken)));
+        }
+
+        public async Task<PlayerProfile> RegisterHeirAsync(
+            ulong steamId, string heirCharacterId, long expectedEstateRevision,
+            CancellationToken cancellationToken = default)
+        {
+            var payload = new RegisterHeirRequest
+            {
+                heirCharacterId = heirCharacterId,
+                expectedEstateRevision = expectedEstateRevision,
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/players/{steamId}/heir",
+                UnityWebRequest.kHttpVerbPUT, JsonUtility.ToJson(payload));
+            return ToProfile(JsonUtility.FromJson<ProfileResponse>(
+                await SendAsync(request, cancellationToken)));
+        }
+
+        public async Task<PlayerProfile> AssumeRegisteredHeirAsync(
+            ulong steamId, string operationId, string deceasedCharacterId,
+            long expectedRevision, CancellationToken cancellationToken = default)
+        {
+            var payload = new AssumeHeirRequest
+            {
+                operationId = operationId,
+                deceasedCharacterId = deceasedCharacterId,
+                expectedRevision = expectedRevision,
+            };
+            using var request = CreateJsonRequest(
+                $"{baseUrl}/internal/players/{steamId}/assume-heir",
+                UnityWebRequest.kHttpVerbPOST, JsonUtility.ToJson(payload));
+            return ToProfile(JsonUtility.FromJson<ProfileResponse>(
+                await SendAsync(request, cancellationToken)));
+        }
+
+        public async Task<PendingHeirOffer> OfferRegisteredHeirAsync(
+            ulong donorSteamId,
+            ulong recipientSteamId,
+            string operationId,
+            string deceasedCharacterId,
+            long expectedDonorEstateRevision,
+            CancellationToken cancellationToken = default)
+        {
+            var payload = new CreateHeirOfferRequest
+            {
+                operationId = operationId,
+                recipientSteamId = recipientSteamId.ToString(),
+                deceasedCharacterId = deceasedCharacterId,
+                expectedDonorEstateRevision = expectedDonorEstateRevision,
+            };
+            var json = JsonUtility.ToJson(payload);
+            Exception lastError = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                using var request = CreateJsonRequest(
+                    $"{baseUrl}/internal/players/{donorSteamId}/heir-offers",
+                    UnityWebRequest.kHttpVerbPOST, json);
+                try
+                {
+                    return ToPendingHeirOffer(JsonUtility.FromJson<HeirOfferResponse>(
+                        await SendAsync(request, cancellationToken)));
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception exception) { lastError = exception; }
+            }
+            throw new InvalidOperationException(
+                "Heir donation could not be confirmed after idempotent retries.", lastError);
+        }
+
+        public async Task<PendingHeirOffer> GetPendingHeirOfferAsync(
+            ulong recipientSteamId,
+            CancellationToken cancellationToken = default)
+        {
+            using var request = UnityWebRequest.Get(
+                $"{baseUrl}/internal/players/{recipientSteamId}/heir-offer");
+            var response = await SendAsync(request, cancellationToken);
+            return string.IsNullOrWhiteSpace(response)
+                ? null
+                : ToPendingHeirOffer(JsonUtility.FromJson<HeirOfferResponse>(response));
+        }
+
+        public async Task<PlayerProfile> AcceptHeirOfferAsync(
+            ulong recipientSteamId,
+            string offerId,
+            string operationId,
+            string deceasedCharacterId,
+            long expectedRevision,
+            CancellationToken cancellationToken = default)
+        {
+            var payload = new AcceptHeirOfferRequest
+            {
+                operationId = operationId,
+                deceasedCharacterId = deceasedCharacterId,
+                expectedRevision = expectedRevision,
+            };
+            var json = JsonUtility.ToJson(payload);
+            Exception lastError = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                using var request = CreateJsonRequest(
+                    $"{baseUrl}/internal/players/{recipientSteamId}/heir-offers/{offerId}/accept",
+                    UnityWebRequest.kHttpVerbPOST, json);
+                try
+                {
+                    return ToProfile(JsonUtility.FromJson<ProfileResponse>(
+                        await SendAsync(request, cancellationToken)));
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception exception) { lastError = exception; }
+            }
+            throw new InvalidOperationException(
+                "Heir acceptance could not be confirmed after idempotent retries.", lastError);
+        }
+
         public async Task SaveSurvivalAsync(
             ulong steamId,
             CharacterSurvivalState survival,
@@ -556,6 +846,64 @@ namespace Quieter.Persistence
             result.Revision = Math.Max(result.Revision, revision);
             return result;
         }
+
+        private static PlayerProfile ToProfile(ProfileResponse response)
+        {
+            if (response == null) throw new InvalidOperationException("Profile response is empty.");
+            return new PlayerProfile
+            {
+                SteamId = ulong.TryParse(response.steamId, out var steamId) ? steamId : 0,
+                DisplayName = response.displayName,
+                Position = new Vector3(response.positionX, response.positionY, response.positionZ),
+                CreatedAtUtc = ParseDate(response.createdAtUtc),
+                LastSeenAtUtc = ParseDate(response.lastSeenAtUtc),
+                InventorySlots = ToStoredSlots(response.inventorySlots),
+                PendingItems = ToStoredSlots(response.pendingItems),
+                SelectedHotbarIndex = response.selectedHotbarIndex,
+                DepositKnowledge = ToStoredKnowledge(response.depositKnowledge),
+                MapNotes = ToStoredMapNotes(response.mapNotes),
+                Survival = ParseSurvival(response.survivalJson, response.characterId, response.survivalRevision),
+                RegisteredHeirCharacterId = response.registeredHeirCharacterId,
+                EstateRevision = response.estateRevision,
+            };
+        }
+
+        private static PendingHeirOffer ToPendingHeirOffer(HeirOfferResponse response)
+        {
+            if (response == null) return null;
+            return new PendingHeirOffer
+            {
+                OfferId = response.offerId,
+                DonorSteamId = ulong.TryParse(response.donorSteamId, out var donor) ? donor : 0,
+                DonorDisplayName = response.donorDisplayName,
+                RecipientSteamId = ulong.TryParse(response.recipientSteamId, out var recipient)
+                    ? recipient : 0,
+                DeceasedCharacterId = response.deceasedCharacterId,
+                HeirCharacterId = response.heirCharacterId,
+                HeirName = response.heirName,
+                OfferedAtUtc = ParseDate(response.offeredAtUtc),
+                AcceptanceStartedAtUtc = ParseDate(response.acceptanceStartedAtUtc),
+                ExpiresAtUtc = ParseDate(response.expiresAtUtc),
+            };
+        }
+
+        private static SnapshotRequest CreateSnapshotPayload(
+            Vector3 position, IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems, byte selectedHotbarIndex,
+            CharacterSurvivalState survival) => new()
+        {
+            characterId = survival.CharacterId,
+            position = new PositionRequest { x = position.x, y = position.y, z = position.z },
+            inventory = new InventoryRequest
+            {
+                selectedHotbarIndex = selectedHotbarIndex,
+                slots = ToSlotResponses(slots), pendingItems = ToSlotResponses(pendingItems),
+            },
+            survival = new SurvivalRequest
+            {
+                survivalJson = JsonUtility.ToJson(survival), revision = survival.Revision,
+            },
+        };
 
         private static List<StoredInventorySlot> ToStoredSlots(InventorySlotResponse[] slots)
         {

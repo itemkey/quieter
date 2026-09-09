@@ -1,5 +1,6 @@
 using NUnit.Framework;
 using Quieter.Player;
+using Quieter.Survival;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -437,6 +438,34 @@ namespace Quieter.Tests
                 Assert.That(batch[index].Sequence, Is.EqualTo((uint)(10 + index)));
                 Assert.That(batch[index].CrouchHeld, Is.EqualTo((10 + index) % 2 == 0));
             }
+        }
+
+        [Test]
+        public void ConditionCameraEffects_AreAbsentWithoutSymptoms()
+        {
+            var pose = ConditionCameraEffects.CalculateShake(SymptomFlags.None, 12.5f);
+
+            Assert.That(pose.Position, Is.EqualTo(Vector3.zero));
+            Assert.That(pose.Rotation, Is.EqualTo(Vector3.zero));
+            Assert.That(
+                ConditionCameraEffects.CalculateFieldOfView(60f, SymptomFlags.None),
+                Is.EqualTo(60f));
+        }
+
+        [Test]
+        public void ConditionCameraEffects_CommunicateDangerWithoutExtremeMotion()
+        {
+            var symptoms = SymptomFlags.Shivering
+                | SymptomFlags.SeverePain
+                | SymptomFlags.Dizzy
+                | SymptomFlags.TunnelVision;
+            var pose = ConditionCameraEffects.CalculateShake(symptoms, 7.25f);
+
+            Assert.That(pose.Position.magnitude, Is.GreaterThan(0f).And.LessThan(0.03f));
+            Assert.That(pose.Rotation.magnitude, Is.GreaterThan(0f).And.LessThan(1.5f));
+            Assert.That(
+                ConditionCameraEffects.CalculateFieldOfView(60f, symptoms),
+                Is.EqualTo(48f));
         }
     }
 }

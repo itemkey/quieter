@@ -31,6 +31,12 @@ MonoBehaviour:
   unitVolumeLiters: 0.25
   caloriesPerUnit: 0
   proteinGramsPerUnit: 0
+  fatGramsPerUnit: 0
   micronutrientsPerUnit: 0
+  mineralsPerUnit: 0
   waterLitersPerUnit: 0
   liquidCapacityMilliliters: 1200
+  insulation: 0
+  waterResistance: 0
+  shelfLifeGameHours: 0
+  clothingLayer: 0

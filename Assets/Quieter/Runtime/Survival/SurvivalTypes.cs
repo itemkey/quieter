@@ -196,6 +196,11 @@ namespace Quieter.Survival
         LosingConsciousness = 1 << 23,
         AgonalBreathing = 1 << 24,
         SmokeIrritation = 1 << 25,
+        Cough = 1 << 26,
+        AbdominalCramps = 1 << 27,
+        Diarrhea = 1 << 28,
+        ParasiteSigns = 1 << 29,
+        NutritionalDeficiency = 1 << 30,
     }
 
     public enum MedicalActionType : byte
@@ -213,6 +218,7 @@ namespace Quieter.Survival
         OralRehydration,
         HerbalPainRelief,
         DentalExtraction,
+        AntiparasiticCourse,
     }
 
     [Serializable]
@@ -273,13 +279,17 @@ namespace Quieter.Survival
         [Range(0f, 1f)] public float StomachFullness = 0.65f;
         [Range(0f, 1f)] public float EnergyReserve = 0.85f;
         [Range(0f, 1f)] public float ProteinReserve = 0.8f;
+        [Range(0f, 1f)] public float FatReserve = 0.8f;
         [Range(0f, 1f)] public float MicronutrientReserve = 0.8f;
+        [Range(0f, 1f)] public float MineralReserve = 0.8f;
         [Range(0f, 1f)] public float SleepDebt;
         [Range(0f, 1f)] public float BladderFill = 0.15f;
         [Range(0f, 1f)] public float BowelFill = 0.2f;
         [Range(0f, 1f)] public float HandCleanliness = 0.75f;
         [Range(0f, 1f)] public float BodyCleanliness = 0.8f;
         [Range(0f, 1f)] public float DentalHealth = 0.85f;
+        [Range(0f, 1f)] public float DentalInfection;
+        [Range(0, 32)] public byte MissingTeeth;
         [Range(0f, 1f)] public float ImmuneReserve = 1f;
         [Min(0f)] public float CarriedMassKg;
         [Range(0f, 1f)] public float SystemicInfection;
@@ -297,6 +307,24 @@ namespace Quieter.Survival
         public bool SleepCycleConsolidated;
         public CharacterLifeState LifeState = CharacterLifeState.Conscious;
         public DeathCause DeathCause;
+    }
+
+    [Serializable]
+    public sealed class ConditionState
+    {
+        [Range(0f, 1f)] public float FoodborneInfection;
+        [Range(0f, 1f)] public float WaterborneInfection;
+        [Range(0f, 1f)] public float ParasiteLoad;
+        [Range(0f, 1f)] public float RespiratoryInfection;
+        [Min(0f)] public float WarmingCareSeconds;
+        [Min(0f)] public float CoolingCareSeconds;
+        [Min(0f)] public float HerbalAnalgesiaSeconds;
+        [Range(0f, 1f)] public float HerbalAnalgesiaStrength;
+        [Min(0f)] public float AntiparasiticCourseSeconds;
+        [Range(0f, 1f)] public float AntiparasiticCourseStrength;
+
+        public float GastrointestinalInfection
+            => Mathf.Max(FoodborneInfection, WaterborneInfection);
     }
 
     [Serializable]
@@ -354,16 +382,27 @@ namespace Quieter.Survival
     {
         public string CharacterId = string.Empty;
         public string CharacterName = string.Empty;
+        public CharacterControlKind ControlKind;
         public List<TraitId> Traits = new();
         public PhysiologyState Physiology = new();
         public AnatomyState Anatomy = new();
+        public ConditionState Conditions = new();
         public CharacterProgressionState Progression = new();
+        public List<RelationshipState> Relationships = new();
+        public WorkerContractState WorkerContract;
+        public NpcRuntimeState Npc;
+        public CorpseState Corpse;
         public bool Sleeping;
         public bool Offline;
         public bool Bound;
         public bool Captive;
         public string CaptorCharacterId = string.Empty;
+        public string CaptorAccountId = string.Empty;
+        public string CaptureCellObjectId = string.Empty;
         public string CaptureStartedAtUtc = string.Empty;
+        public CaptureStatus CaptureStatus;
+        public long CaptureRevision;
+        public string CarriedByCharacterId = string.Empty;
         public long Revision;
         public bool CreationCompleted;
 
@@ -373,8 +412,19 @@ namespace Quieter.Survival
             Physiology ??= new PhysiologyState();
             Anatomy ??= new AnatomyState();
             Anatomy.Wounds ??= new List<WoundState>();
+            Conditions ??= new ConditionState();
             Progression ??= new CharacterProgressionState();
             Progression.EnsureInitialized();
+            Relationships ??= new List<RelationshipState>();
+            WorkerContract?.EnsureInitialized();
+            if (ControlKind is CharacterControlKind.FreeNpc
+                or CharacterControlKind.ContractedNpc or CharacterControlKind.ForcedNpc)
+            {
+                Npc ??= new NpcRuntimeState();
+                Npc.EnsureInitialized();
+            }
+            if (Physiology.LifeState == CharacterLifeState.Dead)
+                Corpse ??= new CorpseState();
         }
     }
 
@@ -453,7 +503,11 @@ namespace Quieter.Survival
             bool hasDisinfectant = false,
             bool hasNeedleAndThread = false,
             bool hasBandage = false,
-            bool hasSplint = false)
+            bool hasSplint = false,
+            float practitionerHandCleanliness = 1f,
+            bool hasSalt = false,
+            bool hasHerbs = false,
+            bool hasHeatSource = false)
         {
             Skill = Mathf.Clamp01(skill);
             MaterialCleanliness = Mathf.Clamp01(materialCleanliness);
@@ -462,6 +516,10 @@ namespace Quieter.Survival
             HasNeedleAndThread = hasNeedleAndThread;
             HasBandage = hasBandage;
             HasSplint = hasSplint;
+            PractitionerHandCleanliness = Mathf.Clamp01(practitionerHandCleanliness);
+            HasSalt = hasSalt;
+            HasHerbs = hasHerbs;
+            HasHeatSource = hasHeatSource;
         }
 
         public float Skill { get; }
@@ -471,6 +529,10 @@ namespace Quieter.Survival
         public bool HasNeedleAndThread { get; }
         public bool HasBandage { get; }
         public bool HasSplint { get; }
+        public float PractitionerHandCleanliness { get; }
+        public bool HasSalt { get; }
+        public bool HasHerbs { get; }
+        public bool HasHeatSource { get; }
     }
 
     public readonly struct TreatmentResult

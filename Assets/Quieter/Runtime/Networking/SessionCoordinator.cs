@@ -35,6 +35,9 @@ namespace Quieter.Networking
             public PlayerResourceInteraction ResourceInteraction;
             public PlayerSurvival Survival;
             public Task FinalSaveTask;
+            public string RegisteredHeirCharacterId;
+            public long EstateRevision;
+            public PendingHeirOffer PendingHeirOffer;
         }
 
         private sealed class PlayerSaveSnapshot
@@ -47,17 +50,26 @@ namespace Quieter.Networking
             public byte SelectedHotbarIndex;
             public Task KnowledgeSaveTask;
             public CharacterSurvivalState Survival;
+            public bool Detached;
         }
 
         private readonly Dictionary<ulong, double> pendingClients = new();
         private readonly Dictionary<ulong, AuthenticatedClient> authenticatedClients = new();
         private readonly Dictionary<ulong, AuthenticatedClient> offlineBodies = new();
+        private readonly Dictionary<string, AuthenticatedClient> detachedBodies = new();
+        private readonly HashSet<ulong> newLifeClients = new();
+        private readonly HashSet<ulong> inheritanceAccounts = new();
+        private readonly HashSet<ulong> heirRegistrationAccounts = new();
+        private readonly HashSet<ulong> heirDonationAccounts = new();
         private readonly Dictionary<ulong, ulong> authenticatingSteamIds = new();
         private readonly HashSet<ulong> authenticatingClients = new();
         private readonly Dictionary<ulong, SemaphoreSlim> playerSaveGates = new();
         private readonly Dictionary<ulong, long> playerSaveRevisions = new();
         private readonly Dictionary<ulong, long> persistedPlayerSaveRevisions = new();
+        private readonly Dictionary<string, long> detachedSaveRevisions = new();
+        private readonly Dictionary<string, long> persistedDetachedSaveRevisions = new();
         private readonly HashSet<Task> pendingFinalSaveTasks = new();
+        private readonly SemaphoreSlim characterTransferGate = new(1, 1);
         private readonly CancellationTokenSource lifetime = new();
 
         private NetworkManager networkManager;
@@ -80,7 +92,10 @@ namespace Quieter.Networking
         private bool shuttingDown;
         private bool shutdownSaveCompleted;
         private bool messagesRegistered;
+        private IReadOnlyList<PlayerProfile> persistentCharacters = Array.Empty<PlayerProfile>();
         private float nextPositionSaveAt;
+        private double nextNpcArrivalGameSeconds;
+        private bool npcArrivalRunning;
         private string lastRejection = string.Empty;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private bool developmentLootSpawned;
@@ -151,6 +166,12 @@ namespace Quieter.Networking
 
             await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             await placedObjects.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
+            if (playerRepository is IPersistentCharacterRepository characterRepository)
+            {
+                persistentCharacters = await characterRepository.LoadWorldCharactersAsync(lifetime.Token);
+                persistentCharacters = await EnsureFreeNpcPopulationAsync(
+                    characterRepository, persistentCharacters, lifetime.Token);
+            }
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, false);
             transport.SetConnectionData("0.0.0.0", port, "0.0.0.0");
             if (!TransportSecurityConfigurator.ConfigureServerFromEnvironment(transport))
@@ -254,6 +275,12 @@ namespace Quieter.Networking
             FindAnyObjectByType<WorldWeatherService>()?.Initialize(worldDefinition.Seed);
             await resourceWorld.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
             await placedObjects.InitializeServerAsync(worldDefinition, worldRepository, lifetime.Token);
+            if (playerRepository is IPersistentCharacterRepository characterRepository)
+            {
+                persistentCharacters = await characterRepository.LoadWorldCharactersAsync(lifetime.Token);
+                persistentCharacters = await EnsureFreeNpcPopulationAsync(
+                    characterRepository, persistentCharacters, lifetime.Token);
+            }
             worldStreamer.Initialize(worldDefinition, worldObjectCatalog, true, true);
             transport.SetConnectionData(address, port, "0.0.0.0");
             SetConnectionHello();
@@ -337,6 +364,13 @@ namespace Quieter.Networking
                 nextPositionSaveAt = Time.unscaledTime + QuieterConstants.PositionSaveIntervalSeconds;
                 _ = SaveAllPlayerStateAsync(lifetime.Token);
             }
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            if (!npcArrivalRunning && nextNpcArrivalGameSeconds > 0d && weather != null
+                && weather.Current.GameSeconds >= nextNpcArrivalGameSeconds)
+            {
+                npcArrivalRunning = true;
+                _ = ReplenishFreeNpcPopulationAsync(weather.Current.GameSeconds, lifetime.Token);
+            }
         }
 
         private void ApprovalCheck(
@@ -370,7 +404,317 @@ namespace Quieter.Networking
         private void OnServerStarted()
         {
             nextPositionSaveAt = Time.unscaledTime + QuieterConstants.PositionSaveIntervalSeconds;
+            RestorePersistentCharacters();
+            ScheduleNextNpcArrival();
             ChangeStatus($"Сервер запущен на UDP {transport.ConnectionData.Port}");
+        }
+
+        private void RestorePersistentCharacters()
+        {
+            foreach (var profile in persistentCharacters)
+            {
+                try { SpawnPersistentCharacter(profile); }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning($"Could not restore body {profile?.Survival?.CharacterId}: {exception.Message}");
+                }
+            }
+            persistentCharacters = Array.Empty<PlayerProfile>();
+        }
+
+        private async Task<IReadOnlyList<PlayerProfile>> EnsureFreeNpcPopulationAsync(
+            IPersistentCharacterRepository repository,
+            IReadOnlyList<PlayerProfile> existing,
+            CancellationToken cancellationToken)
+        {
+            const int desiredFreeCandidates = 12;
+            const int maximumLivingNpcs = 48;
+            var result = new List<PlayerProfile>(existing ?? Array.Empty<PlayerProfile>());
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var livingNpcs = 0;
+            var freeCandidates = 0;
+            foreach (var profile in result)
+            {
+                var state = profile?.Survival;
+                if (state == null || string.IsNullOrWhiteSpace(state.CharacterId)) continue;
+                ids.Add(state.CharacterId);
+                if (state.ControlKind == CharacterControlKind.Player
+                    || state.Physiology?.LifeState == CharacterLifeState.Dead) continue;
+                livingNpcs++;
+                if (state.ControlKind == CharacterControlKind.FreeNpc) freeCandidates++;
+            }
+
+            for (var index = 0; freeCandidates < desiredFreeCandidates
+                    && livingNpcs < maximumLivingNpcs && index < 1024; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var id = CreateStableNpcId(worldDefinition.Seed, index);
+                if (ids.Contains(id)) continue;
+                var profile = await repository.CreateWorldNpcAsync(
+                    NpcName(index), CreateInitialNpcSnapshot(id, index), cancellationToken);
+                if (!ids.Add(profile.Survival.CharacterId)) continue;
+                result.Add(profile);
+                livingNpcs++;
+                freeCandidates++;
+            }
+            return result;
+        }
+
+        private CharacterPersistenceSnapshot CreateInitialNpcSnapshot(string id, int index)
+        {
+            var angle = index * 2.3999632f + (worldDefinition.Seed & 1023) * 0.001f;
+            var radius = 180f + index % 4 * 55f;
+            var position = new Vector3(Mathf.Cos(angle) * radius, 0f,
+                Mathf.Sin(angle) * radius);
+            position.x = Mathf.Clamp(position.x, worldDefinition.WorldMinimum.x + 20f,
+                worldDefinition.WorldMaximum.x - 20f);
+            position.z = Mathf.Clamp(position.z, worldDefinition.WorldMinimum.z + 20f,
+                worldDefinition.WorldMaximum.z - 20f);
+            var state = new CharacterSurvivalState
+            {
+                CharacterId = id,
+                CharacterName = NpcName(index),
+                ControlKind = CharacterControlKind.FreeNpc,
+                CreationCompleted = true,
+                Revision = 1,
+                Npc = new NpcRuntimeState
+                {
+                    Disposition = index % 5 == 0
+                        ? NpcDisposition.Aggressive : NpcDisposition.Passive,
+                    ActiveJob = (WorkerJobKind)(index % 3),
+                    HomePosition = position,
+                    Destination = position,
+                    Motivation = 0.62f + index % 4 * 0.06f,
+                },
+            };
+            state.EnsureInitialized();
+            var instanceBase = StableNpcItemInstance(worldDefinition.Seed, index);
+            var traitPool = new[]
+            {
+                TraitId.FastHealing, TraitId.StrongImmunity, TraitId.Athletic,
+                TraitId.StrongBuild, TraitId.Dexterous, TraitId.KeenSenses,
+                TraitId.IronStomach, TraitId.LowSleepNeed, TraitId.SlowHealing,
+                TraitId.WeakImmunity, TraitId.Asthma, TraitId.FragileBones,
+                TraitId.RottenTeeth, TraitId.SensitiveDigestion, TraitId.Insomnia,
+                TraitId.Myopia, TraitId.Clumsy, TraitId.HighMetabolism,
+            };
+            state.Traits.Add(traitPool[(int)(instanceBase % (ulong)traitPool.Length)]);
+            for (var attribute = 0; attribute < (int)CharacterAttributeId.Count; attribute++)
+            {
+                var variation = (int)((instanceBase >> (attribute % 8 * 8)) & 0xffUL) - 128;
+                state.Progression.Attributes[attribute] = Mathf.Clamp(
+                    50f + variation / 12f, 32f, 70f);
+            }
+            var practicedSkill = state.Npc.ActiveJob switch
+            {
+                WorkerJobKind.Mining => SkillId.Mining,
+                WorkerJobKind.Logging => SkillId.Woodcutting,
+                _ => SkillId.Foraging,
+            };
+            var startingHours = index % 24 == 0
+                ? 40f : 1f + (instanceBase >> 32) % 1900UL / 100f;
+            state.Progression.SkillPracticeHours[(int)practicedSkill] = (float)startingHours;
+            state.Progression.RelevantPracticeHours[(int)practicedSkill] = (float)startingHours;
+            var items = new List<StoredInventorySlot>
+            {
+                new() { SlotIndex = 0, ItemId = 25, Quantity = 4, Freshness = 10000,
+                    Cleanliness = 8500 },
+                new() { SlotIndex = 1, ItemId = 26, Quantity = 3, Freshness = 10000,
+                    Cleanliness = 8000 },
+                new() { SlotIndex = 2, ItemId = 29, Quantity = 1,
+                    ItemInstanceId = instanceBase.ToString(), LiquidMilliliters = 1200,
+                    LiquidKind = (byte)LiquidKind.Water, Cleanliness = 9000 },
+            };
+            if (state.Npc.Disposition == NpcDisposition.Aggressive)
+                items.Add(new StoredInventorySlot { SlotIndex = InventoryLayout.FirstHotbarSlot,
+                    ItemId = 42, Quantity = 1,
+                    ItemInstanceId = (instanceBase + 1).ToString(), Condition = 10000 });
+            else if (state.Npc.ActiveJob != WorkerJobKind.Foraging)
+            {
+                var toolId = state.Npc.ActiveJob == WorkerJobKind.Logging ? (ushort)4 : (ushort)5;
+                items.Add(new StoredInventorySlot
+                {
+                    SlotIndex = InventoryLayout.FirstHotbarSlot,
+                    ItemId = toolId,
+                    Quantity = 1,
+                    ItemInstanceId = (instanceBase + 1).ToString(),
+                    Condition = toolId == 5 ? (ushort)120 : (ushort)100,
+                });
+            }
+            return new CharacterPersistenceSnapshot
+            {
+                Position = position,
+                Slots = items,
+                PendingItems = Array.Empty<StoredInventorySlot>(),
+                SelectedHotbarIndex = 0,
+                Survival = state,
+            };
+        }
+
+        private static string CreateStableNpcId(long seed, int index)
+        {
+            var bytes = new byte[16];
+            Buffer.BlockCopy(BitConverter.GetBytes(seed), 0, bytes, 0, 8);
+            Buffer.BlockCopy(BitConverter.GetBytes(index), 0, bytes, 8, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(unchecked((int)0x514E5043)), 0, bytes, 12, 4);
+            return new Guid(bytes).ToString("D");
+        }
+
+        private static ulong StableNpcItemInstance(long seed, int index)
+        {
+            unchecked
+            {
+                var value = (ulong)seed ^ ((ulong)(uint)index + 1UL) * 0x9E3779B97F4A7C15UL;
+                value ^= value >> 30;
+                value *= 0xBF58476D1CE4E5B9UL;
+                value ^= value >> 27;
+                return (value ^ value >> 31) | 1UL;
+            }
+        }
+
+        private static string NpcName(int index)
+        {
+            string[] names =
+            {
+                "Мира", "Радан", "Ива", "Борен", "Лада", "Торин",
+                "Веста", "Олесь", "Руна", "Глеб", "Яра", "Свят",
+            };
+            return names[index % names.Length] + (index >= names.Length
+                ? $" {index / names.Length + 1}" : string.Empty);
+        }
+
+        private async Task ReplenishFreeNpcPopulationAsync(
+            double currentGameSeconds,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (playerRepository is not IPersistentCharacterRepository repository) return;
+                CountLivingNpcPopulation(out var living, out var free, out var ids);
+                if (living >= 48 || free >= 12) return;
+                var period = (int)Math.Min(int.MaxValue, Math.Max(0d,
+                    Math.Floor(currentGameSeconds / LivingWorldSimulation.GameSecondsPerDay)));
+                var campSize = 1 + (int)(StableNpcItemInstance(worldDefinition.Seed, period) % 3UL);
+                for (var index = 0; index < 4096 && campSize > 0
+                        && living < 48 && free < 12; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var id = CreateStableNpcId(worldDefinition.Seed, index);
+                    if (ids.Contains(id)) continue;
+                    var profile = await repository.CreateWorldNpcAsync(
+                        NpcName(index), CreateInitialNpcSnapshot(id, index), cancellationToken);
+                    if (!ids.Add(profile.Survival.CharacterId)) continue;
+                    SpawnPersistentCharacter(profile);
+                    living++;
+                    free++;
+                    campSize--;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Could not replenish free NPC population: {exception.Message}");
+            }
+            finally
+            {
+                npcArrivalRunning = false;
+                ScheduleNextNpcArrival();
+            }
+        }
+
+        private void CountLivingNpcPopulation(
+            out int living,
+            out int free,
+            out HashSet<string> characterIds)
+        {
+            living = 0;
+            free = 0;
+            characterIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CountLivingNpcPopulation(authenticatedClients.Values, characterIds, ref living, ref free);
+            CountLivingNpcPopulation(offlineBodies.Values, characterIds, ref living, ref free);
+            CountLivingNpcPopulation(detachedBodies.Values, characterIds, ref living, ref free);
+        }
+
+        private static void CountLivingNpcPopulation(
+            IEnumerable<AuthenticatedClient> characters,
+            HashSet<string> characterIds,
+            ref int living,
+            ref int free)
+        {
+            foreach (var character in characters)
+            {
+                var state = character?.Survival?.ServerState;
+                if (state == null || string.IsNullOrWhiteSpace(state.CharacterId)
+                    || !characterIds.Add(state.CharacterId)
+                    || state.Physiology.LifeState == CharacterLifeState.Dead
+                    || state.ControlKind is < CharacterControlKind.FreeNpc
+                        or > CharacterControlKind.ForcedNpc)
+                    continue;
+                living++;
+                if (state.ControlKind == CharacterControlKind.FreeNpc) free++;
+            }
+        }
+
+        private void ScheduleNextNpcArrival()
+        {
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            if (weather == null)
+            {
+                nextNpcArrivalGameSeconds = 0d;
+                return;
+            }
+            var day = (int)Math.Min(int.MaxValue, Math.Max(0d,
+                Math.Floor(weather.Current.GameSeconds
+                    / LivingWorldSimulation.GameSecondsPerDay)));
+            var delayDays = 2 + StableNpcItemInstance(worldDefinition.Seed, day + 7919) % 4UL;
+            nextNpcArrivalGameSeconds = weather.Current.GameSeconds
+                + delayDays * LivingWorldSimulation.GameSecondsPerDay;
+        }
+
+        private AuthenticatedClient SpawnPersistentCharacter(PlayerProfile profile)
+        {
+            var characterId = profile?.Survival?.CharacterId;
+            if (string.IsNullOrWhiteSpace(characterId))
+                throw new InvalidOperationException("Persistent body has no character identity.");
+            if (detachedBodies.TryGetValue(characterId, out var existingDetached)) return existingDetached;
+            if (profile.SteamId != 0 && offlineBodies.TryGetValue(profile.SteamId, out var existingOffline)
+                && existingOffline.Survival?.ServerState?.CharacterId == characterId) return existingOffline;
+            var fallback = new Vector3(0f, worldStreamer.SampleHeight(0f, 0f) + 2f, 0f);
+            var position = ValidateSpawn(profile.Position, fallback);
+            worldStreamer.EnsureLoadedAround(position);
+            var instance = Instantiate(playerPrefab, position, Quaternion.identity);
+            if (instance.GetComponent<NpcBrain>() == null) instance.AddComponent<NpcBrain>();
+            var networkObject = instance.GetComponent<NetworkObject>();
+            networkObject.DontDestroyWithOwner = true;
+            networkObject.Spawn(true);
+            var player = instance.GetComponent<NetworkPlayer>();
+            var inventory = instance.GetComponent<PlayerInventory>();
+            var survival = instance.GetComponent<PlayerSurvival>();
+            var resources = instance.GetComponent<PlayerResourceInteraction>();
+            if (player == null || inventory == null || survival == null || resources == null)
+                throw new InvalidOperationException("Network player prefab is missing persistent-body components.");
+            player.AssignServerIdentity(profile.SteamId, profile.DisplayName, position);
+            survival.InitializeServer(profile.Survival, profile.SteamId, profile.DisplayName);
+            survival.ServerSetOffline(profile.Survival.ControlKind == CharacterControlKind.Player);
+            inventory.InitializeServer(profile.InventorySlots, profile.PendingItems,
+                profile.SelectedHotbarIndex, profile.SteamId);
+            resources.InitializeServer(profile.DepositKnowledge, profile.MapNotes,
+                profile.SteamId, worldDefinition.WorldId, playerRepository);
+            var body = new AuthenticatedClient
+            {
+                SteamId = profile.SteamId, DisplayName = profile.DisplayName,
+                Player = player, Inventory = inventory, ResourceInteraction = resources, Survival = survival,
+                RegisteredHeirCharacterId = profile.RegisteredHeirCharacterId,
+                EstateRevision = profile.EstateRevision,
+            };
+            player.ServerDespawning += OnServerPlayerDespawning;
+            survival.ServerDied += OnServerPlayerDied;
+            survival.ServerCaptureCompleted += OnServerCaptureCompleted;
+            if (profile.SteamId == 0) detachedBodies[characterId] = body;
+            else offlineBodies[profile.SteamId] = body;
+            return body;
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -694,6 +1038,7 @@ namespace Quieter.Networking
                 var position = ValidateSpawn(profile.Position, spawn);
                 worldStreamer.EnsureLoadedAround(position);
                 var instance = Instantiate(playerPrefab, position, Quaternion.identity);
+                if (instance.GetComponent<NpcBrain>() == null) instance.AddComponent<NpcBrain>();
                 var networkObject = instance.GetComponent<NetworkObject>();
                 networkObject.DontDestroyWithOwner = true;
                 networkObject.SpawnAsPlayerObject(clientId, true);
@@ -736,6 +1081,11 @@ namespace Quieter.Networking
 #endif
                 player.ServerDespawning += OnServerPlayerDespawning;
                 playerSurvival.ServerDied += OnServerPlayerDied;
+                playerSurvival.ServerCaptureCompleted += OnServerCaptureCompleted;
+                playerSurvival.ServerNewStrangerRequested += OnServerNewStrangerRequested;
+                playerSurvival.ServerHeirRegistrationRequested += OnServerHeirRegistrationRequested;
+                playerSurvival.ServerHeirDonationRequested += OnServerHeirDonationRequested;
+                playerSurvival.ServerHeirOfferAcceptanceRequested += OnServerHeirOfferAcceptanceRequested;
                 pendingClients.Remove(clientId);
                 authenticatedClients[clientId] = new AuthenticatedClient
                 {
@@ -746,13 +1096,23 @@ namespace Quieter.Networking
                     Inventory = playerInventory,
                     ResourceInteraction = resourceInteraction,
                     Survival = playerSurvival,
+                    RegisteredHeirCharacterId = profile.RegisteredHeirCharacterId,
+                    EstateRevision = profile.EstateRevision,
                 };
+                if (playerSurvival.ServerIsLifeLost)
+                    TrackFinalSave(LoadPendingHeirOfferAsync(
+                        authenticatedClients[clientId], lifetime.Token));
                 if (offlineBody?.Player != null && offlineBody.Player.NetworkObject.IsSpawned)
                 {
                     offlineBody.Player.ServerDespawning -= OnServerPlayerDespawning;
                     if (offlineBody.Survival != null)
                     {
                         offlineBody.Survival.ServerDied -= OnServerPlayerDied;
+                        offlineBody.Survival.ServerCaptureCompleted -= OnServerCaptureCompleted;
+                        offlineBody.Survival.ServerNewStrangerRequested -= OnServerNewStrangerRequested;
+                        offlineBody.Survival.ServerHeirRegistrationRequested -= OnServerHeirRegistrationRequested;
+                        offlineBody.Survival.ServerHeirDonationRequested -= OnServerHeirDonationRequested;
+                        offlineBody.Survival.ServerHeirOfferAcceptanceRequested -= OnServerHeirOfferAcceptanceRequested;
                     }
                     offlineBody.Player.NetworkObject.Despawn(true);
                 }
@@ -890,6 +1250,7 @@ namespace Quieter.Networking
         {
             var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
             clients.AddRange(offlineBodies.Values);
+            clients.AddRange(detachedBodies.Values);
             foreach (var client in clients)
             {
                 if (client.Player != null)
@@ -963,13 +1324,25 @@ namespace Quieter.Networking
             PlayerSaveSnapshot snapshot,
             CancellationToken cancellationToken)
         {
-            if (persistedPlayerSaveRevisions.TryGetValue(
+            if (!snapshot.Detached && persistedPlayerSaveRevisions.TryGetValue(
                     snapshot.SteamId, out var persistedRevision)
                 && persistedRevision >= snapshot.Revision)
             {
                 return;
             }
-            if (playerRepository is IAtomicPlayerProfileRepository atomicRepository)
+            if (snapshot.Detached)
+            {
+                var characterId = snapshot.Survival?.CharacterId ?? string.Empty;
+                if (persistedDetachedSaveRevisions.TryGetValue(characterId, out var bodyRevision)
+                    && bodyRevision >= snapshot.Revision) return;
+                if (playerRepository is not IPersistentCharacterRepository bodies)
+                    throw new InvalidOperationException("Repository cannot save permanent bodies.");
+                await bodies.SaveDetachedCharacterAsync(
+                    snapshot.Position, snapshot.Slots, snapshot.PendingItems,
+                    snapshot.SelectedHotbarIndex, snapshot.Survival, cancellationToken);
+                persistedDetachedSaveRevisions[characterId] = snapshot.Revision;
+            }
+            else if (playerRepository is IAtomicPlayerProfileRepository atomicRepository)
             {
                 await atomicRepository.SaveSnapshotAsync(
                     snapshot.SteamId, snapshot.Position, snapshot.Slots, snapshot.PendingItems,
@@ -985,13 +1358,15 @@ namespace Quieter.Networking
                 await playerRepository.SaveSurvivalAsync(
                     snapshot.SteamId, snapshot.Survival, cancellationToken);
             }
-            persistedPlayerSaveRevisions[snapshot.SteamId] = snapshot.Revision;
+            if (!snapshot.Detached)
+                persistedPlayerSaveRevisions[snapshot.SteamId] = snapshot.Revision;
         }
 
         private PlayerSaveSnapshot CapturePlayerSaveSnapshot(
             AuthenticatedClient client,
             CancellationToken cancellationToken,
-            bool normalizeTemporaryStorage)
+            bool normalizeTemporaryStorage,
+            bool includeKnowledgeSave = true)
         {
             if (client?.Player == null) return null;
             var slots = client.Inventory == null
@@ -1002,12 +1377,17 @@ namespace Quieter.Networking
             var selected = client.Inventory?.GetServerSelectedHotbarIndex() ?? (byte)0;
             var pendingItems = client.Inventory?.CreateStoredPendingItemsSnapshot()
                 ?? new List<StoredInventorySlot>();
-            playerSaveRevisions.TryGetValue(client.SteamId, out var revision);
+            var detached = client.SteamId == 0;
+            var characterId = client.Survival?.ServerState?.CharacterId ?? string.Empty;
+            var revision = 0L;
+            if (detached) detachedSaveRevisions.TryGetValue(characterId, out revision);
+            else playerSaveRevisions.TryGetValue(client.SteamId, out revision);
             revision = System.Math.Max(
                 revision,
                 client.Survival?.ServerState?.Revision ?? 0);
             revision++;
-            playerSaveRevisions[client.SteamId] = revision;
+            if (detached) detachedSaveRevisions[characterId] = revision;
+            else playerSaveRevisions[client.SteamId] = revision;
             var survival = client.Survival?.CreateServerSnapshot();
             if (survival != null)
             {
@@ -1022,10 +1402,145 @@ namespace Quieter.Networking
                 PendingItems = pendingItems,
                 SelectedHotbarIndex = selected,
                 Survival = survival,
+                Detached = detached,
                 KnowledgeSaveTask = client.ResourceInteraction != null
+                    && !detached && includeKnowledgeSave
                     ? client.ResourceInteraction.FlushKnowledgeAsync(cancellationToken)
                     : Task.CompletedTask,
             };
+        }
+
+        public void BeginCorpseLoot(PlayerInventory corpse, PlayerInventory receiver)
+        {
+            if (!IsServerRunning || corpse == null || receiver == null || corpse == receiver) return;
+            TrackFinalSave(TransferCorpseItemAsync(corpse, receiver, lifetime.Token));
+        }
+
+        private async Task TransferCorpseItemAsync(
+            PlayerInventory corpseInventory, PlayerInventory receiverInventory,
+            CancellationToken cancellationToken)
+        {
+            await characterTransferGate.WaitAsync(cancellationToken);
+            var acquiredGates = new List<SemaphoreSlim>(2);
+            AuthenticatedClient source = null;
+            AuthenticatedClient destination = null;
+            List<StoredInventorySlot> sourceBefore = null;
+            List<StoredInventorySlot> sourcePendingBefore = null;
+            List<StoredInventorySlot> destinationBefore = null;
+            List<StoredInventorySlot> destinationPendingBefore = null;
+            List<StoredDepositKnowledge> sourceKnowledge = null;
+            List<StoredDepositKnowledge> destinationKnowledge = null;
+            List<StoredMapNote> sourceMaps = null;
+            List<StoredMapNote> destinationMaps = null;
+            byte sourceSelected = 0;
+            byte destinationSelected = 0;
+            try
+            {
+                source = FindCharacterClient(corpseInventory);
+                destination = FindCharacterClient(receiverInventory);
+                if (source?.Survival?.ServerCanBeSearched != true || destination == null
+                    || destination.SteamId == 0 || !destination.Survival.CanPerformServerAction()
+                    || source == destination)
+                    return;
+                var gateIds = new List<ulong>();
+                if (source.SteamId != 0) gateIds.Add(source.SteamId);
+                if (destination.SteamId != 0 && !gateIds.Contains(destination.SteamId))
+                    gateIds.Add(destination.SteamId);
+                gateIds.Sort();
+                foreach (var steamId in gateIds)
+                {
+                    var gate = GetPlayerSaveGate(steamId);
+                    await gate.WaitAsync(cancellationToken);
+                    acquiredGates.Add(gate);
+                }
+                if (corpseInventory.ServerPersistenceLocked || receiverInventory.ServerPersistenceLocked
+                    || !source.Survival.ServerCanBeSearched)
+                    return;
+                corpseInventory.ServerSetPersistenceLocked(true);
+                receiverInventory.ServerSetPersistenceLocked(true);
+                sourceBefore = corpseInventory.CreateStoredSlotsSnapshot();
+                sourcePendingBefore = corpseInventory.CreateStoredPendingItemsSnapshot();
+                sourceSelected = corpseInventory.GetServerSelectedHotbarIndex();
+                destinationBefore = receiverInventory.CreateStoredSlotsSnapshot();
+                destinationPendingBefore = receiverInventory.CreateStoredPendingItemsSnapshot();
+                destinationSelected = receiverInventory.GetServerSelectedHotbarIndex();
+                sourceKnowledge = source.ResourceInteraction?.CreateStoredKnowledgeSnapshot() ?? new();
+                destinationKnowledge = destination.ResourceInteraction?.CreateStoredKnowledgeSnapshot() ?? new();
+                sourceMaps = source.ResourceInteraction?.CreateStoredMapNoteSnapshot() ?? new();
+                destinationMaps = destination.ResourceInteraction?.CreateStoredMapNoteSnapshot() ?? new();
+                if (!corpseInventory.ServerTransferFirstInventoryStackTo(
+                        receiverInventory, out var itemName))
+                {
+                    receiverInventory.ServerSendUseFeedback(
+                        "На теле ничего доступного или инвентарь заполнен.");
+                    return;
+                }
+                if (playerRepository is not IPersistentCharacterRepository repository)
+                    throw new InvalidOperationException("Repository cannot commit an inter-body transfer.");
+                var sourceAfter = CapturePlayerSaveSnapshot(source, cancellationToken, true, false);
+                var destinationAfter = CapturePlayerSaveSnapshot(destination, cancellationToken, true, false);
+                await repository.SaveCharacterPairAsync(
+                    Guid.NewGuid().ToString("D"), ToPersistenceSnapshot(sourceAfter),
+                    destination.SteamId, ToPersistenceSnapshot(destinationAfter), cancellationToken);
+                MarkSnapshotPersisted(sourceAfter);
+                MarkSnapshotPersisted(destinationAfter);
+                if (destination.ResourceInteraction != null)
+                    await destination.ResourceInteraction.FlushKnowledgeAsync(cancellationToken);
+                receiverInventory.ServerSendUseFeedback($"С тела взято: {itemName}.");
+            }
+            catch (Exception exception)
+            {
+                if (sourceBefore != null && source?.Inventory != null)
+                {
+                    source.Inventory.ServerRestorePersistenceSnapshot(
+                        sourceBefore, sourcePendingBefore, sourceSelected, source.SteamId);
+                    source.ResourceInteraction?.InitializeServer(sourceKnowledge, sourceMaps,
+                        source.SteamId, worldDefinition.WorldId, playerRepository);
+                }
+                if (destinationBefore != null && destination?.Inventory != null)
+                {
+                    destination.Inventory.ServerRestorePersistenceSnapshot(
+                        destinationBefore, destinationPendingBefore, destinationSelected, destination.SteamId);
+                    destination.ResourceInteraction?.InitializeServer(destinationKnowledge, destinationMaps,
+                        destination.SteamId, worldDefinition.WorldId, playerRepository);
+                    destination.Inventory.ServerSendUseFeedback(
+                        "Перенос вещи не подтверждён сервером; состояние восстановлено.");
+                }
+                Debug.LogWarning($"Corpse loot transaction failed: {exception.Message}");
+            }
+            finally
+            {
+                corpseInventory?.ServerSetPersistenceLocked(false);
+                receiverInventory?.ServerSetPersistenceLocked(false);
+                for (var index = acquiredGates.Count - 1; index >= 0; index--)
+                    acquiredGates[index].Release();
+                characterTransferGate.Release();
+            }
+        }
+
+        private AuthenticatedClient FindCharacterClient(PlayerInventory inventory)
+        {
+            foreach (var entry in authenticatedClients.Values)
+                if (entry.Inventory == inventory) return entry;
+            foreach (var entry in offlineBodies.Values)
+                if (entry.Inventory == inventory) return entry;
+            foreach (var entry in detachedBodies.Values)
+                if (entry.Inventory == inventory) return entry;
+            return null;
+        }
+
+        private static CharacterPersistenceSnapshot ToPersistenceSnapshot(PlayerSaveSnapshot value) => new()
+        {
+            Position = value.Position, Slots = value.Slots, PendingItems = value.PendingItems,
+            SelectedHotbarIndex = value.SelectedHotbarIndex, Survival = value.Survival,
+        };
+
+        private void MarkSnapshotPersisted(PlayerSaveSnapshot snapshot)
+        {
+            if (snapshot.Detached)
+                persistedDetachedSaveRevisions[snapshot.Survival.CharacterId] = snapshot.Revision;
+            else
+                persistedPlayerSaveRevisions[snapshot.SteamId] = snapshot.Revision;
         }
 
         private SemaphoreSlim GetPlayerSaveGate(ulong steamId)
@@ -1116,6 +1631,27 @@ namespace Quieter.Networking
                 if (client.Survival != null)
                 {
                     client.Survival.ServerDied -= OnServerPlayerDied;
+                    client.Survival.ServerCaptureCompleted -= OnServerCaptureCompleted;
+                    client.Survival.ServerNewStrangerRequested -= OnServerNewStrangerRequested;
+                    client.Survival.ServerHeirRegistrationRequested -= OnServerHeirRegistrationRequested;
+                    client.Survival.ServerHeirDonationRequested -= OnServerHeirDonationRequested;
+                    client.Survival.ServerHeirOfferAcceptanceRequested -= OnServerHeirOfferAcceptanceRequested;
+                }
+                var snapshot = CapturePlayerSaveSnapshot(client, lifetime.Token, true);
+                client.FinalSaveTask = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
+                TrackFinalSave(client.FinalSaveTask);
+                client.Player = null;
+                break;
+            }
+            foreach (var pair in detachedBodies)
+            {
+                var client = pair.Value;
+                if (client.Player != player) continue;
+                player.ServerDespawning -= OnServerPlayerDespawning;
+                if (client.Survival != null)
+                {
+                    client.Survival.ServerDied -= OnServerPlayerDied;
+                    client.Survival.ServerCaptureCompleted -= OnServerCaptureCompleted;
                 }
                 var snapshot = CapturePlayerSaveSnapshot(client, lifetime.Token, true);
                 client.FinalSaveTask = SavePlayerSnapshotAsync(snapshot, lifetime.Token);
@@ -1127,11 +1663,19 @@ namespace Quieter.Networking
 
         private void OnServerPlayerDied(CharacterSurvivalState deceased)
         {
-            foreach (var client in authenticatedClients.Values)
+            foreach (var pair in authenticatedClients)
             {
+                var client = pair.Value;
                 if (client.Survival == null || !client.Survival.ServerIsDead
                     || client.Survival.ServerState?.CharacterId != deceased?.CharacterId)
                     continue;
+                if (!string.IsNullOrWhiteSpace(client.RegisteredHeirCharacterId)
+                    && inheritanceAccounts.Add(client.SteamId))
+                {
+                    TrackFinalSave(AssumeRegisteredHeirAsync(
+                        pair.Key, client, lifetime.Token));
+                    return;
+                }
                 TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
                 return;
             }
@@ -1140,9 +1684,557 @@ namespace Quieter.Networking
                 if (client.Survival == null || !client.Survival.ServerIsDead
                     || client.Survival.ServerState?.CharacterId != deceased?.CharacterId)
                     continue;
+                if (!string.IsNullOrWhiteSpace(client.RegisteredHeirCharacterId)
+                    && inheritanceAccounts.Add(client.SteamId))
+                {
+                    TrackFinalSave(AssumeRegisteredHeirAsync(
+                        null, client, lifetime.Token));
+                    return;
+                }
                 TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
                 return;
             }
+            foreach (var client in detachedBodies.Values)
+            {
+                if (client.Survival == null || !client.Survival.ServerIsDead
+                    || client.Survival.ServerState?.CharacterId != deceased?.CharacterId) continue;
+                TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
+                return;
+            }
+        }
+
+        private void OnServerHeirRegistrationRequested(
+            PlayerSurvival owner, PlayerSurvival heir)
+        {
+            if (owner == null || heir == null) return;
+            foreach (var client in authenticatedClients.Values)
+            {
+                if (client.Survival != owner || !heirRegistrationAccounts.Add(client.SteamId))
+                    continue;
+                TrackFinalSave(RegisterHeirAsync(client, heir, lifetime.Token));
+                return;
+            }
+        }
+
+        private void OnServerHeirDonationRequested(
+            PlayerSurvival donorSurvival,
+            PlayerSurvival recipientSurvival)
+        {
+            if (donorSurvival == null || recipientSurvival == null) return;
+            AuthenticatedClient donor = null;
+            foreach (var candidate in authenticatedClients.Values)
+            {
+                if (candidate.Survival == donorSurvival)
+                {
+                    donor = candidate;
+                    break;
+                }
+            }
+            var recipient = FindCharacterClient(recipientSurvival);
+            if (donor == null || recipient == null || recipient.SteamId == 0
+                || !heirDonationAccounts.Add(donor.SteamId)) return;
+            TrackFinalSave(OfferRegisteredHeirAsync(
+                donor, recipient, lifetime.Token));
+        }
+
+        private void OnServerHeirOfferAcceptanceRequested(PlayerSurvival recipientSurvival)
+        {
+            if (recipientSurvival == null) return;
+            foreach (var pair in authenticatedClients)
+            {
+                var recipient = pair.Value;
+                if (recipient.Survival != recipientSurvival
+                    || recipient.PendingHeirOffer == null
+                    || !inheritanceAccounts.Add(recipient.SteamId)) continue;
+                TrackFinalSave(AcceptDonatedHeirAsync(
+                    pair.Key, recipient, lifetime.Token));
+                return;
+            }
+        }
+
+        private async Task LoadPendingHeirOfferAsync(
+            AuthenticatedClient recipient,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (recipient?.Survival == null || !recipient.Survival.ServerIsLifeLost
+                    || playerRepository is not IInheritanceRepository inheritance) return;
+                var offer = await inheritance.GetPendingHeirOfferAsync(
+                    recipient.SteamId, cancellationToken);
+                recipient.PendingHeirOffer = offer;
+                recipient.Survival.ServerSetPendingHeirOffer(offer);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Could not load heir offer for {recipient?.SteamId}: "
+                    + exception.Message);
+            }
+        }
+
+        private async Task OfferRegisteredHeirAsync(
+            AuthenticatedClient donor,
+            AuthenticatedClient recipient,
+            CancellationToken cancellationToken)
+        {
+            await characterTransferGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (playerRepository is not IInheritanceRepository inheritance)
+                    throw new InvalidOperationException("Хранилище не поддерживает передачу наследника.");
+                if (donor?.Survival?.CanPerformServerAction() != true
+                    || recipient?.Survival?.ServerIsLifeLost != true
+                    || string.IsNullOrWhiteSpace(donor.RegisteredHeirCharacterId))
+                    throw new InvalidOperationException(
+                        "Нужны живой даритель, потерянная жизнь получателя и зарегистрированный наследник.");
+                if (!detachedBodies.TryGetValue(donor.RegisteredHeirCharacterId, out var heirBody)
+                    || heirBody?.Survival?.ServerIsDead != false)
+                    throw new InvalidOperationException("Зарегистрированный наследник больше не доступен.");
+
+                await SavePlayerStateAsync(donor, cancellationToken, true);
+                await SavePlayerStateAsync(recipient, cancellationToken, true);
+                await SavePlayerStateAsync(heirBody, cancellationToken, true);
+                var offer = await inheritance.OfferRegisteredHeirAsync(
+                    donor.SteamId,
+                    recipient.SteamId,
+                    Guid.NewGuid().ToString("D"),
+                    recipient.Survival.ServerState.CharacterId,
+                    donor.EstateRevision,
+                    cancellationToken);
+                donor.RegisteredHeirCharacterId = string.Empty;
+                donor.EstateRevision++;
+                var recipientConnected = false;
+                foreach (var connected in authenticatedClients.Values)
+                {
+                    if (connected != recipient) continue;
+                    recipientConnected = true;
+                    break;
+                }
+                if (recipientConnected)
+                {
+                    offer = await inheritance.GetPendingHeirOfferAsync(
+                        recipient.SteamId, cancellationToken) ?? offer;
+                    recipient.PendingHeirOffer = offer;
+                    recipient.Survival.ServerSetPendingHeirOffer(offer);
+                }
+                donor.Survival.ServerNotifyHeirRegistrationResult(
+                    $"Наследник {offer.HeirName} безвозвратно предложен игроку "
+                    + $"{recipient.DisplayName}. У вас его больше нет.",
+                    recipient.Survival.NetworkObjectId);
+            }
+            catch (Exception exception)
+            {
+                donor?.Survival?.ServerNotifyHeirRegistrationResult(
+                    $"Наследник не передан: {exception.Message}",
+                    recipient?.Survival == null ? 0 : recipient.Survival.NetworkObjectId);
+            }
+            finally
+            {
+                characterTransferGate.Release();
+                if (donor != null) heirDonationAccounts.Remove(donor.SteamId);
+            }
+        }
+
+        private async Task AcceptDonatedHeirAsync(
+            ulong clientId,
+            AuthenticatedClient deceased,
+            CancellationToken cancellationToken)
+        {
+            await characterTransferGate.WaitAsync(cancellationToken);
+            var gate = GetPlayerSaveGate(deceased.SteamId);
+            var acquired = false;
+            try
+            {
+                if (playerRepository is not IInheritanceRepository inheritance)
+                    throw new InvalidOperationException("Repository does not support heir offers.");
+                await gate.WaitAsync(cancellationToken);
+                acquired = true;
+                var offer = deceased.PendingHeirOffer
+                    ?? throw new InvalidOperationException("Heir offer is no longer loaded.");
+                if (!deceased.Survival.ServerIsLifeLost)
+                    throw new InvalidOperationException("This life is not lost.");
+                if (!detachedBodies.TryGetValue(offer.HeirCharacterId, out var heirBody)
+                    || heirBody?.Survival?.ServerIsDead != false)
+                    throw new InvalidOperationException("The offered heir is no longer alive.");
+
+                var deathSnapshot = CapturePlayerSaveSnapshot(deceased, cancellationToken, true);
+                var heirSnapshot = CapturePlayerSaveSnapshot(heirBody, cancellationToken, true, false);
+                await PersistPlayerSnapshotAsync(deathSnapshot, cancellationToken);
+                await PersistPlayerSnapshotAsync(heirSnapshot, cancellationToken);
+                if (deathSnapshot.KnowledgeSaveTask != null)
+                    await deathSnapshot.KnowledgeSaveTask;
+                var profile = await inheritance.AcceptHeirOfferAsync(
+                    deceased.SteamId,
+                    offer.OfferId,
+                    Guid.NewGuid().ToString("D"),
+                    deathSnapshot.Survival.CharacterId,
+                    deathSnapshot.Revision,
+                    cancellationToken);
+
+                var corpseSurvival = JsonUtility.FromJson<CharacterSurvivalState>(
+                    JsonUtility.ToJson(deathSnapshot.Survival));
+                corpseSurvival.Offline = true;
+                var corpseProfile = new PlayerProfile
+                {
+                    SteamId = 0,
+                    DisplayName = deceased.DisplayName,
+                    Position = deathSnapshot.Position,
+                    InventorySlots = deathSnapshot.Slots,
+                    PendingItems = deathSnapshot.PendingItems,
+                    SelectedHotbarIndex = deathSnapshot.SelectedHotbarIndex,
+                    MapNotes = deceased.ResourceInteraction?.CreateStoredMapNoteSnapshot() ?? new(),
+                    Survival = corpseSurvival,
+                };
+
+                detachedBodies.Remove(offer.HeirCharacterId);
+                UnsubscribeCharacter(heirBody);
+                if (heirBody.Player?.NetworkObject.IsSpawned == true)
+                    heirBody.Player.NetworkObject.Despawn(true);
+                UnsubscribeCharacter(deceased);
+                if (deceased.Player?.NetworkObject.IsSpawned == true)
+                    deceased.Player.NetworkObject.Despawn(true);
+                SpawnPersistentCharacter(corpseProfile);
+
+                if (networkManager.ConnectedClients.ContainsKey(clientId))
+                {
+                    var replacement = SpawnControlledCharacter(
+                        clientId, deceased.SteamId, profile);
+                    authenticatedClients[clientId] = replacement;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Could not accept donated heir for {deceased?.SteamId}: "
+                    + exception.Message);
+                deceased?.Survival?.ServerNotifyHeirRegistrationResult(
+                    $"Предложение наследника не принято: {exception.Message}");
+                if (deceased != null)
+                    TrackFinalSave(LoadPendingHeirOfferAsync(deceased, lifetime.Token));
+            }
+            finally
+            {
+                if (acquired) gate.Release();
+                characterTransferGate.Release();
+                if (deceased != null) inheritanceAccounts.Remove(deceased.SteamId);
+            }
+        }
+
+        private async Task RegisterHeirAsync(
+            AuthenticatedClient owner, PlayerSurvival heir,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (playerRepository is not IInheritanceRepository inheritance)
+                    throw new InvalidOperationException("Хранилище не поддерживает наследование.");
+                var heirClient = FindCharacterClient(heir)
+                    ?? throw new InvalidOperationException("Тело наследника не найдено в мире.");
+                var state = heir.ServerState;
+                var contract = state?.WorkerContract;
+                RelationshipState relationship = null;
+                foreach (var candidate in state?.Relationships ?? new List<RelationshipState>())
+                {
+                    if (candidate != null
+                        && candidate.TargetCharacterId == owner.Survival.ServerState.CharacterId)
+                    {
+                        relationship = candidate;
+                        break;
+                    }
+                }
+                var eligibility = new InheritanceEligibility(
+                    state?.Physiology?.LifeState != CharacterLifeState.Dead,
+                    owner.Inventory?.HasServerItem(49) == true,
+                    placedObjects != null && placedObjects.HasOwnedBedAssigned(
+                        owner.SteamId.ToString(), state?.CharacterId),
+                    contract?.FulfilledContractGameSeconds ?? 0d,
+                    relationship?.PersonalRequestsCompleted ?? 0,
+                    contract?.Active == true,
+                    contract?.Voluntary == true && relationship?.VoluntaryLoyalty == true);
+                if (!LivingWorldSimulation.CanRegisterHeir(eligibility, out var eligibilityError))
+                    throw new InvalidOperationException(eligibilityError);
+
+                var ownerSnapshot = CapturePlayerSaveSnapshot(owner, cancellationToken, true);
+                var heirSnapshot = CapturePlayerSaveSnapshot(heirClient, cancellationToken, true, false);
+                await PersistPlayerSnapshotAsync(ownerSnapshot, cancellationToken);
+                await PersistPlayerSnapshotAsync(heirSnapshot, cancellationToken);
+                if (ownerSnapshot.KnowledgeSaveTask != null)
+                    await ownerSnapshot.KnowledgeSaveTask;
+                if (placedObjects != null) await placedObjects.FlushAsync(cancellationToken);
+                var profile = await inheritance.RegisterHeirAsync(
+                    owner.SteamId, state.CharacterId, owner.EstateRevision, cancellationToken);
+                owner.RegisteredHeirCharacterId = profile.RegisteredHeirCharacterId;
+                owner.EstateRevision = profile.EstateRevision;
+                owner.Survival.ServerNotifyHeirRegistrationResult(
+                    $"{state.CharacterName} зарегистрирован как единственный наследник.",
+                    heir.NetworkObjectId);
+            }
+            catch (Exception exception)
+            {
+                owner?.Survival?.ServerNotifyHeirRegistrationResult(
+                    $"Наследник не зарегистрирован: {exception.Message}",
+                    heir == null ? 0 : heir.NetworkObjectId);
+            }
+            finally
+            {
+                if (owner != null) heirRegistrationAccounts.Remove(owner.SteamId);
+            }
+        }
+
+        private async Task AssumeRegisteredHeirAsync(
+            ulong? connectedClientId, AuthenticatedClient deceased,
+            CancellationToken cancellationToken)
+        {
+            var gate = GetPlayerSaveGate(deceased.SteamId);
+            var acquired = false;
+            try
+            {
+                if (playerRepository is not IInheritanceRepository inheritance)
+                    throw new InvalidOperationException("Repository does not support inheritance.");
+                await gate.WaitAsync(cancellationToken);
+                acquired = true;
+                if (!deceased.Survival.ServerIsLifeLost) return;
+                if (!detachedBodies.TryGetValue(
+                        deceased.RegisteredHeirCharacterId, out var heirBody)
+                    || heirBody?.Survival?.ServerIsDead != false)
+                    throw new InvalidOperationException("Registered heir is no longer alive in the world.");
+
+                var deathSnapshot = CapturePlayerSaveSnapshot(deceased, cancellationToken, true);
+                var heirSnapshot = CapturePlayerSaveSnapshot(heirBody, cancellationToken, true, false);
+                await PersistPlayerSnapshotAsync(deathSnapshot, cancellationToken);
+                await PersistPlayerSnapshotAsync(heirSnapshot, cancellationToken);
+                if (deathSnapshot.KnowledgeSaveTask != null)
+                    await deathSnapshot.KnowledgeSaveTask;
+                var profile = await inheritance.AssumeRegisteredHeirAsync(
+                    deceased.SteamId, Guid.NewGuid().ToString("D"),
+                    deathSnapshot.Survival.CharacterId, deathSnapshot.Revision,
+                    cancellationToken);
+
+                var corpseSurvival = JsonUtility.FromJson<CharacterSurvivalState>(
+                    JsonUtility.ToJson(deathSnapshot.Survival));
+                corpseSurvival.Offline = true;
+                var corpseProfile = new PlayerProfile
+                {
+                    SteamId = 0,
+                    DisplayName = deceased.DisplayName,
+                    Position = deathSnapshot.Position,
+                    InventorySlots = deathSnapshot.Slots,
+                    PendingItems = deathSnapshot.PendingItems,
+                    SelectedHotbarIndex = deathSnapshot.SelectedHotbarIndex,
+                    MapNotes = deceased.ResourceInteraction?.CreateStoredMapNoteSnapshot() ?? new(),
+                    Survival = corpseSurvival,
+                };
+
+                detachedBodies.Remove(heirBody.Survival.ServerState.CharacterId);
+                UnsubscribeCharacter(heirBody);
+                if (heirBody.Player?.NetworkObject.IsSpawned == true)
+                    heirBody.Player.NetworkObject.Despawn(true);
+                if (offlineBodies.TryGetValue(deceased.SteamId, out var currentOffline)
+                    && currentOffline == deceased) offlineBodies.Remove(deceased.SteamId);
+                UnsubscribeCharacter(deceased);
+                if (deceased.Player?.NetworkObject.IsSpawned == true)
+                    deceased.Player.NetworkObject.Despawn(true);
+                SpawnPersistentCharacter(corpseProfile);
+
+                if (connectedClientId.HasValue
+                    && networkManager.ConnectedClients.ContainsKey(connectedClientId.Value))
+                {
+                    var replacement = SpawnControlledCharacter(
+                        connectedClientId.Value, deceased.SteamId, profile);
+                    authenticatedClients[connectedClientId.Value] = replacement;
+                }
+                else
+                {
+                    SpawnPersistentCharacter(profile);
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Could not transfer {deceased?.SteamId} to the registered heir: "
+                    + exception.Message);
+                if (deceased != null)
+                    TrackFinalSave(SavePlayerStateAsync(deceased, lifetime.Token, true));
+            }
+            finally
+            {
+                if (acquired) gate.Release();
+                if (deceased != null) inheritanceAccounts.Remove(deceased.SteamId);
+            }
+        }
+
+        private AuthenticatedClient FindCharacterClient(PlayerSurvival survival)
+        {
+            if (survival == null) return null;
+            foreach (var client in authenticatedClients.Values)
+                if (client.Survival == survival) return client;
+            foreach (var client in offlineBodies.Values)
+                if (client.Survival == survival) return client;
+            foreach (var client in detachedBodies.Values)
+                if (client.Survival == survival) return client;
+            return null;
+        }
+
+        private void UnsubscribeCharacter(AuthenticatedClient client)
+        {
+            if (client?.Player != null) client.Player.ServerDespawning -= OnServerPlayerDespawning;
+            if (client?.Survival == null) return;
+            client.Survival.ServerDied -= OnServerPlayerDied;
+            client.Survival.ServerCaptureCompleted -= OnServerCaptureCompleted;
+            client.Survival.ServerNewStrangerRequested -= OnServerNewStrangerRequested;
+            client.Survival.ServerHeirRegistrationRequested -= OnServerHeirRegistrationRequested;
+            client.Survival.ServerHeirDonationRequested -= OnServerHeirDonationRequested;
+            client.Survival.ServerHeirOfferAcceptanceRequested -= OnServerHeirOfferAcceptanceRequested;
+        }
+
+        private void OnServerCaptureCompleted(PlayerSurvival captured)
+        {
+            if (captured == null || !captured.ServerIsLifeLost) return;
+            foreach (var pair in authenticatedClients)
+            {
+                var client = pair.Value;
+                if (client.Survival != captured) continue;
+                if (!string.IsNullOrWhiteSpace(client.RegisteredHeirCharacterId)
+                    && inheritanceAccounts.Add(client.SteamId))
+                {
+                    TrackFinalSave(AssumeRegisteredHeirAsync(
+                        pair.Key, client, lifetime.Token));
+                    return;
+                }
+                TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
+                return;
+            }
+            foreach (var client in offlineBodies.Values)
+            {
+                if (client.Survival != captured) continue;
+                if (!string.IsNullOrWhiteSpace(client.RegisteredHeirCharacterId)
+                    && inheritanceAccounts.Add(client.SteamId))
+                {
+                    TrackFinalSave(AssumeRegisteredHeirAsync(
+                        null, client, lifetime.Token));
+                    return;
+                }
+                TrackFinalSave(SavePlayerStateAsync(client, lifetime.Token, true));
+                return;
+            }
+        }
+
+        private void OnServerNewStrangerRequested(PlayerSurvival source)
+        {
+            if (source == null || !source.ServerIsLifeLost) return;
+            foreach (var pair in authenticatedClients)
+            {
+                if (inheritanceAccounts.Contains(pair.Value.SteamId)) continue;
+                if (pair.Value.Survival != source || !newLifeClients.Add(pair.Key)) continue;
+                TrackFinalSave(CreateNewStrangerForClientAsync(pair.Key, pair.Value, lifetime.Token));
+                return;
+            }
+        }
+
+        private async Task CreateNewStrangerForClientAsync(
+            ulong clientId, AuthenticatedClient deceased, CancellationToken cancellationToken)
+        {
+            var gate = GetPlayerSaveGate(deceased.SteamId);
+            var acquired = false;
+            try
+            {
+                if (playerRepository is not IPersistentCharacterRepository lifecycle)
+                    throw new InvalidOperationException("Repository does not support permanent character lives.");
+                await gate.WaitAsync(cancellationToken);
+                acquired = true;
+                if (!authenticatedClients.TryGetValue(clientId, out var current)
+                    || current != deceased || !deceased.Survival.ServerIsLifeLost) return;
+
+                var deathSnapshot = CapturePlayerSaveSnapshot(deceased, cancellationToken, true);
+                await PersistPlayerSnapshotAsync(deathSnapshot, cancellationToken);
+                if (deathSnapshot.KnowledgeSaveTask != null) await deathSnapshot.KnowledgeSaveTask;
+                var previousId = deathSnapshot.Survival.CharacterId;
+                var spawn = new Vector3(0f, worldStreamer.SampleHeight(0f, 0f) + 2f, 0f);
+                var nextProfile = await lifecycle.CreateNewStrangerAsync(
+                    deceased.SteamId, Guid.NewGuid().ToString("D"), previousId,
+                    deathSnapshot.Revision, spawn, cancellationToken);
+
+                // The transition increments the archived body's revision. This clone
+                // now becomes the authoritative server-owned body at the death site.
+                var corpseSurvival = JsonUtility.FromJson<CharacterSurvivalState>(
+                    JsonUtility.ToJson(deathSnapshot.Survival));
+                corpseSurvival.Revision = deathSnapshot.Revision + 1;
+                corpseSurvival.Offline = true;
+                var corpseProfile = new PlayerProfile
+                {
+                    SteamId = 0,
+                    DisplayName = deceased.DisplayName,
+                    Position = deathSnapshot.Position,
+                    InventorySlots = deathSnapshot.Slots,
+                    PendingItems = deathSnapshot.PendingItems,
+                    SelectedHotbarIndex = deathSnapshot.SelectedHotbarIndex,
+                    MapNotes = deceased.ResourceInteraction?.CreateStoredMapNoteSnapshot() ?? new(),
+                    Survival = corpseSurvival,
+                };
+                SpawnPersistentCharacter(corpseProfile);
+
+                deceased.Player.ServerDespawning -= OnServerPlayerDespawning;
+                deceased.Survival.ServerDied -= OnServerPlayerDied;
+                deceased.Survival.ServerCaptureCompleted -= OnServerCaptureCompleted;
+                deceased.Survival.ServerNewStrangerRequested -= OnServerNewStrangerRequested;
+                deceased.Survival.ServerHeirRegistrationRequested -= OnServerHeirRegistrationRequested;
+                deceased.Survival.ServerHeirDonationRequested -= OnServerHeirDonationRequested;
+                deceased.Survival.ServerHeirOfferAcceptanceRequested -= OnServerHeirOfferAcceptanceRequested;
+                if (deceased.Player.NetworkObject.IsSpawned)
+                    deceased.Player.NetworkObject.Despawn(true);
+
+                if (!networkManager.ConnectedClients.ContainsKey(clientId)) return;
+                var replacement = SpawnControlledCharacter(clientId, deceased.SteamId, nextProfile);
+                authenticatedClients[clientId] = replacement;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Could not begin a new life for {deceased?.SteamId}: {exception.Message}");
+            }
+            finally
+            {
+                if (acquired) gate.Release();
+                newLifeClients.Remove(clientId);
+            }
+        }
+
+        private AuthenticatedClient SpawnControlledCharacter(
+            ulong clientId, ulong steamId, PlayerProfile profile)
+        {
+            var fallback = new Vector3(0f, worldStreamer.SampleHeight(0f, 0f) + 2f, 0f);
+            var position = ValidateSpawn(profile.Position, fallback);
+            worldStreamer.EnsureLoadedAround(position);
+            var instance = Instantiate(playerPrefab, position, Quaternion.identity);
+            if (instance.GetComponent<NpcBrain>() == null) instance.AddComponent<NpcBrain>();
+            var networkObject = instance.GetComponent<NetworkObject>();
+            networkObject.DontDestroyWithOwner = true;
+            networkObject.SpawnAsPlayerObject(clientId, true);
+            var player = instance.GetComponent<NetworkPlayer>();
+            var inventory = instance.GetComponent<PlayerInventory>();
+            var survival = instance.GetComponent<PlayerSurvival>();
+            var resources = instance.GetComponent<PlayerResourceInteraction>();
+            if (player == null || inventory == null || survival == null || resources == null)
+                throw new InvalidOperationException("Network player prefab is missing character components.");
+            player.AssignServerIdentity(steamId, profile.DisplayName, position);
+            survival.InitializeServer(profile.Survival, steamId, profile.DisplayName);
+            survival.ServerSetOffline(false);
+            inventory.InitializeServer(profile.InventorySlots, profile.PendingItems,
+                profile.SelectedHotbarIndex, steamId);
+            resources.InitializeServer(profile.DepositKnowledge, profile.MapNotes,
+                steamId, worldDefinition.WorldId, playerRepository);
+            var result = new AuthenticatedClient
+            {
+                ClientId = clientId, SteamId = steamId, DisplayName = profile.DisplayName,
+                Player = player, Inventory = inventory, ResourceInteraction = resources, Survival = survival,
+                RegisteredHeirCharacterId = profile.RegisteredHeirCharacterId,
+                EstateRevision = profile.EstateRevision,
+            };
+            player.ServerDespawning += OnServerPlayerDespawning;
+            survival.ServerDied += OnServerPlayerDied;
+            survival.ServerCaptureCompleted += OnServerCaptureCompleted;
+            survival.ServerNewStrangerRequested += OnServerNewStrangerRequested;
+            survival.ServerHeirRegistrationRequested += OnServerHeirRegistrationRequested;
+            survival.ServerHeirDonationRequested += OnServerHeirDonationRequested;
+            survival.ServerHeirOfferAcceptanceRequested += OnServerHeirOfferAcceptanceRequested;
+            return result;
         }
 
         private bool OnWantsToQuit()
@@ -1165,6 +2257,7 @@ namespace Quieter.Networking
         {
             var clients = new List<AuthenticatedClient>(authenticatedClients.Values);
             clients.AddRange(offlineBodies.Values);
+            clients.AddRange(detachedBodies.Values);
             foreach (var client in clients)
             {
                 try

@@ -59,18 +59,18 @@ namespace Quieter.Combat
             while (history.Count > 48) history.RemoveAt(0);
         }
 
-        public void ServerProcessInput(PlayerInputFrame input)
+        public void ServerProcessInput(PlayerInputFrame input, bool autonomous = false)
         {
             if (!IsServer || NetworkManager == null || survival == null) return;
             var now = NetworkManager.ServerTime.Time;
             blocking.Value = input.BlockHeld
-                && survival.CanPerformServerAction()
+                && CanAct(autonomous)
                 && survival.ServerState.Physiology.AcuteStamina > 0.05f;
 
             if (input.AttackPressId != observedAttackPressId)
             {
                 observedAttackPressId = input.AttackPressId;
-                if (now >= nextAttackAt && survival.CanPerformServerAction())
+                if (now >= nextAttackAt && CanAct(autonomous))
                 {
                     attackPressedAt = now;
                     attackArmed = true;
@@ -82,7 +82,7 @@ namespace Quieter.Combat
                 observedAttackReleaseId = input.AttackReleaseId;
                 if (attackArmed)
                 {
-                    ResolveAttack(input, now);
+                    ResolveAttack(input, now, autonomous);
                     attackArmed = false;
                 }
             }
@@ -91,7 +91,7 @@ namespace Quieter.Combat
             {
                 observedDodgePressId = input.DodgePressId;
                 if (now >= nextDodgeAt && input.DodgeDirection.sqrMagnitude > 0.01f
-                    && survival.ServerTrySpendStamina(0.2f))
+                    && TrySpendStamina(0.2f, autonomous))
                 {
                     player.ServerApplyDodge(input.DodgeDirection, 9.5f);
                     nextDodgeAt = now + 0.75d;
@@ -99,7 +99,7 @@ namespace Quieter.Combat
             }
         }
 
-        private void ResolveAttack(PlayerInputFrame input, double now)
+        private void ResolveAttack(PlayerInputFrame input, double now, bool autonomous)
         {
             var heldSeconds = Math.Max(0d, now - attackPressedAt);
             var kind = heldSeconds >= 0.28d ? MeleeAttackKind.Heavy : MeleeAttackKind.Light;
@@ -109,7 +109,7 @@ namespace Quieter.Combat
             var stamina = weapon.StaminaCost * (kind == MeleeAttackKind.Heavy
                 ? Mathf.Lerp(1.25f, 1.8f, charge)
                 : 0.75f);
-            if (!survival.ServerTrySpendStamina(stamina)) return;
+            if (!TrySpendStamina(stamina, autonomous)) return;
             nextAttackAt = now + (kind == MeleeAttackKind.Heavy ? 0.9d : 0.42d);
 
             var requestedTime = Math.Clamp(
@@ -146,7 +146,9 @@ namespace Quieter.Combat
             var incoming = (attackerPosition - bestPosition).normalized;
             var guarded = best.blocking.Value
                 && Vector3.Dot(bestForward.normalized, incoming) > 0.35f
-                && best.survival.ServerTrySpendStamina(0.14f + weapon.BaseImpact * 0.08f);
+                && (best.survival.CanPerformServerAction()
+                    ? best.survival.ServerTrySpendStamina(0.14f + weapon.BaseImpact * 0.08f)
+                    : best.survival.ServerNpcTrySpendStamina(0.14f + weapon.BaseImpact * 0.08f));
             var impact = MeleeCombatRules.ResolveImpact(weapon, kind, charge, guarded);
             var contamination = active.IsEmpty ? 0.18f : 1f - active.Cleanliness / 10000f;
             best.survival.ServerApplyDamage(
@@ -158,6 +160,14 @@ namespace Quieter.Combat
             survival.ServerRegisterPractice(weapon.Skill, 2f, impact, 1f, 0f);
             best.survival.ServerRegisterPractice(SkillId.Defence, 1f, impact, guarded ? 1f : 0.2f, 0f);
         }
+
+        private bool CanAct(bool autonomous) => autonomous
+            ? survival.CanPerformAutonomousServerAction()
+            : survival.CanPerformServerAction();
+
+        private bool TrySpendStamina(float amount, bool autonomous) => autonomous
+            ? survival.ServerNpcTrySpendStamina(amount)
+            : survival.ServerTrySpendStamina(amount);
 
         private bool IsOccluded(Vector3 from, Vector3 to, PlayerCombat target)
         {

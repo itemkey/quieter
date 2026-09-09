@@ -25,6 +25,17 @@ namespace Quieter.Inventory
         Shovel = 3,
     }
 
+    public enum ClothingLayer : byte
+    {
+        None = 0,
+        BaseBody = 1,
+        MidBody = 2,
+        OuterBody = 3,
+        Head = 4,
+        Hands = 5,
+        Feet = 6,
+    }
+
     [CreateAssetMenu(menuName = "Quieter/Item Definition", fileName = "ItemDefinition")]
     public sealed class ItemDefinition : ScriptableObject
     {
@@ -45,12 +56,15 @@ namespace Quieter.Inventory
         [SerializeField, Min(0f)] private float unitVolumeLiters = 0.25f;
         [SerializeField, Min(0f)] private float caloriesPerUnit;
         [SerializeField, Min(0f)] private float proteinGramsPerUnit;
+        [SerializeField, Min(0f)] private float fatGramsPerUnit;
         [SerializeField, Min(0f)] private float micronutrientsPerUnit;
+        [SerializeField, Min(0f)] private float mineralsPerUnit;
         [SerializeField, Min(0f)] private float waterLitersPerUnit;
         [SerializeField, Min(0)] private ushort liquidCapacityMilliliters;
         [SerializeField, Range(0f, 1f)] private float insulation;
         [SerializeField, Range(0f, 1f)] private float waterResistance;
         [SerializeField, Min(0f)] private float shelfLifeGameHours;
+        [SerializeField] private ClothingLayer clothingLayer;
 
         public ushort ItemId => itemId;
         public string DisplayName => string.IsNullOrWhiteSpace(displayName)
@@ -72,12 +86,16 @@ namespace Quieter.Inventory
         public float UnitVolumeLiters => Mathf.Max(0f, unitVolumeLiters);
         public float CaloriesPerUnit => Mathf.Max(0f, caloriesPerUnit);
         public float ProteinGramsPerUnit => Mathf.Max(0f, proteinGramsPerUnit);
+        public float FatGramsPerUnit => Mathf.Max(0f, fatGramsPerUnit);
         public float MicronutrientsPerUnit => Mathf.Max(0f, micronutrientsPerUnit);
+        public float MineralsPerUnit => Mathf.Max(0f, mineralsPerUnit);
         public float WaterLitersPerUnit => Mathf.Max(0f, waterLitersPerUnit);
         public ushort LiquidCapacityMilliliters => liquidCapacityMilliliters;
         public float Insulation => Mathf.Clamp01(insulation);
         public float WaterResistance => Mathf.Clamp01(waterResistance);
         public float ShelfLifeGameHours => Mathf.Max(0f, shelfLifeGameHours);
+        public ClothingLayer ClothingLayer => itemKind == ItemKind.Clothing
+            ? clothingLayer : ClothingLayer.None;
         public bool RequiresInstanceId => maximumStack == 1
             || itemKind == ItemKind.LiquidContainer
             || itemKind == ItemKind.Clothing;
@@ -105,7 +123,10 @@ namespace Quieter.Inventory
             ushort configuredLiquidCapacityMilliliters = 0,
             float configuredInsulation = 0f,
             float configuredWaterResistance = 0f,
-            float configuredShelfLifeGameHours = 0f)
+            float configuredShelfLifeGameHours = 0f,
+            ClothingLayer configuredClothingLayer = ClothingLayer.None,
+            float configuredFatGramsPerUnit = 0f,
+            float configuredMineralsPerUnit = 0f)
         {
             itemId = id;
             displayName = itemName;
@@ -123,12 +144,16 @@ namespace Quieter.Inventory
             unitVolumeLiters = Mathf.Max(0f, configuredUnitVolumeLiters);
             caloriesPerUnit = Mathf.Max(0f, configuredCaloriesPerUnit);
             proteinGramsPerUnit = Mathf.Max(0f, configuredProteinGramsPerUnit);
+            fatGramsPerUnit = Mathf.Max(0f, configuredFatGramsPerUnit);
             micronutrientsPerUnit = Mathf.Max(0f, configuredMicronutrientsPerUnit);
+            mineralsPerUnit = Mathf.Max(0f, configuredMineralsPerUnit);
             waterLitersPerUnit = Mathf.Max(0f, configuredWaterLitersPerUnit);
             liquidCapacityMilliliters = configuredLiquidCapacityMilliliters;
             insulation = Mathf.Clamp01(configuredInsulation);
             waterResistance = Mathf.Clamp01(configuredWaterResistance);
             shelfLifeGameHours = Mathf.Max(0f, configuredShelfLifeGameHours);
+            clothingLayer = kind == ItemKind.Clothing
+                ? configuredClothingLayer : ClothingLayer.None;
         }
 #endif
     }

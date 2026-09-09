@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
+  m_Name: LinenUndertunicRecipe
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
+  recipeId: 30
+  displayName: "\u041B\u044C\u043D\u044F\u043D\u0430\u044F \u043D\u0438\u0436\u043D\u044F\u044F
+    \u0440\u0443\u0431\u0430\u0445\u0430"
+  category: 0
+  ingredients:
+  - Item: {fileID: 11400000, guid: e7076783273e3b54fb739ee406d1c40d, type: 2}
+    Quantity: 2
+  output: {fileID: 11400000, guid: ff215d876171751498a189cabe374ef3, type: 2}
+  outputQuantity: 1
+  workSeconds: 45
+  requiresBurningHearth: 0
+  practiceSkill: 17

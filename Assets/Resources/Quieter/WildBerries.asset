@@ -32,7 +32,12 @@ MonoBehaviour:
   unitVolumeLiters: 0.25
   caloriesPerUnit: 55
   proteinGramsPerUnit: 0.7
+  fatGramsPerUnit: 0.3
   micronutrientsPerUnit: 0.15
+  mineralsPerUnit: 0.06
   waterLitersPerUnit: 0.02
   liquidCapacityMilliliters: 0
+  insulation: 0
+  waterResistance: 0
   shelfLifeGameHours: 30
+  clothingLayer: 0

@@ -32,7 +32,9 @@ public sealed record PlayerProfileResponse(
     IReadOnlyList<MapNoteResponse> MapNotes,
     string CharacterId,
     string SurvivalJson,
-    long SurvivalRevision);
+    long SurvivalRevision,
+    string? RegisteredHeirCharacterId = null,
+    long EstateRevision = 0);
 
 public sealed record PositionRequest(float X, float Y, float Z);
 
@@ -66,6 +68,45 @@ public sealed record SurvivalRequest(string SurvivalJson, long Revision);
 public sealed record PlayerSnapshotRequest(
     string CharacterId, PositionRequest Position, InventoryRequest Inventory, SurvivalRequest Survival);
 
+public sealed record WorldCharacterListResponse(IReadOnlyList<PlayerProfileResponse> Characters);
+
+public sealed record NewStrangerRequest(
+    string OperationId, string PreviousCharacterId, long ExpectedRevision, PositionRequest Position);
+
+public sealed record CharacterPairSnapshotRequest(
+    string OperationId, PlayerSnapshotRequest Source,
+    string DestinationSteamId, PlayerSnapshotRequest Destination);
+
+public sealed record CreateWorldNpcRequest(string Name, PlayerSnapshotRequest Snapshot);
+
+public sealed record RegisterHeirRequest(string HeirCharacterId, long ExpectedEstateRevision);
+
+public sealed record AssumeHeirRequest(
+    string OperationId, string DeceasedCharacterId, long ExpectedRevision);
+
+public sealed record CreateHeirOfferRequest(
+    string OperationId,
+    string RecipientSteamId,
+    string DeceasedCharacterId,
+    long ExpectedDonorEstateRevision);
+
+public sealed record AcceptHeirOfferRequest(
+    string OperationId,
+    string DeceasedCharacterId,
+    long ExpectedRevision);
+
+public sealed record HeirOfferResponse(
+    string OfferId,
+    string DonorSteamId,
+    string DonorDisplayName,
+    string RecipientSteamId,
+    string DeceasedCharacterId,
+    string HeirCharacterId,
+    string HeirName,
+    DateTime OfferedAtUtc,
+    DateTime AcceptanceStartedAtUtc,
+    DateTime ExpiresAtUtc);
+
 public sealed record PlacedObjectResponse(
     string ObjectId,
     ushort ItemId,
@@ -75,7 +116,10 @@ public sealed record PlacedObjectResponse(
     float Yaw,
     InventorySlotResponse? Input,
     DateTime CreatedAtUtc,
-    DateTime UpdatedAtUtc);
+    DateTime UpdatedAtUtc,
+    string? OwnerAccountId = null,
+    bool Locked = false,
+    string? AssignedCharacterId = null);
 
 public sealed record PlacedObjectListResponse(
     IReadOnlyList<PlacedObjectResponse> Objects);

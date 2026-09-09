@@ -7,6 +7,10 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
     public DbSet<WorldEntity> Worlds => Set<WorldEntity>();
     public DbSet<PlayerEntity> Players => Set<PlayerEntity>();
     public DbSet<CharacterEntity> Characters => Set<CharacterEntity>();
+    public DbSet<CharacterReplacementEntity> CharacterReplacements => Set<CharacterReplacementEntity>();
+    public DbSet<CharacterTransferEntity> CharacterTransfers => Set<CharacterTransferEntity>();
+    public DbSet<InheritanceTransitionEntity> InheritanceTransitions => Set<InheritanceTransitionEntity>();
+    public DbSet<HeirOfferEntity> HeirOffers => Set<HeirOfferEntity>();
     public DbSet<CharacterItemEntity> CharacterItems => Set<CharacterItemEntity>();
     public DbSet<PlayerInventorySlotEntity> PlayerInventorySlots => Set<PlayerInventorySlotEntity>();
     public DbSet<PlayerPendingItemEntity> PlayerPendingItems => Set<PlayerPendingItemEntity>();
@@ -33,6 +37,8 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.Property(player => player.DisplayName).HasMaxLength(32);
             entity.Property(player => player.SelectedHotbarIndex).HasDefaultValue((byte)0);
             entity.Property(player => player.CurrentCharacterId).IsConcurrencyToken();
+            entity.Property(player => player.EstateRevision).IsConcurrencyToken();
+            entity.HasIndex(player => player.RegisteredHeirCharacterId);
             entity.HasOne(player => player.CurrentCharacter)
                 .WithOne(character => character.ControllingPlayer)
                 .HasForeignKey<PlayerEntity>(player => player.CurrentCharacterId)
@@ -69,6 +75,44 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
                 .HasForeignKey(item => item.CharacterId).OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<CharacterReplacementEntity>(entity =>
+        {
+            entity.ToTable("character_replacements");
+            entity.HasKey(entry => entry.OperationId);
+            entity.Property(entry => entry.SteamId).HasPrecision(20, 0);
+            entity.HasIndex(entry => entry.PreviousCharacterId).IsUnique();
+            entity.HasOne(entry => entry.Player).WithMany()
+                .HasForeignKey(entry => entry.SteamId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterTransferEntity>(entity =>
+        {
+            entity.ToTable("character_transfers");
+            entity.HasKey(entry => entry.OperationId);
+            entity.HasIndex(entry => entry.CreatedAtUtc);
+        });
+
+        modelBuilder.Entity<InheritanceTransitionEntity>(entity =>
+        {
+            entity.ToTable("inheritance_transitions");
+            entity.HasKey(entry => entry.OperationId);
+            entity.Property(entry => entry.SteamId).HasPrecision(20, 0);
+            entity.HasIndex(entry => entry.DeceasedCharacterId).IsUnique();
+            entity.HasOne(entry => entry.Player).WithMany()
+                .HasForeignKey(entry => entry.SteamId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<HeirOfferEntity>(entity =>
+        {
+            entity.ToTable("heir_offers");
+            entity.HasKey(entry => entry.OfferId);
+            entity.HasIndex(entry => entry.OperationId).IsUnique();
+            entity.HasIndex(entry => new { entry.RecipientSteamId, entry.Status });
+            entity.HasIndex(entry => entry.HeirCharacterId);
+            entity.Property(entry => entry.DonorSteamId).HasPrecision(20, 0);
+            entity.Property(entry => entry.RecipientSteamId).HasPrecision(20, 0);
+        });
+
         modelBuilder.Entity<PlayerInventorySlotEntity>(entity =>
         {
             entity.ToTable("player_inventory_slots");
@@ -94,6 +138,8 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
             entity.ToTable("world_placed_objects");
             entity.HasKey(item => new { item.WorldId, item.ObjectId });
             entity.Property(item => item.ObjectId).HasPrecision(20, 0);
+            entity.Property(item => item.OwnerAccountId).HasPrecision(20, 0);
+            entity.HasIndex(item => item.AssignedCharacterId);
             entity.Property(item => item.InputSourceNodeId).HasPrecision(20, 0);
             entity.Property(item => item.InputSampleId).HasPrecision(20, 0);
             entity.Property(item => item.InputItemInstanceId).HasPrecision(20, 0);

@@ -2,9 +2,12 @@ using System;
 using System.Collections.Generic;
 using Quieter.Core;
 using Quieter.Inventory;
+using Quieter.Persistence;
+using Quieter.World;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 namespace Quieter.Survival
 {
@@ -13,6 +16,19 @@ namespace Quieter.Survival
         public SymptomFlags Symptoms;
         public CharacterLifeState LifeState;
         public byte VisibleWoundCount;
+        public bool Sleeping;
+        public bool Bound;
+        public bool Captive;
+        public CharacterControlKind ControlKind;
+        public NpcActivityKind Activity;
+        public WorkerJobKind ObservedJob;
+        public byte ObservedSkillMinimum;
+        public byte ObservedSkillMaximum;
+        public bool HasWorkEvidence;
+        public NpcPersonalRequestKind PersonalRequest;
+        public bool HasPersonalRequest;
+        public CorpseDecayStage CorpseStage;
+        public byte CorpseContamination;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer)
             where T : IReaderWriter
@@ -20,12 +36,38 @@ namespace Quieter.Survival
             serializer.SerializeValue(ref Symptoms);
             serializer.SerializeValue(ref LifeState);
             serializer.SerializeValue(ref VisibleWoundCount);
+            serializer.SerializeValue(ref Sleeping);
+            serializer.SerializeValue(ref Bound);
+            serializer.SerializeValue(ref Captive);
+            serializer.SerializeValue(ref ControlKind);
+            serializer.SerializeValue(ref Activity);
+            serializer.SerializeValue(ref ObservedJob);
+            serializer.SerializeValue(ref ObservedSkillMinimum);
+            serializer.SerializeValue(ref ObservedSkillMaximum);
+            serializer.SerializeValue(ref HasWorkEvidence);
+            serializer.SerializeValue(ref PersonalRequest);
+            serializer.SerializeValue(ref HasPersonalRequest);
+            serializer.SerializeValue(ref CorpseStage);
+            serializer.SerializeValue(ref CorpseContamination);
         }
 
         public bool Equals(PublicSymptomState other)
             => Symptoms == other.Symptoms
                 && LifeState == other.LifeState
-                && VisibleWoundCount == other.VisibleWoundCount;
+                && VisibleWoundCount == other.VisibleWoundCount
+                && Sleeping == other.Sleeping
+                && Bound == other.Bound
+                && Captive == other.Captive
+                && ControlKind == other.ControlKind
+                && Activity == other.Activity
+                && ObservedJob == other.ObservedJob
+                && ObservedSkillMinimum == other.ObservedSkillMinimum
+                && ObservedSkillMaximum == other.ObservedSkillMaximum
+                && HasWorkEvidence == other.HasWorkEvidence
+                && PersonalRequest == other.PersonalRequest
+                && HasPersonalRequest == other.HasPersonalRequest
+                && CorpseStage == other.CorpseStage
+                && CorpseContamination == other.CorpseContamination;
     }
 
     public struct OwnerConditionState : INetworkSerializable, IEquatable<OwnerConditionState>
@@ -40,10 +82,17 @@ namespace Quieter.Survival
         public byte PainStage;
         public byte BladderStage;
         public byte BowelStage;
+        public byte GastrointestinalStage;
+        public byte RespiratoryStage;
+        public byte ParasiteStage;
         public uint WoundedRegions;
         public uint FracturedRegions;
         public bool NeedsCharacterCreation;
         public bool Sleeping;
+        public bool Bound;
+        public bool Captive;
+        public bool BeingCarried;
+        public CharacterControlKind ControlKind;
         public byte TraitSelectionError;
         public ushort Revision;
 
@@ -60,10 +109,17 @@ namespace Quieter.Survival
             serializer.SerializeValue(ref PainStage);
             serializer.SerializeValue(ref BladderStage);
             serializer.SerializeValue(ref BowelStage);
+            serializer.SerializeValue(ref GastrointestinalStage);
+            serializer.SerializeValue(ref RespiratoryStage);
+            serializer.SerializeValue(ref ParasiteStage);
             serializer.SerializeValue(ref WoundedRegions);
             serializer.SerializeValue(ref FracturedRegions);
             serializer.SerializeValue(ref NeedsCharacterCreation);
             serializer.SerializeValue(ref Sleeping);
+            serializer.SerializeValue(ref Bound);
+            serializer.SerializeValue(ref Captive);
+            serializer.SerializeValue(ref BeingCarried);
+            serializer.SerializeValue(ref ControlKind);
             serializer.SerializeValue(ref TraitSelectionError);
             serializer.SerializeValue(ref Revision);
         }
@@ -79,11 +135,75 @@ namespace Quieter.Survival
                 && PainStage == other.PainStage
                 && BladderStage == other.BladderStage
                 && BowelStage == other.BowelStage
+                && GastrointestinalStage == other.GastrointestinalStage
+                && RespiratoryStage == other.RespiratoryStage
+                && ParasiteStage == other.ParasiteStage
                 && WoundedRegions == other.WoundedRegions
                 && FracturedRegions == other.FracturedRegions
                 && NeedsCharacterCreation == other.NeedsCharacterCreation
                 && Sleeping == other.Sleeping
+                && Bound == other.Bound
+                && Captive == other.Captive
+                && BeingCarried == other.BeingCarried
+                && ControlKind == other.ControlKind
                 && TraitSelectionError == other.TraitSelectionError
+                && Revision == other.Revision;
+    }
+
+    public struct PublicWorkerContractState : INetworkSerializable,
+        IEquatable<PublicWorkerContractState>
+    {
+        public bool Active;
+        public bool Voluntary;
+        public WorkerJobKind ActiveJob;
+        public WorkerJobKind SelectedJob;
+        public byte SelectedPriority;
+        public ushort DailyRationCalories;
+        public float WorkdayStartHour;
+        public float WorkdayEndHour;
+        public float WorkZoneRadius;
+        public Vector3 WorkZoneCenter;
+        public Vector3 StoragePosition;
+        public ushort PaymentItemId;
+        public ushort PaymentQuantity;
+        public byte ConsecutiveBreaches;
+        public ushort Revision;
+
+        public void NetworkSerialize<T>(BufferSerializer<T> serializer)
+            where T : IReaderWriter
+        {
+            serializer.SerializeValue(ref Active);
+            serializer.SerializeValue(ref Voluntary);
+            serializer.SerializeValue(ref ActiveJob);
+            serializer.SerializeValue(ref SelectedJob);
+            serializer.SerializeValue(ref SelectedPriority);
+            serializer.SerializeValue(ref DailyRationCalories);
+            serializer.SerializeValue(ref WorkdayStartHour);
+            serializer.SerializeValue(ref WorkdayEndHour);
+            serializer.SerializeValue(ref WorkZoneRadius);
+            serializer.SerializeValue(ref WorkZoneCenter);
+            serializer.SerializeValue(ref StoragePosition);
+            serializer.SerializeValue(ref PaymentItemId);
+            serializer.SerializeValue(ref PaymentQuantity);
+            serializer.SerializeValue(ref ConsecutiveBreaches);
+            serializer.SerializeValue(ref Revision);
+        }
+
+        public bool Equals(PublicWorkerContractState other)
+            => Active == other.Active
+                && Voluntary == other.Voluntary
+                && ActiveJob == other.ActiveJob
+                && SelectedJob == other.SelectedJob
+                && SelectedPriority == other.SelectedPriority
+                && DailyRationCalories == other.DailyRationCalories
+                && Mathf.Approximately(WorkdayStartHour, other.WorkdayStartHour)
+                && Mathf.Approximately(WorkdayEndHour, other.WorkdayEndHour)
+                && Mathf.Approximately(WorkZoneRadius, other.WorkZoneRadius)
+                && WorkZoneCenter == other.WorkZoneCenter
+                && StoragePosition == other.StoragePosition
+                && PaymentItemId == other.PaymentItemId
+                && PaymentQuantity == other.PaymentQuantity
+                && ConsecutiveBreaches == other.ConsecutiveBreaches
                 && Revision == other.Revision;
     }
 
@@ -139,6 +259,35 @@ namespace Quieter.Survival
         };
 
         public static MovementCapabilityState Normal => From(CharacterCapabilities.Normal);
+    }
+
+    public struct OwnerHeirOfferState : INetworkSerializable, IEquatable<OwnerHeirOfferState>
+    {
+        public bool Available;
+        public FixedString64Bytes OfferId;
+        public FixedString64Bytes DonorName;
+        public FixedString64Bytes HeirName;
+        public long ExpiresAtUtcTicks;
+        public ushort Revision;
+
+        public void NetworkSerialize<T>(BufferSerializer<T> serializer)
+            where T : IReaderWriter
+        {
+            serializer.SerializeValue(ref Available);
+            serializer.SerializeValue(ref OfferId);
+            serializer.SerializeValue(ref DonorName);
+            serializer.SerializeValue(ref HeirName);
+            serializer.SerializeValue(ref ExpiresAtUtcTicks);
+            serializer.SerializeValue(ref Revision);
+        }
+
+        public bool Equals(OwnerHeirOfferState other)
+            => Available == other.Available
+                && OfferId.Equals(other.OfferId)
+                && DonorName.Equals(other.DonorName)
+                && HeirName.Equals(other.HeirName)
+                && ExpiresAtUtcTicks == other.ExpiresAtUtcTicks
+                && Revision == other.Revision;
     }
 
     [Flags]
@@ -275,9 +424,18 @@ namespace Quieter.Survival
             default,
             NetworkVariableReadPermission.Owner,
             NetworkVariableWritePermission.Server);
+        private readonly NetworkVariable<OwnerHeirOfferState> ownerHeirOffer = new(
+            default,
+            NetworkVariableReadPermission.Owner,
+            NetworkVariableWritePermission.Server);
+        private readonly NetworkVariable<PublicWorkerContractState> publicWorkerContract = new(
+            default,
+            NetworkVariableReadPermission.Everyone,
+            NetworkVariableWritePermission.Server);
 
         private CharacterSurvivalState serverState;
         private PlayerInventory inventory;
+        private Quieter.Player.NetworkPlayer networkPlayer;
         private float accumulator;
         private float exertion;
         private ushort replicatedRevision;
@@ -288,15 +446,44 @@ namespace Quieter.Survival
         private double pendingTreatmentCompletesAt;
         private ushort treatmentRevision;
         private float nextProgressionReplicationAt;
+        private PlayerSurvival pendingTreatmentTarget;
+        private PlayerSurvival activeExternalHealer;
+        private ulong consentedHealerObjectId;
+        private double consentExpiresAt;
+        private ulong pendingConsentHealerObjectId;
+        private string pendingConsentHealerName = string.Empty;
+        private string externalMedicalMessage = string.Empty;
+        private float externalMedicalMessageUntil;
+        private PlayerSurvival focusedMedicalTarget;
+        private uint inspectedExternalWoundId;
+        private PlayerSurvival serverCarrier;
+        private PlayerSurvival serverCarriedTarget;
+        private ulong serverSteamId;
+        private bool captureCompletionRaised;
+        private float nextCorpseUpdateAt;
 
         public event Action Changed;
         public event Action<CharacterSurvivalState> ServerDied;
+        public event Action<PlayerSurvival> ServerNewStrangerRequested;
+        public event Action<PlayerSurvival> ServerCaptureCompleted;
+        public event Action<PlayerSurvival, PlayerSurvival> ServerHeirRegistrationRequested;
+        public event Action<PlayerSurvival, PlayerSurvival> ServerHeirDonationRequested;
+        public event Action<PlayerSurvival> ServerHeirOfferAcceptanceRequested;
 
         public PublicSymptomState PublicSymptoms => publicSymptoms.Value;
         public OwnerConditionState OwnerCondition => ownerCondition.Value;
+        public OwnerHeirOfferState OwnerHeirOffer => ownerHeirOffer.Value;
+        public PublicWorkerContractState PublicWorkerContract => publicWorkerContract.Value;
         public CharacterSurvivalState ServerState => IsServer ? serverState : null;
         public bool ServerIsDead => IsServer
             && serverState?.Physiology?.LifeState == CharacterLifeState.Dead;
+        public bool ServerIsLifeLost => IsServer && serverState != null
+            && (ServerIsDead || serverState.ControlKind == CharacterControlKind.ForcedNpc);
+        public bool ServerCanBeSearched => IsServer && serverState != null
+            && (ServerIsDead && !ServerCorpseItemsSealed
+                || !ServerIsDead && (serverState.Sleeping || serverState.Bound
+                    || serverState.Physiology.LifeState is
+                        CharacterLifeState.Unconscious or CharacterLifeState.Agonal));
         public CharacterCapabilities CurrentCapabilities
             => movementCapability.Value.ToCapabilities();
         public TreatmentActivityState TreatmentActivity => treatmentActivity.Value;
@@ -304,6 +491,32 @@ namespace Quieter.Survival
         public ObservedWoundState GetObservedWound(int index)
             => index >= 0 && index < observedWounds.Count ? observedWounds[index] : default;
         public int ProgressionEntryCount => progressionEntries.Count;
+        public bool HasMedicalConsentRequest => pendingConsentHealerObjectId != 0;
+        public string MedicalConsentHealerName => pendingConsentHealerName;
+        public string ExternalMedicalMessage => Time.unscaledTime <= externalMedicalMessageUntil
+            ? externalMedicalMessage : string.Empty;
+        public string FocusedMedicalTargetName => focusedMedicalTarget == null
+            ? string.Empty : focusedMedicalTarget.GetComponent<Quieter.Player.NetworkPlayer>()?.DisplayName;
+        public CharacterControlKind FocusedTargetControlKind => focusedMedicalTarget == null
+            ? CharacterControlKind.Player : focusedMedicalTarget.PublicSymptoms.ControlKind;
+        public CharacterLifeState FocusedTargetLifeState => focusedMedicalTarget == null
+            ? CharacterLifeState.Conscious : focusedMedicalTarget.PublicSymptoms.LifeState;
+        public NpcActivityKind FocusedTargetActivity => focusedMedicalTarget == null
+            ? NpcActivityKind.Idle : focusedMedicalTarget.PublicSymptoms.Activity;
+        public WorkerJobKind FocusedTargetJob => focusedMedicalTarget == null
+            ? WorkerJobKind.Mining : focusedMedicalTarget.PublicSymptoms.ObservedJob;
+        public bool FocusedTargetHasWorkEvidence => focusedMedicalTarget != null
+            && focusedMedicalTarget.PublicSymptoms.HasWorkEvidence;
+        public (byte Minimum, byte Maximum) FocusedTargetSkillRange => focusedMedicalTarget == null
+            ? ((byte)0, (byte)0)
+            : (focusedMedicalTarget.PublicSymptoms.ObservedSkillMinimum,
+                focusedMedicalTarget.PublicSymptoms.ObservedSkillMaximum);
+        public bool FocusedTargetHasPersonalRequest => focusedMedicalTarget != null
+            && focusedMedicalTarget.PublicSymptoms.HasPersonalRequest;
+        public NpcPersonalRequestKind FocusedTargetPersonalRequest => focusedMedicalTarget == null
+            ? NpcPersonalRequestKind.Food : focusedMedicalTarget.PublicSymptoms.PersonalRequest;
+        public PublicWorkerContractState FocusedTargetWorkerContract => focusedMedicalTarget == null
+            ? default : focusedMedicalTarget.PublicWorkerContract;
         public ProgressionEntryState GetProgressionEntry(int index)
             => index >= 0 && index < progressionEntries.Count
                 ? progressionEntries[index]
@@ -312,6 +525,91 @@ namespace Quieter.Survival
         private void Awake()
         {
             inventory = GetComponent<PlayerInventory>();
+            networkPlayer = GetComponent<Quieter.Player.NetworkPlayer>();
+        }
+
+        private void Update()
+        {
+            if (!IsSpawned || !IsOwner) return;
+            UpdateFocusedMedicalTarget();
+            var keyboard = Keyboard.current;
+            if (keyboard == null) return;
+            if (HasMedicalConsentRequest)
+            {
+                if (keyboard.yKey.wasPressedThisFrame) RespondToMedicalConsent(true);
+                else if (keyboard.nKey.wasPressedThisFrame) RespondToMedicalConsent(false);
+            }
+            if (focusedMedicalTarget == null) return;
+            var shifted = keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed;
+            if (shifted)
+            {
+                if (keyboard.f1Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.Warm);
+                else if (keyboard.f2Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.Cool);
+                else if (keyboard.f3Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.OralRehydration);
+                else if (keyboard.f4Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.HerbalPainRelief);
+                else if (keyboard.f5Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.DentalExtraction);
+                else if (keyboard.f6Key.wasPressedThisFrame)
+                    RequestExternalTreatment(MedicalActionType.AntiparasiticCourse);
+                else shifted = false;
+                if (shifted) return;
+            }
+            if (keyboard.tKey.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Inspect);
+            else if (keyboard.f1Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.ApplyPressure);
+            else if (keyboard.f2Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Wash);
+            else if (keyboard.f3Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Disinfect);
+            else if (keyboard.f4Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Suture);
+            else if (keyboard.f5Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Bandage);
+            else if (keyboard.f6Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.Splint);
+            else if (keyboard.f7Key.wasPressedThisFrame)
+                RequestExternalTreatment(MedicalActionType.RemoveBandage);
+            else if (keyboard.f8Key.wasPressedThisFrame)
+                RequestToggleBinding();
+            else if (keyboard.f9Key.wasPressedThisFrame)
+                RequestToggleCarry();
+            else if (keyboard.f10Key.wasPressedThisFrame)
+                RequestBeginCapture();
+            else if (keyboard.f11Key.wasPressedThisFrame)
+            {
+                if (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed)
+                    RequestRegisterHeir();
+                else RequestOfferContract();
+            }
+            else if (keyboard.f12Key.wasPressedThisFrame)
+            {
+                if (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed)
+                    RequestDonateHeir();
+                else RequestCycleNpcJob();
+            }
+        }
+
+        private void UpdateFocusedMedicalTarget()
+        {
+            focusedMedicalTarget = null;
+            var camera = GetComponent<Quieter.Player.NetworkPlayer>()?.OwnerCamera;
+            if (camera == null) return;
+            var ray = new Ray(camera.transform.position, camera.transform.forward);
+            var hits = Physics.RaycastAll(ray, 3.75f, ~0, QueryTriggerInteraction.Ignore);
+            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+            foreach (var hit in hits)
+            {
+                var candidate = hit.collider.GetComponentInParent<PlayerSurvival>();
+                if (candidate == this) continue;
+                if (candidate == null) return;
+                focusedMedicalTarget = candidate;
+                return;
+            }
         }
 
         public override void OnNetworkSpawn()
@@ -322,23 +620,41 @@ namespace Quieter.Survival
             observedWounds.OnListChanged += OnObservedWoundsChanged;
             treatmentActivity.OnValueChanged += OnTreatmentActivityChanged;
             progressionEntries.OnListChanged += OnProgressionEntriesChanged;
+            ownerHeirOffer.OnValueChanged += OnOwnerHeirOfferChanged;
+            publicWorkerContract.OnValueChanged += OnPublicWorkerContractChanged;
             Changed?.Invoke();
         }
 
         public override void OnNetworkDespawn()
         {
+            if (IsServer)
+            {
+                ReleaseCarriedTarget();
+                if (serverCarrier != null && serverCarrier.serverCarriedTarget == this)
+                    serverCarrier.ReleaseCarriedTarget();
+            }
             publicSymptoms.OnValueChanged -= OnPublicSymptomsChanged;
             ownerCondition.OnValueChanged -= OnOwnerConditionChanged;
             movementCapability.OnValueChanged -= OnMovementCapabilityChanged;
             observedWounds.OnListChanged -= OnObservedWoundsChanged;
             treatmentActivity.OnValueChanged -= OnTreatmentActivityChanged;
             progressionEntries.OnListChanged -= OnProgressionEntriesChanged;
+            ownerHeirOffer.OnValueChanged -= OnOwnerHeirOfferChanged;
+            publicWorkerContract.OnValueChanged -= OnPublicWorkerContractChanged;
         }
 
         private void FixedUpdate()
         {
-            if (!IsSpawned || !IsServer || serverState == null || ServerIsDead
-                || !serverState.CreationCompleted)
+            if (!IsSpawned || !IsServer || serverState == null)
+                return;
+            TickServerCarry();
+            TickServerCapture();
+            if (ServerIsDead)
+            {
+                TickCorpseState();
+                return;
+            }
+            if (!serverState.CreationCompleted)
             {
                 return;
             }
@@ -374,6 +690,9 @@ namespace Quieter.Survival
                 ResolveEnvironment(transform.position, elapsed),
                 exertion,
                 offlineMetabolismSlowed: slowOfflineMetabolism);
+            ApplyNearbyCorpseExposure(elapsed);
+            ApplyNearbyRespiratoryExposure(elapsed);
+            if (!wasDead && ServerIsDead) EnsureCorpseState();
             if (serverState.Sleeping)
             {
                 serverState.Physiology.CurrentSleepSeconds += elapsed;
@@ -406,6 +725,7 @@ namespace Quieter.Survival
             }
             if (!wasDead && ServerIsDead)
             {
+                ReleaseCarriedTarget();
                 ServerDied?.Invoke(serverState);
             }
         }
@@ -428,7 +748,11 @@ namespace Quieter.Survival
                 serverState.CharacterName = string.IsNullOrWhiteSpace(name) ? "Чужак" : name;
             }
             serverState.Offline = false;
+            serverSteamId = steamId;
+            serverState.CarriedByCharacterId = string.Empty;
+            captureCompletionRaised = false;
             serverState.Physiology.SafeOfflineSeconds = 0f;
+            if (ServerIsDead) EnsureCorpseState();
             ReplicateState();
             ReplicateProgression();
         }
@@ -467,6 +791,13 @@ namespace Quieter.Survival
         {
             if (!IsServer || serverState == null) return;
             serverState.Physiology.SafeOfflineSeconds = 0f;
+            if (serverState.Offline)
+            {
+                // The disconnected body remains asleep, but dangerous exposure
+                // resumes full-rate simulation for the next ten minutes.
+                ReplicateState();
+                return;
+            }
             serverState.Sleeping = false;
             serverState.Physiology.CurrentSleepSeconds = 0f;
             serverState.Physiology.SleepCycleConsolidated = false;
@@ -479,6 +810,64 @@ namespace Quieter.Survival
             {
                 exertion = Mathf.Max(exertion, Mathf.Clamp01(value));
             }
+        }
+
+        public bool ServerCorpseItemsSealed => IsServer && ServerIsDead
+            && serverState.Corpse?.ItemsSealedByBurial == true;
+
+        public bool ServerBuryCorpse(out string message)
+        {
+            message = string.Empty;
+            if (!IsServer || !ServerIsDead)
+            {
+                message = "Погребать можно только мёртвое тело.";
+                return false;
+            }
+            EnsureCorpseState();
+            if (serverState.Corpse.Stage == CorpseDecayStage.Cremated)
+            {
+                message = "После сожжения осталось только негорючее содержимое.";
+                return false;
+            }
+            if (serverState.Corpse.Stage == CorpseDecayStage.Buried)
+            {
+                message = "Останки уже погребены.";
+                return false;
+            }
+            LivingWorldSimulation.Bury(serverState.Corpse);
+            serverState.ControlKind = CharacterControlKind.Remains;
+            serverState.Revision++;
+            ReplicateState();
+            message = "Останки погребены. Вещи запечатаны вместе с ними.";
+            return true;
+        }
+
+        public bool ServerCremateCorpse(out string message)
+        {
+            message = string.Empty;
+            if (!IsServer || !ServerIsDead)
+            {
+                message = "Сжечь можно только мёртвое тело.";
+                return false;
+            }
+            EnsureCorpseState();
+            if (serverState.Corpse.Stage == CorpseDecayStage.Buried)
+            {
+                message = "Погребённые останки сначала пришлось бы выкопать.";
+                return false;
+            }
+            if (serverState.Corpse.Stage == CorpseDecayStage.Cremated)
+            {
+                message = "Останки уже сожжены.";
+                return false;
+            }
+            inventory?.ServerDestroyOrganicItemsForCremation();
+            LivingWorldSimulation.Cremate(serverState.Corpse);
+            serverState.ControlKind = CharacterControlKind.Remains;
+            serverState.Revision++;
+            ReplicateState();
+            message = "Тело сожжено. Органика уничтожена, негорючие вещи остались.";
+            return true;
         }
 
         public void ServerSetCarriedMass(float kilograms)
@@ -539,7 +928,9 @@ namespace Quieter.Survival
             float micronutrients,
             float waterLiters,
             float biologicalContamination,
-            float toxinContamination)
+            float toxinContamination,
+            float fat = 0f,
+            float minerals = 0f)
         {
             if (!CanPerformServerAction()) return false;
             PhysiologySimulation.ConsumeFood(
@@ -548,7 +939,9 @@ namespace Quieter.Survival
                 protein,
                 micronutrients,
                 biologicalContamination,
-                toxinContamination);
+                toxinContamination,
+                fat,
+                minerals);
             if (waterLiters > 0f)
             {
                 PhysiologySimulation.ConsumeWater(
@@ -580,9 +973,303 @@ namespace Quieter.Survival
             return true;
         }
 
+        public void ServerApplyPreparedLiquidEffects(LiquidKind kind, float liters)
+        {
+            if (!IsServer || serverState == null || liters <= 0f) return;
+            if (kind == LiquidKind.Broth)
+            {
+                PhysiologySimulation.ConsumeFood(
+                    serverState,
+                    180f * liters,
+                    5f * liters,
+                    0.18f * liters,
+                    0f,
+                    0f,
+                    2f * liters,
+                    0.14f * liters);
+            }
+            else if (kind == LiquidKind.HerbalInfusion)
+            {
+                PhysiologySimulation.ConsumeHerbalInfusion(serverState, liters);
+            }
+            ReplicateState();
+        }
+
+        public bool ServerNpcConsumeFood(
+            float calories,
+            float protein,
+            float micronutrients,
+            float waterLiters,
+            float biologicalContamination,
+            float toxinContamination,
+            float fat = 0f,
+            float minerals = 0f)
+        {
+            if (!CanPerformAutonomousServerAction()) return false;
+            PhysiologySimulation.ConsumeFood(
+                serverState,
+                calories,
+                protein,
+                micronutrients,
+                biologicalContamination,
+                toxinContamination,
+                fat,
+                minerals);
+            if (waterLiters > 0f)
+            {
+                PhysiologySimulation.ConsumeWater(
+                    serverState,
+                    waterLiters,
+                    biologicalContamination,
+                    toxinContamination);
+            }
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerNpcConsumeLiquid(
+            float liters,
+            float biologicalContamination,
+            float toxinContamination,
+            float electrolyteContent,
+            float hydrationEfficiency)
+        {
+            if (!CanPerformAutonomousServerAction() || liters <= 0f) return false;
+            PhysiologySimulation.ConsumeWater(
+                serverState,
+                liters,
+                biologicalContamination,
+                toxinContamination,
+                electrolyteContent,
+                hydrationEfficiency);
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerReceiveCareWater(float liters)
+        {
+            if (!IsServer || serverState?.Physiology == null || ServerIsDead || liters <= 0f)
+                return false;
+            PhysiologySimulation.ConsumeWater(serverState, liters, 0f, 0f);
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerNpcBeginSleep()
+        {
+            if (!CanPerformAutonomousServerAction()) return false;
+            PhysiologySimulation.BeginSleep(serverState);
+            serverState.Physiology.CurrentSleepSeconds = 0f;
+            ReplicateState();
+            return true;
+        }
+
+        public void ServerNpcEndSleep()
+        {
+            if (!IsServer || serverState == null || !serverState.Sleeping) return;
+            PhysiologySimulation.EndSleep(serverState, CalculateSleepQuality(serverState));
+            serverState.Physiology.CurrentSleepSeconds = 0f;
+            ReplicateState();
+        }
+
+        public bool ServerNpcRelieveNeeds()
+        {
+            if (!CanPerformAutonomousServerAction()) return false;
+            var changed = false;
+            if (serverState.Physiology.BladderFill >= 0.88f)
+            {
+                var cleanly = inventory != null && inventory.TryDepositWasteServer(350);
+                PhysiologySimulation.RelieveBladder(serverState, cleanly);
+                changed = true;
+            }
+            if (serverState.Physiology.BowelFill >= 0.9f)
+            {
+                var cleanly = inventory != null && inventory.TryDepositWasteServer(550);
+                PhysiologySimulation.RelieveBowel(serverState, cleanly);
+                changed = true;
+            }
+            if (changed) ReplicateState();
+            return changed;
+        }
+
+        public bool ServerUseLatrine(
+            PlacedObjectWorldService placedObjects,
+            ulong latrineObjectId,
+            out string message)
+        {
+            message = string.Empty;
+            if (!CanPerformServerAction() || placedObjects == null)
+            {
+                message = "Сейчас воспользоваться уборной нельзя.";
+                return false;
+            }
+            var bowelUrgency = serverState.Physiology.BowelFill / 0.9f;
+            var bladderUrgency = serverState.Physiology.BladderFill / 0.88f;
+            var bowel = bowelUrgency >= bladderUrgency;
+            var fill = bowel
+                ? serverState.Physiology.BowelFill
+                : serverState.Physiology.BladderFill;
+            if (fill < 0.08f)
+            {
+                message = "Сейчас в этом нет необходимости.";
+                return false;
+            }
+            var amount = bowel ? (ushort)550 : (ushort)350;
+            if (!placedObjects.TryRouteSanitaryWaste(
+                    latrineObjectId, amount, 1f, bowel ? 0.18f : 0.08f,
+                    out _, out message)) return false;
+            if (bowel) PhysiologySimulation.RelieveBowel(serverState, cleanly: true);
+            else PhysiologySimulation.RelieveBladder(serverState, cleanly: true);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.Sanitation,
+                8f,
+                0.32f,
+                1f,
+                0f,
+                TraitCatalog.Resolve(serverState.Traits));
+            message = bowel
+                ? "Уборная отводит отходы в выгребную яму."
+                : "Уборная отводит мочу в выгребную яму.";
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerWashAtBasin(
+            float biologicalLoad,
+            float toxinLoad,
+            bool usedSoap,
+            bool wastewaterDrained,
+            out string message)
+        {
+            message = string.Empty;
+            if (!CanPerformServerAction())
+            {
+                message = "Сейчас вымыться нельзя.";
+                return false;
+            }
+            var waterSafety = 1f - Mathf.Clamp01(
+                biologicalLoad * 0.8f + toxinLoad * 0.4f);
+            var cleaningPower = waterSafety * (usedSoap ? 1f : 0.48f);
+            serverState.Physiology.HandCleanliness = Mathf.Lerp(
+                serverState.Physiology.HandCleanliness, 1f, 0.72f * cleaningPower);
+            serverState.Physiology.BodyCleanliness = Mathf.Lerp(
+                serverState.Physiology.BodyCleanliness, 1f, 0.32f * cleaningPower);
+            serverState.Physiology.ToxinLoad = Mathf.Clamp01(
+                serverState.Physiology.ToxinLoad + toxinLoad * 0.006f);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.Sanitation,
+                10f,
+                wastewaterDrained ? 0.3f : 0.16f,
+                waterSafety,
+                0f,
+                TraitCatalog.Resolve(serverState.Traits));
+            message = !wastewaterDrained
+                ? "Вы вымылись, но грязная вода ушла на землю: санитарная сеть не подключена."
+                : biologicalLoad > 0.08f || toxinLoad > 0.03f
+                    ? "Вы вымылись, но вода была сомнительного качества."
+                    : "Руки и тело тщательно вымыты; сток ушёл в выгребную яму.";
+            SetTreatmentMessage(message);
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerNeedsCare
+        {
+            get
+            {
+                if (!IsServer || serverState?.Physiology == null || ServerIsDead) return false;
+                foreach (var wound in serverState.Anatomy.Wounds)
+                    if (wound != null && !wound.Healed) return true;
+                return serverState.Physiology.SystemicInfection > 0.2f
+                    || serverState.Physiology.Pain > 0.48f
+                    || serverState.Physiology.Hydration < 0.5f
+                    || serverState.Physiology.CoreTemperatureC < 35.8f
+                    || serverState.Physiology.CoreTemperatureC > 38.8f
+                    || serverState.Conditions.GastrointestinalInfection > 0.18f
+                    || serverState.Conditions.RespiratoryInfection > 0.22f
+                    || serverState.Conditions.ParasiteLoad > 0.22f;
+            }
+        }
+
+        public bool ServerNpcProvideCare(PlayerSurvival patient)
+        {
+            if (!CanPerformAutonomousServerAction() || patient == null || patient == this
+                || patient.serverState == null || patient.ServerIsDead
+                || Vector3.Distance(transform.position, patient.transform.position) > 3.2f)
+                return false;
+            WoundState wound = null;
+            foreach (var candidate in patient.serverState.Anatomy.Wounds)
+            {
+                if (candidate == null || candidate.Healed) continue;
+                wound = candidate;
+                break;
+            }
+            var action = wound != null
+                ? !wound.PressureApplied && wound.Bleeding > 0.08f
+                    ? MedicalActionType.ApplyPressure
+                    : !wound.Washed && wound.IsOpen
+                        ? MedicalActionType.Wash
+                        : !wound.Disinfected && wound.IsOpen
+                            ? MedicalActionType.Disinfect
+                            : wound.IsOpen && !wound.Sutured && wound.Severity > 0.35f
+                                ? MedicalActionType.Suture
+                                : wound.IsFracture && !wound.Splinted
+                                    ? MedicalActionType.Splint
+                                    : wound.IsOpen && !wound.Bandaged
+                                        ? MedicalActionType.Bandage
+                                        : MedicalActionType.Inspect
+                : ResolveNpcSupportiveCare(patient.serverState);
+            var context = BuildTreatmentContext(action);
+            var missing = MissingTreatmentMaterial(action, context);
+            if (!string.IsNullOrEmpty(missing))
+                return false;
+            var result = wound != null
+                ? PhysiologySimulation.Treat(
+                    patient.serverState, wound.WoundId, action, context)
+                : PhysiologySimulation.ApplySupportiveTreatment(
+                    patient.serverState, action, context);
+            if (!result.Success) return false;
+            if (action != MedicalActionType.Inspect && !ConsumeTreatmentMaterial(action))
+                return false;
+            CharacterProgression.RegisterPractice(
+                serverState.Progression, TreatmentSkill(action), 6f,
+                wound != null ? Mathf.Clamp01(wound.Severity) : 0.45f, 1f, 0f,
+                TraitCatalog.Resolve(serverState.Traits));
+            patient.ReplicateState();
+            ReplicateProgression();
+            return true;
+        }
+
+        private static MedicalActionType ResolveNpcSupportiveCare(
+            CharacterSurvivalState patient)
+        {
+            if (patient.Conditions.ParasiteLoad > 0.22f)
+                return MedicalActionType.AntiparasiticCourse;
+            if (patient.Physiology.Hydration < 0.65f
+                || patient.Conditions.GastrointestinalInfection > 0.18f)
+                return MedicalActionType.OralRehydration;
+            if (patient.Physiology.CoreTemperatureC < 36f)
+                return MedicalActionType.Warm;
+            if (patient.Physiology.CoreTemperatureC > 38.4f)
+                return MedicalActionType.Cool;
+            return MedicalActionType.HerbalPainRelief;
+        }
+
         public bool ServerTrySpendStamina(float amount)
         {
             if (!CanPerformServerAction() || amount <= 0f
+                || serverState.Physiology.AcuteStamina < amount)
+                return false;
+            serverState.Physiology.AcuteStamina -= amount;
+            ReplicateState();
+            return true;
+        }
+
+        public bool ServerNpcTrySpendStamina(float amount)
+        {
+            if (!CanPerformAutonomousServerAction() || amount <= 0f
                 || serverState.Physiology.AcuteStamina < amount)
                 return false;
             serverState.Physiology.AcuteStamina -= amount;
@@ -599,6 +1286,7 @@ namespace Quieter.Survival
         {
             if (!IsServer || serverState == null || ServerIsDead) return null;
             CancelPendingTreatment("Лечение прервано новой травмой.");
+            activeExternalHealer?.CancelPendingTreatment("Лечение прервано: пострадавший получил новую травму.");
             var wound = PhysiologySimulation.AddInjury(
                 serverState,
                 region,
@@ -643,6 +1331,19 @@ namespace Quieter.Survival
             => IsServer
                 && serverState != null
                 && serverState.CreationCompleted
+                && serverState.ControlKind == CharacterControlKind.Player
+                && !serverState.Sleeping
+                && !serverState.Bound
+                && !pendingTreatmentActive
+                && serverState.Physiology.LifeState <= CharacterLifeState.Confused;
+
+        public bool CanPerformAutonomousServerAction()
+            => IsServer
+                && serverState != null
+                && serverState.CreationCompleted
+                && serverState.ControlKind is CharacterControlKind.FreeNpc
+                    or CharacterControlKind.ContractedNpc
+                    or CharacterControlKind.ForcedNpc
                 && !serverState.Sleeping
                 && !serverState.Bound
                 && !pendingTreatmentActive
@@ -651,6 +1352,897 @@ namespace Quieter.Survival
         public void RequestTreatment(uint woundId, MedicalActionType action)
         {
             if (IsOwner && woundId != 0) BeginTreatmentServerRpc(woundId, action);
+        }
+
+        public void RequestDentalExtraction()
+        {
+            if (IsOwner) BeginDentalExtractionServerRpc();
+        }
+
+        public void RequestSupportiveTreatment(MedicalActionType action)
+        {
+            if (IsOwner && IsSupportiveMedicalAction(action))
+                BeginSupportiveTreatmentServerRpc(action);
+        }
+
+        private void RequestExternalTreatment(MedicalActionType action)
+        {
+            if (!IsOwner || focusedMedicalTarget == null || !focusedMedicalTarget.IsSpawned) return;
+            var targetsWound = action <= MedicalActionType.RemoveBandage;
+            var woundId = action == MedicalActionType.Inspect || !targetsWound
+                ? 0u : inspectedExternalWoundId;
+            if (targetsWound && action != MedicalActionType.Inspect && woundId == 0)
+            {
+                SetExternalMedicalFeedback("Сначала осмотрите пострадавшего клавишей T.");
+                return;
+            }
+            BeginExternalTreatmentServerRpc(
+                new NetworkObjectReference(focusedMedicalTarget.NetworkObject), woundId, action);
+        }
+
+        private void RequestToggleBinding()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                ToggleBindingServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestToggleCarry()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                ToggleCarryServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestBeginCapture()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                BeginCaptureServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestOfferContract()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                OfferContractServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestRegisterHeir()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                RegisterHeirServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestDonateHeir()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                DonateHeirServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        public void RequestAcceptHeirOffer()
+        {
+            if (IsOwner && ownerHeirOffer.Value.Available) AcceptHeirOfferServerRpc();
+        }
+
+        private void RequestCycleNpcJob()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                ConfigureWorkerServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject),
+                    WorkerContractAction.SelectNextJob);
+        }
+
+        public void RequestConfigureFocusedWorker(WorkerContractAction action)
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                ConfigureWorkerServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject), action);
+        }
+
+        [ServerRpc]
+        private void OfferContractServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction() || serverSteamId == 0
+                || !TryResolveNearbyTarget(targetReference, out var target))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Разговор сейчас невозможен.", 0, 0);
+                return;
+            }
+            if (target.serverState.ControlKind == CharacterControlKind.ContractedNpc
+                && target.serverState.Npc?.EmployerAccountId == serverSteamId.ToString())
+            {
+                FulfillPersonalRequest(target);
+                return;
+            }
+            if (target.serverState.ControlKind != CharacterControlKind.FreeNpc
+                || target.serverState.Npc?.Disposition != NpcDisposition.Passive)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Добровольный договор можно предложить только свободному мирному человеку.",
+                    0, target.NetworkObjectId);
+                return;
+            }
+            if (inventory == null || !inventory.HasServerItem(26)
+                && !inventory.HasServerItem(25))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Для серьёзного разговора нужен съедобный паёк: коренья или ягоды.",
+                    0, target.NetworkObjectId);
+                return;
+            }
+            var placed = FindAnyObjectByType<PlacedObjectWorldService>();
+            var bedId = 0UL;
+            var bedError = "Система построек недоступна.";
+            if (placed == null || !placed.TryAssignNearestOwnedBed(
+                    target.transform.position, serverSteamId.ToString(),
+                    target.serverState.CharacterId, out bedId, out bedError))
+            {
+                SetExternalMedicalFeedbackClientRpc(bedError, 0, target.NetworkObjectId);
+                return;
+            }
+            if (!inventory.TryConsumeAnyItemServer(26)
+                && !inventory.TryConsumeAnyItemServer(25))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Паёк исчез до заключения договора.", 0, target.NetworkObjectId);
+                return;
+            }
+            var relationship = FindOrCreateRelationship(
+                target.serverState, target.serverState.CharacterId, serverState.CharacterId);
+            var persuasion = CharacterProgression.GetSkillLevel(
+                serverState.Progression, SkillId.Persuasion);
+            relationship.Trust = Mathf.Clamp01(relationship.Trust + 0.28f + persuasion * 0.015f);
+            relationship.Loyalty = Mathf.Clamp01(relationship.Loyalty + 0.12f);
+            relationship.VoluntaryLoyalty = true;
+            target.serverState.ControlKind = CharacterControlKind.ContractedNpc;
+            target.serverState.Npc.EmployerAccountId = serverSteamId.ToString();
+            target.serverState.Npc.EmployerCharacterId = serverState.CharacterId;
+            target.serverState.Npc.HomePosition = target.transform.position;
+            target.serverState.Npc.ActiveJob = WorkerJobKind.Foraging;
+            target.serverState.Npc.WorkbookSelectedJob = WorkerJobKind.Foraging;
+            target.serverState.WorkerContract = new WorkerContractState
+            {
+                ContractId = Guid.NewGuid().ToString("D"),
+                EmployerAccountId = serverSteamId.ToString(),
+                WorkerCharacterId = target.serverState.CharacterId,
+                AssignedBedObjectId = bedId.ToString(),
+                Active = true,
+                Voluntary = true,
+                DailyRationCalories = 1800f,
+                PromisedSafety = 0.6f,
+                WorkdayStartHour = 8f,
+                WorkdayEndHour = 18f,
+                PaymentItemId = 25,
+                PaymentQuantity = 2,
+                WorkZoneCenter = target.transform.position,
+                WorkZoneRadius = 70f,
+                StoragePosition = target.transform.position,
+                AllowedJobs = new List<WorkerJobKind> { WorkerJobKind.Foraging },
+                JobPriorities = new byte[] { 0, 0, 2, 0, 0, 0, 0, 0 },
+            };
+            var gameDay = CurrentGameDay();
+            target.serverState.Npc.PersonalRequest = LivingWorldSimulation.SelectPersonalRequest(
+                target.serverState.CharacterId, gameDay);
+            target.serverState.Npc.PersonalRequestPending = true;
+            target.serverState.Npc.PersonalRequestGameDay = gameDay;
+            CharacterProgression.RegisterPractice(
+                serverState.Progression, SkillId.Persuasion,
+                30f, 0.38f, 1f, 0f, TraitCatalog.Resolve(serverState.Traits));
+            target.ReplicateState();
+            ReplicateProgression();
+            SetExternalMedicalFeedbackClientRpc(
+                $"Договор принят, кровать закреплена. Первый личный запрос: "
+                + $"{PersonalRequestName(target.serverState.Npc.PersonalRequest)}.",
+                0, target.NetworkObjectId);
+        }
+
+        [ServerRpc]
+        private void DonateHeirServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction() || serverSteamId == 0
+                || !targetReference.TryGet(out var targetObject)
+                || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var recipient)
+                || recipient.serverState == null || !recipient.ServerIsLifeLost
+                || Vector3.Distance(transform.position, recipient.transform.position) > 3.75f
+                || !HasInteractionLine(recipient))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Передать наследника можно только аккаунту, потерявшему это тело рядом с вами.",
+                    0, 0);
+                return;
+            }
+            if (ServerHeirDonationRequested == null)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Хранилище предложений наследника недоступно.", 0,
+                    recipient.NetworkObjectId);
+                return;
+            }
+            ServerHeirDonationRequested.Invoke(this, recipient);
+        }
+
+        [ServerRpc]
+        private void AcceptHeirOfferServerRpc()
+        {
+            if (!ServerIsLifeLost || !ownerHeirOffer.Value.Available
+                || DateTime.UtcNow.Ticks >= ownerHeirOffer.Value.ExpiresAtUtcTicks)
+                return;
+            ServerHeirOfferAcceptanceRequested?.Invoke(this);
+        }
+
+        public void ServerSetPendingHeirOffer(PendingHeirOffer offer)
+        {
+            if (!IsServer) return;
+            var previous = ownerHeirOffer.Value;
+            ownerHeirOffer.Value = offer == null
+                ? new OwnerHeirOfferState { Revision = (ushort)(previous.Revision + 1) }
+                : new OwnerHeirOfferState
+                {
+                    Available = true,
+                    OfferId = new FixedString64Bytes(offer.OfferId ?? string.Empty),
+                    DonorName = new FixedString64Bytes(offer.DonorDisplayName ?? "Другой игрок"),
+                    HeirName = new FixedString64Bytes(offer.HeirName ?? "Наследник"),
+                    ExpiresAtUtcTicks = offer.ExpiresAtUtc.ToUniversalTime().Ticks,
+                    Revision = (ushort)(previous.Revision + 1),
+                };
+        }
+
+        private void FulfillPersonalRequest(PlayerSurvival target)
+        {
+            var npc = target.serverState.Npc;
+            if (npc == null || !npc.PersonalRequestPending)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Сейчас у работника нет личного запроса.", 0, target.NetworkObjectId);
+                return;
+            }
+            var fulfilled = npc.PersonalRequest switch
+            {
+                NpcPersonalRequestKind.Food => TransferFirstAvailable(
+                    target.inventory, 26, 25, 27),
+                NpcPersonalRequestKind.CleanWater => GiveCleanWater(target),
+                NpcPersonalRequestKind.Medicine => TransferFirstAvailable(
+                    target.inventory, 28, 32, 31),
+                NpcPersonalRequestKind.Tool => TransferFirstAvailable(
+                    target.inventory, 4, 5, 22),
+                _ => false,
+            };
+            if (!fulfilled)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    $"Для запроса «{PersonalRequestName(npc.PersonalRequest)}» нет подходящего предмета или места.",
+                    0, target.NetworkObjectId);
+                return;
+            }
+            var relationship = FindOrCreateRelationship(
+                target.serverState, target.serverState.CharacterId, serverState.CharacterId);
+            relationship.PersonalRequestsCompleted++;
+            relationship.Trust = Mathf.Clamp01(relationship.Trust + 0.08f);
+            relationship.Loyalty = Mathf.Clamp01(relationship.Loyalty + 0.07f);
+            relationship.VoluntaryLoyalty = target.serverState.WorkerContract?.Voluntary == true;
+            npc.PersonalRequestPending = false;
+            npc.LastPersonalRequestCompletedGameDay = CurrentGameDay();
+            target.ReplicateState();
+            SetExternalMedicalFeedbackClientRpc(
+                $"Личный запрос исполнен ({relationship.PersonalRequestsCompleted}/3 для наследования).",
+                0, target.NetworkObjectId);
+        }
+
+        private bool TransferFirstAvailable(PlayerInventory destination, params ushort[] itemIds)
+        {
+            if (inventory == null || destination == null) return false;
+            foreach (var itemId in itemIds)
+            {
+                if (inventory.TryTransferAnyItemServer(destination, itemId)) return true;
+            }
+            return false;
+        }
+
+        private bool GiveCleanWater(PlayerSurvival target)
+        {
+            if (inventory == null || target == null
+                || !inventory.TryConsumeServerCleanWater(500, out _)) return false;
+            return target.ServerReceiveCareWater(0.5f);
+        }
+
+        [ServerRpc]
+        private void RegisterHeirServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction() || serverSteamId == 0
+                || !TryResolveNearbyTarget(targetReference, out var target)
+                || target.serverState.ControlKind != CharacterControlKind.ContractedNpc
+                || target.serverState.WorkerContract?.Active != true
+                || target.serverState.Npc?.EmployerAccountId != serverSteamId.ToString())
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Наследником можно назначить только своего добровольного работника.", 0, 0);
+                return;
+            }
+            if (ServerHeirRegistrationRequested == null)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Хранилище наследования недоступно.", 0, target.NetworkObjectId);
+                return;
+            }
+            ServerHeirRegistrationRequested.Invoke(this, target);
+        }
+
+        public void ServerNotifyHeirRegistrationResult(string message, ulong targetObjectId = 0)
+        {
+            if (IsServer) SetExternalMedicalFeedbackClientRpc(message, 0, targetObjectId);
+        }
+
+        private long CurrentGameDay()
+        {
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            return weather == null ? 0L : (long)Math.Floor(
+                weather.Current.GameSeconds / LivingWorldSimulation.GameSecondsPerDay);
+        }
+
+        private static string PersonalRequestName(NpcPersonalRequestKind request) => request switch
+        {
+            NpcPersonalRequestKind.Food => "еда в личный запас",
+            NpcPersonalRequestKind.CleanWater => "пол-литра чистой воды",
+            NpcPersonalRequestKind.Medicine => "лекарственные травы или чистая ткань",
+            NpcPersonalRequestKind.Tool => "личный рабочий инструмент",
+            _ => "помощь",
+        };
+
+        [ServerRpc]
+        private void ConfigureWorkerServerRpc(
+            NetworkObjectReference targetReference,
+            WorkerContractAction action)
+        {
+            if (!CanPerformServerAction() || !TryResolveNearbyTarget(targetReference, out var target)
+                || target.serverState.Npc == null || target.serverState.WorkerContract?.Active != true
+                || target.serverState.Npc.EmployerAccountId != serverSteamId.ToString())
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Менять работу можно только у своего действующего работника.", 0, 0);
+                return;
+            }
+            var npc = target.serverState.Npc;
+            var contract = target.serverState.WorkerContract;
+            contract.EnsureInitialized();
+            switch (action)
+            {
+                case WorkerContractAction.SelectNextJob:
+                    npc.WorkbookSelectedJob = (WorkerJobKind)(
+                        ((int)npc.WorkbookSelectedJob + 1)
+                        % Enum.GetValues(typeof(WorkerJobKind)).Length);
+                    break;
+                case WorkerContractAction.RaiseSelectedPriority:
+                    LivingWorldSimulation.AdjustJobPriority(
+                        contract, npc.WorkbookSelectedJob, 1);
+                    break;
+                case WorkerContractAction.LowerSelectedPriority:
+                    LivingWorldSimulation.AdjustJobPriority(
+                        contract, npc.WorkbookSelectedJob, -1);
+                    break;
+                case WorkerContractAction.SetWorkZoneHere:
+                    contract.WorkZoneCenter = transform.position;
+                    break;
+                case WorkerContractAction.SetStorageHere:
+                    contract.StoragePosition = transform.position;
+                    break;
+                case WorkerContractAction.NarrowWorkZone:
+                    contract.WorkZoneRadius = Mathf.Max(10f, contract.WorkZoneRadius - 10f);
+                    break;
+                case WorkerContractAction.WidenWorkZone:
+                    contract.WorkZoneRadius = Mathf.Min(150f, contract.WorkZoneRadius + 10f);
+                    break;
+                case WorkerContractAction.StartEarlier:
+                    contract.WorkdayStartHour = Mathf.Repeat(contract.WorkdayStartHour - 1f, 24f);
+                    break;
+                case WorkerContractAction.StartLater:
+                    contract.WorkdayStartHour = Mathf.Repeat(contract.WorkdayStartHour + 1f, 24f);
+                    break;
+                case WorkerContractAction.EndEarlier:
+                    contract.WorkdayEndHour = Mathf.Repeat(contract.WorkdayEndHour - 1f, 24f);
+                    break;
+                case WorkerContractAction.EndLater:
+                    contract.WorkdayEndHour = Mathf.Repeat(contract.WorkdayEndHour + 1f, 24f);
+                    break;
+                case WorkerContractAction.IncreaseRation:
+                    contract.DailyRationCalories = Mathf.Min(
+                        4000f, contract.DailyRationCalories + 200f);
+                    break;
+                case WorkerContractAction.DecreaseRation:
+                    contract.DailyRationCalories = Mathf.Max(
+                        800f, contract.DailyRationCalories - 200f);
+                    break;
+                case WorkerContractAction.CyclePayment:
+                    if (contract.PaymentItemId == 25)
+                    {
+                        contract.PaymentItemId = 26;
+                        contract.PaymentQuantity = 2;
+                    }
+                    else if (contract.PaymentItemId == 26)
+                    {
+                        contract.PaymentItemId = 28;
+                        contract.PaymentQuantity = 1;
+                    }
+                    else
+                    {
+                        contract.PaymentItemId = 25;
+                        contract.PaymentQuantity = 2;
+                    }
+                    break;
+                default:
+                    return;
+            }
+            target.ReplicateState();
+            SetExternalMedicalFeedbackClientRpc(
+                $"Рабочая книга обновлена: {WorkerJobName(npc.WorkbookSelectedJob)}, "
+                + $"приоритет {LivingWorldSimulation.GetJobPriority(contract, npc.WorkbookSelectedJob)}.",
+                0, target.NetworkObjectId);
+        }
+
+        private bool TryResolveNearbyTarget(
+            NetworkObjectReference targetReference,
+            out PlayerSurvival target)
+        {
+            target = null;
+            return targetReference.TryGet(out var targetObject)
+                && targetObject != NetworkObject
+                && targetObject.TryGetComponent(out target)
+                && target.serverState != null
+                && !target.ServerIsDead
+                && Vector3.Distance(transform.position, target.transform.position) <= 3.75f
+                && HasInteractionLine(target);
+        }
+
+        private static RelationshipState FindOrCreateRelationship(
+            CharacterSurvivalState state,
+            string sourceCharacterId,
+            string targetCharacterId)
+        {
+            state.Relationships ??= new List<RelationshipState>();
+            foreach (var relationship in state.Relationships)
+            {
+                if (relationship != null
+                    && relationship.SourceCharacterId == sourceCharacterId
+                    && relationship.TargetCharacterId == targetCharacterId)
+                    return relationship;
+            }
+            var created = new RelationshipState
+            {
+                SourceCharacterId = sourceCharacterId,
+                TargetCharacterId = targetCharacterId,
+            };
+            state.Relationships.Add(created);
+            return created;
+        }
+
+        private static string WorkerJobName(WorkerJobKind job) => job switch
+        {
+            WorkerJobKind.Mining => "добыча",
+            WorkerJobKind.Logging => "рубка",
+            WorkerJobKind.Foraging => "сбор",
+            WorkerJobKind.Hauling => "переноска",
+            WorkerJobKind.Construction => "строительство",
+            WorkerJobKind.CookingAndWater => "готовка и вода",
+            WorkerJobKind.Sanitation => "санитария",
+            WorkerJobKind.PatientCare => "уход за больными",
+            _ => "ожидание",
+        };
+
+        private static SkillId ObservableWorkSkill(WorkerJobKind job) => job switch
+        {
+            WorkerJobKind.Mining => SkillId.Mining,
+            WorkerJobKind.Logging => SkillId.Woodcutting,
+            WorkerJobKind.Foraging => SkillId.Foraging,
+            WorkerJobKind.Hauling => SkillId.LoadCarrying,
+            WorkerJobKind.Construction => SkillId.Construction,
+            WorkerJobKind.CookingAndWater => SkillId.Cooking,
+            WorkerJobKind.Sanitation => SkillId.Sanitation,
+            WorkerJobKind.PatientCare => SkillId.Nursing,
+            _ => SkillId.Foraging,
+        };
+
+        [ServerRpc]
+        private void ToggleBindingServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction() || !targetReference.TryGet(out var targetObject)
+                || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
+                || target.serverState == null
+                || Vector3.Distance(transform.position, target.transform.position) > 3.75f
+                || !HasInteractionLine(target)) return;
+            var actorId = serverState.CharacterId;
+            if (target.serverState.Bound)
+            {
+                if (target.serverState.CaptorCharacterId != actorId) return;
+                if (inventory != null && !inventory.TryGiveServerItem(3))
+                {
+                    SetExternalMedicalFeedbackClientRpc(
+                        "Некуда сложить снятую верёвку.", 0, target.NetworkObjectId);
+                    return;
+                }
+                target.serverState.Bound = false;
+                target.CancelCaptureState();
+                target.serverState.CaptorCharacterId = string.Empty;
+                target.ReplicateState();
+                SetExternalMedicalFeedbackClientRpc("Путы сняты.", 0, target.NetworkObjectId);
+                return;
+            }
+            var immobile = target.serverState.Sleeping
+                || target.serverState.Physiology.LifeState >= CharacterLifeState.Unconscious
+                || !PhysiologySimulation.CalculateCapabilities(target.serverState).CanMove;
+            if (!immobile)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Связать можно только спящего или обездвиженного человека.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
+            if (inventory == null || !inventory.TryConsumeAnyItemServer(3))
+            {
+                SetExternalMedicalFeedbackClientRpc("Для пут нужна верёвка.", 0, target.NetworkObjectId);
+                return;
+            }
+            target.serverState.Bound = true;
+            target.serverState.CaptorCharacterId = actorId;
+            target.CancelCaptureState();
+            target.ServerWakeFromDanger();
+            target.ReplicateState();
+            SetExternalMedicalFeedbackClientRpc("Человек связан.", 0, target.NetworkObjectId);
+        }
+
+        [ServerRpc]
+        private void BeginCaptureServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction() || serverSteamId == 0
+                || !targetReference.TryGet(out var targetObject) || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
+                || target.serverState == null || target.ServerIsDead || !target.serverState.Bound
+                || target.serverState.CaptorCharacterId != serverState.CharacterId
+                || !string.IsNullOrEmpty(target.serverState.CarriedByCharacterId)) return;
+            var placed = QuieterRuntimeBootstrap.Instance?.Session?.PlacedObjects;
+            if (placed == null || !placed.TryFindOwnedLockedHoldingCell(
+                    target.transform.position, serverSteamId.ToString(), out var cellId))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Пленник должен находиться внутри вашей запертой камеры.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
+            target.serverState.Captive = true;
+            target.serverState.CaptorAccountId = serverSteamId.ToString();
+            target.serverState.CaptureCellObjectId = cellId.ToString();
+            target.serverState.CaptureStartedAtUtc = DateTime.UtcNow.ToString("O");
+            target.serverState.CaptureStatus = CaptureStatus.ConditionsMet;
+            target.serverState.CaptureRevision++;
+            target.captureCompletionRaised = false;
+            target.ReplicateState();
+            SetExternalMedicalFeedbackClientRpc(
+                "Захват начат. Камера должна оставаться запертой непрерывно один реальный час.",
+                0, target.NetworkObjectId);
+        }
+
+        private void TickServerCapture()
+        {
+            if (serverState == null || !serverState.Captive
+                || serverState.CaptureStatus == CaptureStatus.Completed) return;
+            if (ServerIsDead)
+            {
+                CancelCaptureState();
+                ReplicateState();
+                return;
+            }
+            var placed = QuieterRuntimeBootstrap.Instance?.Session?.PlacedObjects;
+            var cellValid = ulong.TryParse(serverState.CaptureCellObjectId, out var cellId)
+                && placed != null && placed.IsInsideOwnedLockedHoldingCell(
+                    cellId, transform.position, serverState.CaptorAccountId);
+            var immobile = serverState.Bound
+                || serverState.Physiology.LifeState >= CharacterLifeState.Unconscious
+                || !PhysiologySimulation.CalculateCapabilities(serverState).CanMove;
+            var capture = new CaptureState
+            {
+                VictimCharacterId = serverState.CharacterId,
+                VictimAccountId = serverSteamId.ToString(),
+                CaptorCharacterId = serverState.CaptorCharacterId,
+                CaptorAccountId = serverState.CaptorAccountId,
+                CellObjectId = serverState.CaptureCellObjectId,
+                Status = serverState.CaptureStatus,
+                ContinuousConditionsStartedUtcTicks = ParseCaptureStartedTicks(
+                    serverState.CaptureStartedAtUtc),
+                Revision = serverState.CaptureRevision,
+            };
+            var completed = LivingWorldSimulation.AdvanceCapture(
+                capture, DateTime.UtcNow.Ticks, immobile, cellValid, capture.Revision);
+            serverState.CaptureRevision = capture.Revision;
+            serverState.CaptureStatus = capture.Status;
+            if (capture.ContinuousConditionsStartedUtcTicks > 0)
+            {
+                serverState.CaptureStartedAtUtc = new DateTime(
+                    capture.ContinuousConditionsStartedUtcTicks, DateTimeKind.Utc).ToString("O");
+            }
+            if (!cellValid || !immobile)
+            {
+                CancelCaptureState();
+                ReplicateState();
+                return;
+            }
+            if (completed && !captureCompletionRaised)
+            {
+                captureCompletionRaised = true;
+                serverState.ControlKind = CharacterControlKind.ForcedNpc;
+                serverState.Offline = false;
+                serverState.Npc ??= new NpcRuntimeState();
+                serverState.Npc.EmployerAccountId = serverState.CaptorAccountId;
+                serverState.Npc.EmployerCharacterId = serverState.CaptorCharacterId;
+                serverState.Npc.HomePosition = transform.position;
+                serverState.Npc.Motivation = 0.18f;
+                serverState.Npc.WorkbookSelectedJob = WorkerJobKind.Mining;
+                serverState.Npc.EnsureInitialized();
+                serverState.WorkerContract = new WorkerContractState
+                {
+                    ContractId = Guid.NewGuid().ToString("D"),
+                    EmployerAccountId = serverState.CaptorAccountId,
+                    WorkerCharacterId = serverState.CharacterId,
+                    Active = true,
+                    Voluntary = false,
+                    DailyRationCalories = 1800f,
+                    PromisedSafety = 0.2f,
+                    WorkdayStartHour = 6f,
+                    WorkdayEndHour = 20f,
+                    WorkZoneCenter = transform.position,
+                    WorkZoneRadius = 70f,
+                    StoragePosition = transform.position,
+                    AllowedJobs = new List<WorkerJobKind>(),
+                    JobPriorities = new byte[] { 1, 1, 1, 1, 1, 1, 1, 1 },
+                };
+                foreach (WorkerJobKind job in Enum.GetValues(typeof(WorkerJobKind)))
+                    serverState.WorkerContract.AllowedJobs.Add(job);
+                serverState.Relationships ??= new List<RelationshipState>();
+                serverState.Relationships.Add(new RelationshipState
+                {
+                    SourceCharacterId = serverState.CharacterId,
+                    TargetCharacterId = serverState.CaptorCharacterId,
+                    Fear = 0.78f,
+                    Resentment = 0.86f,
+                    Loyalty = 0f,
+                    VoluntaryLoyalty = false,
+                });
+                ReplicateState();
+                ServerCaptureCompleted?.Invoke(this);
+            }
+        }
+
+        private void CancelCaptureState()
+        {
+            if (serverState == null) return;
+            serverState.Captive = false;
+            serverState.CaptorAccountId = string.Empty;
+            serverState.CaptureCellObjectId = string.Empty;
+            serverState.CaptureStartedAtUtc = string.Empty;
+            serverState.CaptureStatus = CaptureStatus.Cancelled;
+            serverState.CaptureRevision++;
+            captureCompletionRaised = false;
+        }
+
+        private static long ParseCaptureStartedTicks(string value) => DateTime.TryParse(
+            value, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed.ToUniversalTime().Ticks : 0;
+
+        [ServerRpc]
+        private void ToggleCarryServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction()) return;
+            if (serverCarriedTarget != null)
+            {
+                ReleaseCarriedTarget();
+                SetExternalMedicalFeedbackClientRpc("Вы опустили человека на землю.", 0, 0);
+                return;
+            }
+            if (!targetReference.TryGet(out var targetObject) || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
+                || target.serverState == null || target.serverCarrier != null
+                || Vector3.Distance(transform.position, target.transform.position) > 3.75f
+                || !HasInteractionLine(target)) return;
+            var movable = target.serverState.Bound || target.serverState.Sleeping || target.ServerIsDead
+                || target.serverState.Physiology.LifeState >= CharacterLifeState.Unconscious;
+            if (!movable)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Перенести можно связанного, спящего или потерявшего сознание человека.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
+            serverCarriedTarget = target;
+            target.serverCarrier = this;
+            target.serverState.CarriedByCharacterId = serverState.CharacterId;
+            target.ReplicateState();
+            ReplicateState();
+            SetExternalMedicalFeedbackClientRpc("Вы подняли человека. Движение сильно замедлено.", 0,
+                target.NetworkObjectId);
+        }
+
+        private void TickServerCarry()
+        {
+            if (serverCarrier == null) return;
+            if (!serverCarrier.IsSpawned || serverCarrier.serverState == null
+                || serverCarrier.ServerIsDead || serverCarrier.serverCarriedTarget != this)
+            {
+                serverCarrier = null;
+                serverState.CarriedByCharacterId = string.Empty;
+                ReplicateState();
+                return;
+            }
+            var destination = serverCarrier.transform.position
+                - serverCarrier.transform.forward * 0.65f + Vector3.up * 0.35f;
+            networkPlayer?.ServerWarpTo(destination);
+        }
+
+        private bool HasInteractionLine(PlayerSurvival target)
+        {
+            if (target == null) return false;
+            var origin = transform.position + Vector3.up * 1.25f;
+            var destination = target.transform.position + Vector3.up * 1.05f;
+            var direction = destination - origin;
+            var hits = Physics.RaycastAll(origin, direction.normalized, direction.magnitude,
+                ~0, QueryTriggerInteraction.Ignore);
+            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+            foreach (var hit in hits)
+            {
+                var candidate = hit.collider.GetComponentInParent<PlayerSurvival>();
+                if (candidate == this) continue;
+                return candidate == target;
+            }
+            return true;
+        }
+
+        private void ReleaseCarriedTarget()
+        {
+            if (serverCarriedTarget == null) return;
+            var target = serverCarriedTarget;
+            serverCarriedTarget = null;
+            target.serverCarrier = null;
+            if (target.serverState != null)
+            {
+                target.serverState.CarriedByCharacterId = string.Empty;
+                target.ReplicateState();
+            }
+            ReplicateState();
+        }
+
+        private void RespondToMedicalConsent(bool accepted)
+        {
+            if (!IsOwner || pendingConsentHealerObjectId == 0) return;
+            RespondMedicalConsentServerRpc(pendingConsentHealerObjectId, accepted);
+            pendingConsentHealerObjectId = 0;
+            pendingConsentHealerName = string.Empty;
+            Changed?.Invoke();
+        }
+
+        [ServerRpc]
+        private void BeginExternalTreatmentServerRpc(
+            NetworkObjectReference targetReference, uint woundId, MedicalActionType action)
+        {
+            if (!CanPerformServerAction() || pendingTreatmentActive
+                || !targetReference.TryGet(out var targetObject) || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
+                || target.serverState == null || target.ServerIsDead
+                || Vector3.Distance(transform.position, target.transform.position) > 3.75f
+                || !HasInteractionLine(target)
+                || !Enum.IsDefined(typeof(MedicalActionType), action))
+            {
+                SetExternalMedicalFeedbackClientRpc("Лечение сейчас невозможно.", 0, 0);
+                return;
+            }
+            if (target.RequiresTreatmentConsent()
+                && (target.consentedHealerObjectId != NetworkObjectId
+                    || target.consentExpiresAt < ServerClock))
+            {
+                target.RequestMedicalConsentClientRpc(
+                    NetworkObjectId,
+                    new FixedString64Bytes(GetComponent<Quieter.Player.NetworkPlayer>()?.DisplayName ?? "Незнакомец"));
+                SetExternalMedicalFeedbackClientRpc(
+                    "Ожидается согласие пострадавшего. После согласия повторите действие.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
+            var targetsWound = action <= MedicalActionType.RemoveBandage;
+            var wound = targetsWound ? target.ResolveExternalWound(woundId) : null;
+            if (targetsWound && wound == null)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Явных травм, требующих обработки, не обнаружено.", 0, target.NetworkObjectId);
+                return;
+            }
+            var context = BuildTreatmentContext(action);
+            var missing = MissingTreatmentMaterial(action, context);
+            if (!string.IsNullOrEmpty(missing))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    missing, wound?.WoundId ?? 0, target.NetworkObjectId);
+                return;
+            }
+            pendingTreatmentActive = true;
+            pendingTreatmentTarget = null;
+            pendingTreatmentTarget = target;
+            target.activeExternalHealer = this;
+            pendingTreatmentWoundId = wound?.WoundId ?? 0;
+            pendingTreatmentAction = action;
+            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
+            treatmentActivity.Value = new TreatmentActivityState
+            {
+                Active = true, WoundId = wound?.WoundId ?? 0, Action = action,
+                CompletesAtServerTime = pendingTreatmentCompletesAt,
+                Message = new FixedString512Bytes("Помощь другому человеку…"),
+                Revision = ++treatmentRevision,
+            };
+            ReplicateState();
+        }
+
+        [ClientRpc]
+        private void RequestMedicalConsentClientRpc(
+            ulong healerObjectId, FixedString64Bytes healerName)
+        {
+            if (!IsOwner) return;
+            pendingConsentHealerObjectId = healerObjectId;
+            pendingConsentHealerName = healerName.ToString();
+            SetExternalMedicalFeedback(
+                $"{pendingConsentHealerName} просит разрешение на осмотр или лечение.");
+            Changed?.Invoke();
+        }
+
+        [ServerRpc]
+        private void RespondMedicalConsentServerRpc(
+            ulong healerObjectId, bool accepted, ServerRpcParams rpcParams = default)
+        {
+            if (!IsServer || rpcParams.Receive.SenderClientId != OwnerClientId
+                || !NetworkManager.SpawnManager.SpawnedObjects.TryGetValue(
+                    healerObjectId, out var healerObject)
+                || !healerObject.TryGetComponent<PlayerSurvival>(out var healer)) return;
+            if (accepted)
+            {
+                consentedHealerObjectId = healerObjectId;
+                consentExpiresAt = ServerClock + 60d;
+            }
+            healer.SetExternalMedicalFeedbackClientRpc(
+                accepted ? "Согласие получено на одну минуту." : "Пострадавший отказался от помощи.",
+                0, NetworkObjectId);
+        }
+
+        [ClientRpc]
+        private void SetExternalMedicalFeedbackClientRpc(
+            FixedString512Bytes message, uint woundId, ulong targetObjectId)
+        {
+            if (!IsOwner) return;
+            if (woundId != 0) inspectedExternalWoundId = woundId;
+            SetExternalMedicalFeedback(message.ToString());
+        }
+
+        private void SetExternalMedicalFeedback(string message)
+        {
+            externalMedicalMessage = message ?? string.Empty;
+            externalMedicalMessageUntil = Time.unscaledTime + 8f;
+            Changed?.Invoke();
+        }
+
+        private bool RequiresTreatmentConsent() => serverState != null
+            && serverState.Physiology.LifeState <= CharacterLifeState.Confused
+            && !serverState.Sleeping && !serverState.Bound && !serverState.Captive;
+
+        private WoundState ResolveExternalWound(uint woundId)
+        {
+            if (serverState?.Anatomy?.Wounds == null) return null;
+            if (woundId != 0)
+                return serverState.Anatomy.Wounds.Find(entry => entry.WoundId == woundId && !entry.Healed);
+            WoundState result = null;
+            var urgency = float.MinValue;
+            foreach (var wound in serverState.Anatomy.Wounds)
+            {
+                if (wound.Healed) continue;
+                var candidate = wound.Bleeding * 2f + wound.Infection + wound.Severity;
+                if (candidate <= urgency) continue;
+                urgency = candidate;
+                result = wound;
+            }
+            return result;
         }
 
         public void RequestRelieve(bool bowel)
@@ -677,6 +2269,19 @@ namespace Quieter.Survival
         public void RequestSleepToggle()
         {
             if (IsOwner) ToggleSleepServerRpc();
+        }
+
+        public void RequestNewStranger()
+        {
+            if (IsOwner) NewStrangerServerRpc();
+        }
+
+        [ServerRpc]
+        private void NewStrangerServerRpc(ServerRpcParams rpcParams = default)
+        {
+            if (!IsServer || !ServerIsLifeLost
+                || rpcParams.Receive.SenderClientId != OwnerClientId) return;
+            ServerNewStrangerRequested?.Invoke(this);
         }
 
         [ServerRpc]
@@ -720,6 +2325,76 @@ namespace Quieter.Survival
                 Action = action,
                 CompletesAtServerTime = pendingTreatmentCompletesAt,
                 Message = new FixedString512Bytes("Действие выполняется…"),
+                Revision = ++treatmentRevision,
+            };
+            ReplicateState();
+        }
+
+        [ServerRpc]
+        private void BeginDentalExtractionServerRpc()
+        {
+            if (!CanPerformServerAction() || pendingTreatmentActive)
+            {
+                SetTreatmentMessage("Сейчас удалить зуб невозможно.");
+                return;
+            }
+            if (serverState.Physiology.DentalHealth > 0.55f
+                && serverState.Physiology.DentalInfection < 0.12f)
+            {
+                SetTreatmentMessage("Нет зуба, который явно требует удаления.");
+                return;
+            }
+            var action = MedicalActionType.DentalExtraction;
+            var context = BuildTreatmentContext(action);
+            var missing = MissingTreatmentMaterial(action, context);
+            if (!string.IsNullOrEmpty(missing))
+            {
+                SetTreatmentMessage(missing);
+                return;
+            }
+            pendingTreatmentActive = true;
+            pendingTreatmentWoundId = 0;
+            pendingTreatmentAction = action;
+            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
+            treatmentActivity.Value = new TreatmentActivityState
+            {
+                Active = true,
+                WoundId = 0,
+                Action = action,
+                CompletesAtServerTime = pendingTreatmentCompletesAt,
+                Message = new FixedString512Bytes("Готовите зуб к удалению…"),
+                Revision = ++treatmentRevision,
+            };
+            ReplicateState();
+        }
+
+        [ServerRpc]
+        private void BeginSupportiveTreatmentServerRpc(MedicalActionType action)
+        {
+            if (!CanPerformServerAction() || pendingTreatmentActive
+                || !IsSupportiveMedicalAction(action))
+            {
+                SetTreatmentMessage("Сейчас этот уход невозможен.");
+                return;
+            }
+            var context = BuildTreatmentContext(action);
+            var missing = MissingTreatmentMaterial(action, context);
+            if (!string.IsNullOrEmpty(missing))
+            {
+                SetTreatmentMessage(missing);
+                return;
+            }
+            pendingTreatmentActive = true;
+            pendingTreatmentWoundId = 0;
+            pendingTreatmentAction = action;
+            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
+            treatmentActivity.Value = new TreatmentActivityState
+            {
+                Active = true,
+                WoundId = 0,
+                Action = action,
+                CompletesAtServerTime = pendingTreatmentCompletesAt,
+                Message = new FixedString512Bytes("Подготовка общего ухода…"),
                 Revision = ++treatmentRevision,
             };
             ReplicateState();
@@ -797,7 +2472,20 @@ namespace Quieter.Survival
             if (!pendingTreatmentActive || serverState == null) return;
             var woundId = pendingTreatmentWoundId;
             var action = pendingTreatmentAction;
+            var target = pendingTreatmentTarget;
             pendingTreatmentActive = false;
+            pendingTreatmentTarget = null;
+            if (target != null)
+            {
+                target.activeExternalHealer = null;
+                if (!target.IsSpawned || target.serverState == null || target.ServerIsDead
+                    || Vector3.Distance(transform.position, target.transform.position) > 3.75f)
+                {
+                    SetTreatmentMessage("Лечение прервано: пострадавший слишком далеко или недоступен.");
+                    ReplicateState();
+                    return;
+                }
+            }
             var context = BuildTreatmentContext(action);
             var missing = MissingTreatmentMaterial(action, context);
             if (!string.IsNullOrEmpty(missing))
@@ -807,7 +2495,19 @@ namespace Quieter.Survival
                 return;
             }
 
-            var result = PhysiologySimulation.Treat(serverState, woundId, action, context);
+            var patientState = target?.serverState ?? serverState;
+            var result = action switch
+            {
+                MedicalActionType.DentalExtraction
+                    => PhysiologySimulation.ExtractTooth(patientState, context),
+                MedicalActionType.Warm or MedicalActionType.Cool
+                    or MedicalActionType.OralRehydration
+                    or MedicalActionType.HerbalPainRelief
+                    or MedicalActionType.AntiparasiticCourse
+                    => PhysiologySimulation.ApplySupportiveTreatment(
+                        patientState, action, context),
+                _ => PhysiologySimulation.Treat(patientState, woundId, action, context),
+            };
             if (result.Success && !ConsumeTreatmentMaterial(action))
             {
                 result = new TreatmentResult(
@@ -828,6 +2528,12 @@ namespace Quieter.Survival
                     TraitCatalog.Resolve(serverState.Traits));
             }
             SetTreatmentMessage(result.Message);
+            if (target != null)
+            {
+                target.ReplicateState();
+                SetExternalMedicalFeedbackClientRpc(
+                    result.Message, woundId, target.NetworkObjectId);
+            }
             ReplicateState();
         }
 
@@ -839,8 +2545,15 @@ namespace Quieter.Survival
             var needleCleanliness = 0f;
             var bandageCleanliness = 0f;
             var splintCleanliness = 0f;
+            var herbCleanliness = 0f;
+            var requiredWater = action switch
+            {
+                MedicalActionType.OralRehydration => (ushort)350,
+                MedicalActionType.AntiparasiticCourse => (ushort)200,
+                _ => (ushort)100,
+            };
             var hasWater = inventory != null
-                && inventory.TryGetServerCleanWater(100, out waterCleanliness);
+                && inventory.TryGetServerCleanWater(requiredWater, out waterCleanliness);
             var hasSoap = inventory != null
                 && inventory.TryGetServerItemCleanliness(31, out soapCleanliness);
             var hasNeedle = inventory != null
@@ -849,6 +2562,10 @@ namespace Quieter.Survival
                 && inventory.TryGetServerItemCleanliness(32, out bandageCleanliness);
             var hasSplint = inventory != null
                 && inventory.TryGetServerItemCleanliness(34, out splintCleanliness);
+            var hasSalt = inventory != null && inventory.HasServerItem(14);
+            var hasHerbs = inventory != null
+                && inventory.TryGetServerItemCleanliness(28, out herbCleanliness);
+            var hasHeatSource = ResolveEnvironment(transform.position, 0f).ExternalHeat > 0.08f;
             cleanliness = action switch
             {
                 MedicalActionType.Wash => hasWater ? waterCleanliness : 0f,
@@ -856,6 +2573,15 @@ namespace Quieter.Survival
                 MedicalActionType.Suture => hasNeedle ? needleCleanliness : 0f,
                 MedicalActionType.Bandage => hasBandage ? bandageCleanliness : 0f,
                 MedicalActionType.Splint => hasSplint ? splintCleanliness : 0f,
+                MedicalActionType.DentalExtraction => hasWater && hasBandage
+                    ? Mathf.Min(waterCleanliness, bandageCleanliness) : 0f,
+                MedicalActionType.Cool or MedicalActionType.OralRehydration
+                    => hasWater ? waterCleanliness : 0f,
+                MedicalActionType.HerbalPainRelief
+                    => hasHerbs ? herbCleanliness : 0f,
+                MedicalActionType.AntiparasiticCourse
+                    => hasHerbs && hasWater
+                        ? Mathf.Min(herbCleanliness, waterCleanliness) : 0f,
                 _ => 1f,
             };
             var level = CharacterProgression.GetSkillLevel(
@@ -870,7 +2596,11 @@ namespace Quieter.Survival
                 hasSoap,
                 hasNeedle,
                 hasBandage,
-                hasSplint);
+                hasSplint,
+                serverState.Physiology.HandCleanliness,
+                hasSalt,
+                hasHerbs,
+                hasHeatSource);
         }
 
         private static string MissingTreatmentMaterial(
@@ -887,6 +2617,24 @@ namespace Quieter.Survival
                 => "Нужна чистая ткань для повязки.",
             MedicalActionType.Splint when !context.HasSplint
                 => "Нужна деревянная шина.",
+            MedicalActionType.DentalExtraction when !context.HasWater
+                => "Для удаления зуба нужно не менее 100 мл чистой воды.",
+            MedicalActionType.DentalExtraction when !context.HasBandage
+                => "Для удаления зуба нужна чистая ткань.",
+            MedicalActionType.Warm when !context.HasHeatSource
+                => "Для согревания нужен работающий очаг.",
+            MedicalActionType.Cool when !context.HasWater
+                => "Для охлаждения нужно не менее 100 мл чистой воды.",
+            MedicalActionType.OralRehydration when !context.HasWater
+                => "Для питьевого раствора нужно не менее 350 мл чистой воды.",
+            MedicalActionType.OralRehydration when !context.HasSalt
+                => "Для питьевого раствора нужна каменная соль.",
+            MedicalActionType.HerbalPainRelief when !context.HasHerbs
+                => "Нужны лекарственные травы.",
+            MedicalActionType.AntiparasiticCourse when !context.HasWater
+                => "Для курса нужно не менее 200 мл чистой воды.",
+            MedicalActionType.AntiparasiticCourse when !context.HasHerbs
+                => "Для курса нужны лекарственные травы.",
             _ => string.Empty,
         };
 
@@ -902,6 +2650,19 @@ namespace Quieter.Survival
                 && inventory.TryConsumeAnyItemServer(32),
             MedicalActionType.Splint => inventory != null
                 && inventory.TryConsumeAnyItemServer(34),
+            MedicalActionType.DentalExtraction => inventory != null
+                && inventory.TryConsumeServerCleanWater(100, out _)
+                && inventory.TryConsumeAnyItemServer(32),
+            MedicalActionType.Cool => inventory != null
+                && inventory.TryConsumeServerCleanWater(100, out _),
+            MedicalActionType.OralRehydration => inventory != null
+                && inventory.TryConsumeServerCleanWater(350, out _)
+                && inventory.TryConsumeAnyItemServer(14),
+            MedicalActionType.HerbalPainRelief => inventory != null
+                && inventory.TryConsumeAnyItemServer(28),
+            MedicalActionType.AntiparasiticCourse => inventory != null
+                && inventory.TryConsumeServerCleanWater(200, out _)
+                && inventory.TryConsumeAnyItemServer(28),
             _ => true,
         };
 
@@ -914,6 +2675,9 @@ namespace Quieter.Survival
             MedicalActionType.Suture => SkillId.Suturing,
             MedicalActionType.Bandage => SkillId.WoundCare,
             MedicalActionType.Splint => SkillId.Bonesetting,
+            MedicalActionType.DentalExtraction => SkillId.SurgeryAndDentistry,
+            MedicalActionType.HerbalPainRelief
+                or MedicalActionType.AntiparasiticCourse => SkillId.HerbalMedicine,
             _ => SkillId.Nursing,
         };
 
@@ -927,14 +2691,31 @@ namespace Quieter.Survival
             MedicalActionType.Bandage => 10f,
             MedicalActionType.Splint => 20f,
             MedicalActionType.RemoveBandage => 5f,
+            MedicalActionType.DentalExtraction => 35f,
+            MedicalActionType.Warm => 18f,
+            MedicalActionType.Cool => 15f,
+            MedicalActionType.OralRehydration => 20f,
+            MedicalActionType.HerbalPainRelief => 24f,
+            MedicalActionType.AntiparasiticCourse => 30f,
             _ => 8f,
         };
+
+        private static bool IsSupportiveMedicalAction(MedicalActionType action)
+            => action is MedicalActionType.Warm
+                or MedicalActionType.Cool
+                or MedicalActionType.OralRehydration
+                or MedicalActionType.HerbalPainRelief
+                or MedicalActionType.AntiparasiticCourse;
 
         private void CancelPendingTreatment(string message)
         {
             if (!pendingTreatmentActive) return;
             pendingTreatmentActive = false;
+            if (pendingTreatmentTarget != null)
+                pendingTreatmentTarget.activeExternalHealer = null;
+            pendingTreatmentTarget = null;
             SetTreatmentMessage(message);
+            ReplicateState();
         }
 
         private void SetTreatmentMessage(string message)
@@ -1029,6 +2810,8 @@ namespace Quieter.Survival
 
             var physiology = serverState.Physiology;
             var symptoms = PhysiologySimulation.ObserveSymptoms(serverState);
+            var diagnosisLevel = CharacterProgression.GetSkillLevel(
+                serverState.Progression, SkillId.Diagnosis);
             var woundCount = 0;
             uint woundedRegions = 0;
             uint fracturedRegions = 0;
@@ -1040,12 +2823,39 @@ namespace Quieter.Survival
                 if (wound.IsFracture) fracturedRegions |= 1u << (int)wound.Region;
             }
 
-            publicSymptoms.Value = new PublicSymptomState
+            var publicState = new PublicSymptomState
             {
                 Symptoms = symptoms & PubliclyVisibleSymptoms,
                 LifeState = physiology.LifeState,
                 VisibleWoundCount = (byte)Mathf.Min(byte.MaxValue, woundCount),
+                Sleeping = serverState.Sleeping,
+                Bound = serverState.Bound,
+                Captive = serverState.Captive,
+                ControlKind = serverState.ControlKind,
+                Activity = serverState.Npc?.Activity ?? NpcActivityKind.Idle,
+                ObservedJob = serverState.Npc?.ActiveJob ?? WorkerJobKind.Mining,
+                PersonalRequest = serverState.Npc?.PersonalRequest ?? NpcPersonalRequestKind.Food,
+                HasPersonalRequest = serverState.Npc?.PersonalRequestPending == true,
+                CorpseStage = serverState.Corpse?.Stage ?? CorpseDecayStage.Fresh,
+                CorpseContamination = (byte)Mathf.RoundToInt(Mathf.Clamp01(
+                    serverState.Corpse?.BiologicalContamination ?? 0f) * 255f),
             };
+            if (serverState.Npc != null)
+            {
+                var job = serverState.Npc.ActiveJob;
+                var evidence = serverState.Npc.CompletedTasks[(int)job];
+                if (evidence >= 3)
+                {
+                    var actual = CharacterProgression.GetSkillLevel(
+                        serverState.Progression, ObservableWorkSkill(job));
+                    var range = LivingWorldSimulation.RevealSkillRange(actual, evidence);
+                    publicState.HasWorkEvidence = true;
+                    publicState.ObservedSkillMinimum = (byte)range.Minimum;
+                    publicState.ObservedSkillMaximum = (byte)range.Maximum;
+                }
+            }
+            publicSymptoms.Value = publicState;
+            ReplicateWorkerContract();
             ReplicateObservedWounds();
             ownerCondition.Value = new OwnerConditionState
             {
@@ -1059,19 +2869,83 @@ namespace Quieter.Survival
                 PainStage = Stage(physiology.Pain),
                 BladderStage = Stage(physiology.BladderFill),
                 BowelStage = Stage(physiology.BowelFill),
+                GastrointestinalStage = diagnosisLevel >= 2
+                    ? Stage(serverState.Conditions.GastrointestinalInfection)
+                    : byte.MaxValue,
+                RespiratoryStage = diagnosisLevel >= 2
+                    ? Stage(serverState.Conditions.RespiratoryInfection)
+                    : byte.MaxValue,
+                ParasiteStage = diagnosisLevel >= 4
+                    ? Stage(serverState.Conditions.ParasiteLoad)
+                    : byte.MaxValue,
                 WoundedRegions = woundedRegions,
                 FracturedRegions = fracturedRegions,
                 NeedsCharacterCreation = !serverState.CreationCompleted,
                 Sleeping = serverState.Sleeping,
+                Bound = serverState.Bound,
+                Captive = serverState.Captive,
+                BeingCarried = serverCarrier != null,
+                ControlKind = serverState.ControlKind,
                 TraitSelectionError = traitSelectionError,
                 Revision = ++replicatedRevision,
             };
-            movementCapability.Value = serverState.CreationCompleted && !pendingTreatmentActive
-                ? MovementCapabilityState.From(
-                    PhysiologySimulation.CalculateCapabilities(serverState))
-                : MovementCapabilityState.From(
+            if (serverState.CreationCompleted && !pendingTreatmentActive
+                && !serverState.Bound
+                && serverState.ControlKind is CharacterControlKind.Player
+                    or CharacterControlKind.FreeNpc
+                    or CharacterControlKind.ContractedNpc
+                    or CharacterControlKind.ForcedNpc)
+            {
+                var capability = PhysiologySimulation.CalculateCapabilities(serverState);
+                if (serverCarriedTarget != null)
+                    capability = new CharacterCapabilities(
+                        capability.MovementSpeed * 0.45f,
+                        capability.Acceleration * 0.5f,
+                        0f,
+                        capability.StaminaRecovery * 0.35f,
+                        capability.FineMotor,
+                        capability.CanMove,
+                        false);
+                movementCapability.Value = MovementCapabilityState.From(capability);
+            }
+            else
+            {
+                movementCapability.Value = MovementCapabilityState.From(
                     new CharacterCapabilities(0f, 0f, 0f, 0f, 0f, false, false));
+            }
             Changed?.Invoke();
+        }
+
+        private void ReplicateWorkerContract()
+        {
+            var current = publicWorkerContract.Value;
+            var contract = serverState.WorkerContract;
+            var npc = serverState.Npc;
+            var next = new PublicWorkerContractState { Revision = current.Revision };
+            if (contract?.Active == true && npc != null)
+            {
+                contract.EnsureInitialized();
+                next.Active = true;
+                next.Voluntary = contract.Voluntary;
+                next.ActiveJob = npc.ActiveJob;
+                next.SelectedJob = npc.WorkbookSelectedJob;
+                next.SelectedPriority = LivingWorldSimulation.GetJobPriority(
+                    contract, npc.WorkbookSelectedJob);
+                next.DailyRationCalories = (ushort)Mathf.Clamp(
+                    Mathf.RoundToInt(contract.DailyRationCalories), 0, ushort.MaxValue);
+                next.WorkdayStartHour = contract.WorkdayStartHour;
+                next.WorkdayEndHour = contract.WorkdayEndHour;
+                next.WorkZoneRadius = contract.WorkZoneRadius;
+                next.WorkZoneCenter = contract.WorkZoneCenter;
+                next.StoragePosition = contract.StoragePosition;
+                next.PaymentItemId = contract.PaymentItemId;
+                next.PaymentQuantity = contract.PaymentQuantity;
+                next.ConsecutiveBreaches = (byte)Mathf.Clamp(
+                    contract.ConsecutiveBreaches, 0, byte.MaxValue);
+            }
+            if (next.Equals(current)) return;
+            next.Revision++;
+            publicWorkerContract.Value = next;
         }
 
         private void ReplicateObservedWounds()
@@ -1146,6 +3020,80 @@ namespace Quieter.Survival
             }
         }
 
+        private void EnsureCorpseState()
+        {
+            if (serverState == null || serverState.Physiology.LifeState != CharacterLifeState.Dead)
+                return;
+            serverState.Corpse ??= new CorpseState();
+            if (string.IsNullOrWhiteSpace(serverState.Corpse.CharacterId))
+                serverState.Corpse.CharacterId = serverState.CharacterId;
+            if (string.IsNullOrWhiteSpace(serverState.Corpse.CorpseId))
+                serverState.Corpse.CorpseId = $"corpse-{serverState.CharacterId}";
+            if (serverState.Corpse.DiedAtUtcTicks <= 0)
+                serverState.Corpse.DiedAtUtcTicks = DateTime.UtcNow.Ticks;
+            LivingWorldSimulation.UpdateCorpse(
+                serverState.Corpse, DateTime.UtcNow.Ticks,
+                ResolveEnvironment(transform.position, 0f).AmbientTemperatureC);
+        }
+
+        private void TickCorpseState()
+        {
+            if (Time.unscaledTime < nextCorpseUpdateAt) return;
+            nextCorpseUpdateAt = Time.unscaledTime + 5f;
+            EnsureCorpseState();
+            if (serverState?.Corpse == null) return;
+            var previousStage = serverState.Corpse.Stage;
+            var previousContamination = serverState.Corpse.BiologicalContamination;
+            LivingWorldSimulation.UpdateCorpse(
+                serverState.Corpse,
+                DateTime.UtcNow.Ticks,
+                ResolveEnvironment(transform.position, 0f).AmbientTemperatureC);
+            if (serverState.Corpse.Stage == CorpseDecayStage.DryRemains)
+                serverState.ControlKind = CharacterControlKind.Remains;
+            if (serverState.Corpse.Stage == previousStage
+                && Mathf.Approximately(
+                    serverState.Corpse.BiologicalContamination,
+                    previousContamination)) return;
+            serverState.Revision++;
+            ReplicateState();
+        }
+
+        private void ApplyNearbyCorpseExposure(float elapsedSeconds)
+        {
+            if (elapsedSeconds <= 0f || serverState?.Physiology == null) return;
+            foreach (var candidate in FindObjectsByType<PlayerSurvival>())
+            {
+                if (candidate == null || candidate == this || !candidate.ServerIsDead
+                    || candidate.serverState?.Corpse == null) continue;
+                var distance = Vector3.Distance(transform.position, candidate.transform.position);
+                if (distance > 10f) continue;
+                var exposure = candidate.serverState.Corpse.BiologicalContamination
+                    * (1f - distance / 10f) * elapsedSeconds;
+                serverState.Physiology.SystemicInfection = Mathf.Clamp01(
+                    serverState.Physiology.SystemicInfection + exposure / 24000f);
+                serverState.Physiology.BodyCleanliness = Mathf.Clamp01(
+                    serverState.Physiology.BodyCleanliness - exposure / 14000f);
+            }
+        }
+
+        private void ApplyNearbyRespiratoryExposure(float elapsedSeconds)
+        {
+            if (elapsedSeconds <= 0f || serverState?.Conditions == null
+                || serverState.Physiology.LifeState == CharacterLifeState.Dead) return;
+            foreach (var candidate in FindObjectsByType<PlayerSurvival>())
+            {
+                if (candidate == null || candidate == this || candidate.ServerIsDead
+                    || candidate.serverState?.Conditions == null) continue;
+                var source = candidate.serverState.Conditions.RespiratoryInfection;
+                if (source < 0.1f) continue;
+                var distance = Vector3.Distance(transform.position, candidate.transform.position);
+                if (distance > 4f) continue;
+                var proximity = 1f - distance / 4f;
+                PhysiologySimulation.ExposeRespiratoryInfection(
+                    serverState, source * proximity * elapsedSeconds / 300f);
+            }
+        }
+
         private SurvivalEnvironment ResolveEnvironment(Vector3 position, float elapsedSeconds)
         {
             var weather = FindAnyObjectByType<WorldWeatherService>();
@@ -1162,9 +3110,26 @@ namespace Quieter.Survival
                 environment.Precipitation,
                 environment.Humidity,
                 environment.Sheltered,
-                environment.ExternalHeat);
+                environment.ExternalHeat,
+                exertion,
+                serverState?.Physiology?.BodyCleanliness ?? 1f);
             var clothingInsulation = inventory?.GetServerClothingInsulation() ?? 0f;
             var rainProtection = inventory?.GetServerClothingRainProtection() ?? 0f;
+            var clothingBurden = inventory?.GetServerClothingHygieneBurden() ?? 0f;
+            if (serverState?.Physiology != null && elapsedSeconds > 0f
+                && clothingBurden > 0f)
+            {
+                serverState.Physiology.BodyCleanliness = Mathf.Max(
+                    0f,
+                    serverState.Physiology.BodyCleanliness
+                        - clothingBurden * elapsedSeconds / 18000f);
+                if (clothingBurden > 0.72f)
+                {
+                    serverState.Physiology.SystemicInfection = Mathf.Clamp01(
+                        serverState.Physiology.SystemicInfection
+                            + (clothingBurden - 0.72f) * elapsedSeconds / 90000f);
+                }
+            }
             return new SurvivalEnvironment(
                 environment.AmbientTemperatureC,
                 environment.WindMetersPerSecond,
@@ -1214,6 +3179,13 @@ namespace Quieter.Survival
         private void OnProgressionEntriesChanged(NetworkListEvent<ProgressionEntryState> _)
             => Changed?.Invoke();
 
+        private void OnOwnerHeirOfferChanged(OwnerHeirOfferState _, OwnerHeirOfferState __)
+            => Changed?.Invoke();
+
+        private void OnPublicWorkerContractChanged(
+            PublicWorkerContractState _, PublicWorkerContractState __)
+            => Changed?.Invoke();
+
         private const SymptomFlags PubliclyVisibleSymptoms =
             SymptomFlags.Weakness
             | SymptomFlags.Fatigue
@@ -1226,6 +3198,9 @@ namespace Quieter.Survival
             | SymptomFlags.Fever
             | SymptomFlags.Nausea
             | SymptomFlags.Breathless
+            | SymptomFlags.Cough
+            | SymptomFlags.Diarrhea
+            | SymptomFlags.NutritionalDeficiency
             | SymptomFlags.Panic
             | SymptomFlags.Confusion
             | SymptomFlags.LosingConsciousness

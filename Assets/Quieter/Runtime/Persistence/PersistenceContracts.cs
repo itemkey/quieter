@@ -23,6 +23,32 @@ namespace Quieter.Persistence
         public List<StoredDepositKnowledge> DepositKnowledge = new();
         public List<StoredMapNote> MapNotes = new();
         public CharacterSurvivalState Survival = new();
+        public string RegisteredHeirCharacterId;
+        public long EstateRevision;
+    }
+
+    public sealed class CharacterPersistenceSnapshot
+    {
+        public Vector3 Position;
+        public IReadOnlyList<StoredInventorySlot> Slots;
+        public IReadOnlyList<StoredInventorySlot> PendingItems;
+        public byte SelectedHotbarIndex;
+        public CharacterSurvivalState Survival;
+    }
+
+    [Serializable]
+    public sealed class PendingHeirOffer
+    {
+        public string OfferId;
+        public ulong DonorSteamId;
+        public string DonorDisplayName;
+        public ulong RecipientSteamId;
+        public string DeceasedCharacterId;
+        public string HeirCharacterId;
+        public string HeirName;
+        public DateTime OfferedAtUtc;
+        public DateTime AcceptanceStartedAtUtc;
+        public DateTime ExpiresAtUtc;
     }
 
     public interface IWorldRepository
@@ -93,6 +119,56 @@ namespace Quieter.Persistence
             IReadOnlyList<StoredInventorySlot> slots,
             IReadOnlyList<StoredInventorySlot> pendingItems,
             byte selectedHotbarIndex, CharacterSurvivalState survival,
+            CancellationToken cancellationToken = default);
+    }
+
+    public interface IPersistentCharacterRepository : IAtomicPlayerProfileRepository
+    {
+        Task<IReadOnlyList<PlayerProfile>> LoadWorldCharactersAsync(
+            CancellationToken cancellationToken = default);
+
+        Task SaveDetachedCharacterAsync(
+            Vector3 position, IReadOnlyList<StoredInventorySlot> slots,
+            IReadOnlyList<StoredInventorySlot> pendingItems, byte selectedHotbarIndex,
+            CharacterSurvivalState survival, CancellationToken cancellationToken = default);
+
+        Task<PlayerProfile> CreateNewStrangerAsync(
+            ulong steamId, string operationId, string previousCharacterId,
+            long expectedRevision, Vector3 spawn,
+            CancellationToken cancellationToken = default);
+
+        Task SaveCharacterPairAsync(
+            string operationId, CharacterPersistenceSnapshot source,
+            ulong destinationSteamId, CharacterPersistenceSnapshot destination,
+            CancellationToken cancellationToken = default);
+
+        Task<PlayerProfile> CreateWorldNpcAsync(
+            string name, CharacterPersistenceSnapshot snapshot,
+            CancellationToken cancellationToken = default);
+    }
+
+    public interface IInheritanceRepository
+    {
+        Task<PlayerProfile> RegisterHeirAsync(
+            ulong steamId, string heirCharacterId, long expectedEstateRevision,
+            CancellationToken cancellationToken = default);
+
+        Task<PlayerProfile> AssumeRegisteredHeirAsync(
+            ulong steamId, string operationId, string deceasedCharacterId,
+            long expectedRevision, CancellationToken cancellationToken = default);
+
+        Task<PendingHeirOffer> OfferRegisteredHeirAsync(
+            ulong donorSteamId, ulong recipientSteamId, string operationId,
+            string deceasedCharacterId, long expectedDonorEstateRevision,
+            CancellationToken cancellationToken = default);
+
+        Task<PendingHeirOffer> GetPendingHeirOfferAsync(
+            ulong recipientSteamId,
+            CancellationToken cancellationToken = default);
+
+        Task<PlayerProfile> AcceptHeirOfferAsync(
+            ulong recipientSteamId, string offerId, string operationId,
+            string deceasedCharacterId, long expectedRevision,
             CancellationToken cancellationToken = default);
     }
 }

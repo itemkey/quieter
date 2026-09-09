@@ -140,6 +140,7 @@ namespace Quieter.Inventory
                     pending.Add(sample);
                 }
             }
+            NormalizeEquippedClothing();
             return pending;
         }
 
@@ -202,6 +203,37 @@ namespace Quieter.Inventory
             SelectedHotbarIndex = (byte)Math.Min((int)index, InventoryLayout.HotbarSlotCount - 1);
         }
 
+        public bool ToggleEquippedClothing(
+            InventorySlotReference reference,
+            out bool equipped)
+        {
+            equipped = false;
+            if (reference.Area != InventorySlotArea.Inventory
+                || reference.Index >= inventory.Length) return false;
+            var stack = inventory[reference.Index];
+            if (stack.IsEmpty || !catalog.TryGetItem(stack.ItemId, out var item)
+                || item.Kind != ItemKind.Clothing) return false;
+
+            equipped = !stack.Equipped;
+            if (equipped)
+            {
+                for (var index = 0; index < inventory.Length; index++)
+                {
+                    if (index == reference.Index) continue;
+                    var other = inventory[index];
+                    if (other.IsEmpty || !other.Equipped
+                        || !catalog.TryGetItem(other.ItemId, out var otherItem)
+                        || otherItem.Kind != ItemKind.Clothing
+                        || otherItem.ClothingLayer != item.ClothingLayer) continue;
+                    other.Equipped = false;
+                    inventory[index] = other;
+                }
+            }
+            stack.Equipped = equipped;
+            inventory[reference.Index] = stack;
+            return true;
+        }
+
         public bool SetSlot(InventorySlotReference reference, ItemStackState stack)
         {
             if (!TryGetArray(reference, out var slots) || reference.Index >= slots.Length
@@ -212,6 +244,23 @@ namespace Quieter.Inventory
 
             slots[reference.Index] = valid;
             return true;
+        }
+
+        private void NormalizeEquippedClothing()
+        {
+            var occupied = new HashSet<ClothingLayer>();
+            for (var index = 0; index < inventory.Length; index++)
+            {
+                var stack = inventory[index];
+                if (stack.IsEmpty || !stack.Equipped) continue;
+                if (!catalog.TryGetItem(stack.ItemId, out var item)
+                    || item.Kind != ItemKind.Clothing
+                    || !occupied.Add(item.ClothingLayer))
+                {
+                    stack.Equipped = false;
+                    inventory[index] = stack;
+                }
+            }
         }
 
         public ItemStackState GetSlot(InventorySlotReference reference)

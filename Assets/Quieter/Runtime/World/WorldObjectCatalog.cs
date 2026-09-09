@@ -194,7 +194,7 @@ namespace Quieter.World
             {
                 return CreateFiberPlantPresentation(spawn, parent);
             }
-            if (ResourceBalance.IsWildFood(spawn.Resource.ResourceItemId))
+            if (ResourceBalance.IsWildForage(spawn.Resource.ResourceItemId))
             {
                 return CreateWildFoodPresentation(spawn, parent);
             }
@@ -343,9 +343,27 @@ namespace Quieter.World
                 return root;
             }
 
+            if (itemId == ResourceBalance.WildNutsItemId)
+            {
+                for (var index = 0; index < 7; index++)
+                {
+                    var angle = index / 7f * Mathf.PI * 2f;
+                    CreateDecoration(root.transform, PrimitiveType.Sphere,
+                        $"Nut_{index}",
+                        new Vector3(Mathf.Cos(angle) * 0.22f, -0.02f + index % 2 * 0.045f,
+                            Mathf.Sin(angle) * 0.17f),
+                        new Vector3(0.105f, 0.075f, 0.08f),
+                        Quaternion.Euler(12f, index * 53f, 28f),
+                        new Color(0.42f, 0.24f, 0.09f));
+                }
+                return root;
+            }
+
             var leafColor = itemId == ResourceBalance.WildBerriesItemId
                 ? new Color(0.18f, 0.46f, 0.14f)
-                : new Color(0.29f, 0.5f, 0.13f);
+                : itemId == ResourceBalance.MedicinalHerbsItemId
+                    ? new Color(0.23f, 0.55f, 0.24f)
+                    : new Color(0.29f, 0.5f, 0.13f);
             for (var index = 0; index < 5; index++)
             {
                 CreateDecoration(root.transform, PrimitiveType.Sphere,
@@ -365,6 +383,18 @@ namespace Quieter.World
                             0.1f - (index % 3) * 0.09f),
                         Vector3.one * 0.055f, Quaternion.identity,
                         new Color(0.58f, 0.035f, 0.11f));
+                }
+            }
+            else if (itemId == ResourceBalance.MedicinalHerbsItemId)
+            {
+                for (var index = 0; index < 4; index++)
+                {
+                    CreateDecoration(root.transform, PrimitiveType.Sphere,
+                        $"HerbFlower_{index}",
+                        new Vector3(-0.18f + index * 0.12f, 0.12f + index % 2 * 0.04f,
+                            index % 2 == 0 ? -0.09f : 0.08f),
+                        Vector3.one * 0.05f, Quaternion.identity,
+                        new Color(0.64f, 0.48f, 0.78f));
                 }
             }
             return root;

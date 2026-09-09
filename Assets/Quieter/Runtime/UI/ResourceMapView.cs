@@ -448,16 +448,38 @@ namespace Quieter.UI
 
         private string BuildStructurePrompt(SurvivalStructureView structure)
         {
-            if (structure.ItemId == SurvivalStructureRules.UnlinedWastePitItemId)
+            if (SurvivalStructureRules.IsWastePit(structure.ItemId))
                 return "[E] Опорожнить сосуд с отходами";
             if (structure.ItemId == SurvivalStructureRules.LeanToItemId)
                 return "Навес — частичная защита от дождя и ветра";
+            if (structure.ItemId == SurvivalStructureRules.HoldingCellItemId)
+                return "[E] Запереть или отпереть дверь камеры";
+            if (structure.ItemId == SurvivalStructureRules.DoorItemId)
+                return "[E] Запереть или отпереть дверь";
+            if (structure.ItemId == SurvivalStructureRules.ChestItemId)
+                return "[E] Запереть или отпереть сундук    [Shift+E] Положить/взять предмет";
+            if (structure.ItemId == SurvivalStructureRules.CartographyTableItemId)
+                return "[E] Скопировать или объединить физические карты";
+            if (structure.ItemId == SurvivalStructureRules.LatrineItemId)
+                return "[E] Воспользоваться уборной (нужен сток к яме)";
+            if (structure.ItemId == SurvivalStructureRules.WashBasinItemId)
+                return "[E] Вымыться    [Shift+E] Налить/набрать воду";
+            if (structure.ItemId == SurvivalStructureRules.BarrelItemId)
+                return "[E] Налить или набрать воду";
+            if (structure.ItemId == SurvivalStructureRules.WellItemId)
+                return "[E] Набрать воду из колодца";
+            if (structure.ItemId == SurvivalStructureRules.DrainItemId)
+                return "Дренаж — соедините непрерывным уклоном с выгребной ямой";
+            if (structure.ItemId == SurvivalStructureRules.BedItemId)
+                return "Кровать назначается работнику при заключении договора";
             if (structure.ItemId != SurvivalStructureRules.HearthItemId) return string.Empty;
             var active = inventory.GetReplicatedSlot(new InventorySlotReference(
                 InventorySlotArea.Inventory,
                 InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
-            return active.ItemId == 30 && active.LiquidMilliliters > 0
-                ? "[E] Кипятить воду в котелке"
+            if (active.ItemId == 30 && active.LiquidMilliliters > 0)
+                return "[E] Кипятить    [Shift+E] Настой с травами    [Ctrl+E] Отвар из кореньев";
+            return ResourceBalance.TryGetCookedFoodItemId(active.ItemId, out _)
+                ? "[E] Приготовить пищу на очаге"
                 : "[E] Добавить древесину или уголь в очаг";
         }
 

@@ -24,3 +24,6 @@ MonoBehaviour:
     Quantity: 1
   output: {fileID: 11400000, guid: bc455c281b1e4451999aec743431d6e6, type: 2}
   outputQuantity: 1
+  workSeconds: 0
+  requiresBurningHearth: 0
+  practiceSkill: 16

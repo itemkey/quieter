@@ -4,7 +4,7 @@ using Quieter.ProfileService.Contracts;
 
 namespace Quieter.ProfileService.Data;
 
-public sealed class ProfileStore(ProfileDbContext database)
+public sealed partial class ProfileStore(ProfileDbContext database)
 {
     public const ushort CurrentGeneratorVersion = 7;
 
@@ -86,6 +86,9 @@ public sealed class ProfileStore(ProfileDbContext database)
                 CharacterId = Guid.NewGuid(),
                 Name = player.DisplayName,
                 SurvivalJson = "{}",
+                PositionX = player.PositionX,
+                PositionY = player.PositionY,
+                PositionZ = player.PositionZ,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
             };
@@ -137,11 +140,18 @@ public sealed class ProfileStore(ProfileDbContext database)
         var previous = ReadLifeState(character.SurvivalJson, strict: false);
         if ((character.LifeState == 4 || previous.LifeState == 4) && physiology.LifeState != 4)
             throw new ArgumentException("An irreversibly dead character cannot be resurrected.");
+        if (ReadControlKind(character.SurvivalJson) == 3
+            && ReadControlKind(request.Survival.SurvivalJson) != 3)
+            throw new ArgumentException("A captured body cannot restore player control.");
 
         character.SurvivalJson = request.Survival.SurvivalJson;
         character.Revision = request.Survival.Revision;
         character.LifeState = physiology.LifeState;
         character.DeathCause = physiology.DeathCause;
+        if (physiology.LifeState == 4) character.DiedAtUtc ??= DateTime.UtcNow;
+        character.PositionX = request.Position.X;
+        character.PositionY = request.Position.Y;
+        character.PositionZ = request.Position.Z;
         character.UpdatedAtUtc = DateTime.UtcNow;
         player.PositionX = request.Position.X;
         player.PositionY = request.Position.Y;
@@ -191,6 +201,24 @@ public sealed class ProfileStore(ProfileDbContext database)
         }
     }
 
+    private static byte ReadControlKind(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return 0;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            if (!document.RootElement.TryGetProperty("ControlKind", out var control)) return 0;
+            if (control.ValueKind != System.Text.Json.JsonValueKind.Number
+                || !control.TryGetByte(out var value) || value > 5)
+                throw new ArgumentException("Character control state is invalid.");
+            return value;
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new ArgumentException("Survival aggregate is not valid JSON.", exception);
+        }
+    }
+
     public async Task<bool> SaveSurvivalAsync(
         string steamIdText,
         SurvivalRequest request,
@@ -233,10 +261,14 @@ public sealed class ProfileStore(ProfileDbContext database)
         if ((player.CurrentCharacter.LifeState == 4 || previous.LifeState == 4)
             && physiology.LifeState != 4)
             throw new ArgumentException("An irreversibly dead character cannot be resurrected.");
+        if (ReadControlKind(player.CurrentCharacter.SurvivalJson) == 3
+            && ReadControlKind(request.SurvivalJson) != 3)
+            throw new ArgumentException("A captured body cannot restore player control.");
 
         player.CurrentCharacter.SurvivalJson = request.SurvivalJson;
         player.CurrentCharacter.LifeState = physiology.LifeState;
         player.CurrentCharacter.DeathCause = physiology.DeathCause;
+        if (physiology.LifeState == 4) player.CurrentCharacter.DiedAtUtc ??= DateTime.UtcNow;
         player.CurrentCharacter.Revision = request.Revision;
         player.CurrentCharacter.UpdatedAtUtc = DateTime.UtcNow;
         player.LastSeenAtUtc = DateTime.UtcNow;
@@ -341,7 +373,10 @@ public sealed class ProfileStore(ProfileDbContext database)
                 entry.InputLiquidKind,
                 entry.InputEquipped),
             entry.CreatedAtUtc,
-            entry.UpdatedAtUtc)).ToArray());
+            entry.UpdatedAtUtc,
+            FormatOptionalId(entry.OwnerAccountId),
+            entry.Locked,
+            entry.AssignedCharacterId?.ToString("D"))).ToArray());
     }
 
     public async Task<bool> SavePlacedObjectsAsync(
@@ -379,6 +414,13 @@ public sealed class ProfileStore(ProfileDbContext database)
             _ = ParseOptionalInstanceId(input?.SourceNodeId);
             _ = ParseOptionalInstanceId(input?.SampleId);
             _ = ParseOptionalInstanceId(input?.ItemInstanceId);
+            _ = ParseOptionalInstanceId(source.Entry.OwnerAccountId);
+            if (source.Entry.AssignedCharacterId is not null
+                && (!Guid.TryParse(source.Entry.AssignedCharacterId, out _)
+                    || source.Entry.ItemId != 48))
+                throw new ArgumentException("Only a bed can be assigned to a character.");
+            if (source.Entry.Locked && source.Entry.ItemId is not (47 or 54 or 55))
+                throw new ArgumentException("Only a cell, door or chest can be locked.");
         }
         var existing = await database.WorldPlacedObjects
             .Where(entry => entry.WorldId == worldId)
@@ -392,11 +434,15 @@ public sealed class ProfileStore(ProfileDbContext database)
             {
                 WorldId = worldId,
                 ObjectId = source.ObjectId,
+                OwnerAccountId = ParseOptionalInstanceId(source.Entry.OwnerAccountId),
+                AssignedCharacterId = string.IsNullOrWhiteSpace(source.Entry.AssignedCharacterId)
+                    ? null : Guid.Parse(source.Entry.AssignedCharacterId),
                 ItemId = source.Entry.ItemId,
                 X = source.Entry.X,
                 Y = source.Entry.Y,
                 Z = source.Entry.Z,
                 Yaw = source.Entry.Yaw,
+                Locked = source.Entry.Locked,
                 InputItemId = input?.ItemId ?? 0,
                 InputQuantity = input?.Quantity ?? 0,
                 InputCondition = input?.Condition ?? 0,
@@ -490,18 +536,24 @@ public sealed class ProfileStore(ProfileDbContext database)
     {
         var character = player.CurrentCharacter
             ?? throw new InvalidOperationException("Account has no character.");
-        database.CharacterItems.RemoveRange(character.Items);
-        character.Items = (request.Slots ?? [])
-            .Select(slot => ToCharacterItem(character.CharacterId, 0, slot.SlotIndex, slot))
-            .Concat((request.PendingItems ?? [])
-                .Select((slot, index) => ToCharacterItem(character.CharacterId, 1, (ushort)index, slot)))
-            .ToList();
+        ApplyCharacterInventory(character, request);
         database.PlayerInventorySlots.RemoveRange(player.InventorySlots);
         database.PlayerPendingItems.RemoveRange(player.PendingItems);
         player.InventorySlots.Clear();
         player.PendingItems.Clear();
         player.SelectedHotbarIndex = request.SelectedHotbarIndex;
         player.LastSeenAtUtc = DateTime.UtcNow;
+    }
+
+    private void ApplyCharacterInventory(CharacterEntity character, InventoryRequest request)
+    {
+        database.CharacterItems.RemoveRange(character.Items);
+        character.Items = (request.Slots ?? [])
+            .Select(slot => ToCharacterItem(character.CharacterId, 0, slot.SlotIndex, slot))
+            .Concat((request.PendingItems ?? [])
+                .Select((slot, index) => ToCharacterItem(character.CharacterId, 1, (ushort)index, slot)))
+            .ToList();
+        character.SelectedHotbarIndex = request.SelectedHotbarIndex;
     }
 
     private static CharacterItemEntity ToCharacterItem(
@@ -665,6 +717,17 @@ public sealed class ProfileStore(ProfileDbContext database)
                     .SetProperty(player => player.PositionY, y)
                     .SetProperty(player => player.PositionZ, z)
                     .SetProperty(player => player.LastSeenAtUtc, now), cancellationToken);
+            if (updated == 1)
+            {
+                await database.Characters
+                    .Where(character => character.ControllingPlayer != null
+                        && character.ControllingPlayer.SteamId == steamId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(character => character.PositionX, x)
+                        .SetProperty(character => character.PositionY, y)
+                        .SetProperty(character => character.PositionZ, z)
+                        .SetProperty(character => character.UpdatedAtUtc, now), cancellationToken);
+            }
             return updated == 1;
         }
 
@@ -677,6 +740,17 @@ public sealed class ProfileStore(ProfileDbContext database)
         player.PositionX = FiniteOrDefault(request.X);
         player.PositionY = FiniteOrDefault(request.Y);
         player.PositionZ = FiniteOrDefault(request.Z);
+        if (player.CurrentCharacterId.HasValue)
+        {
+            var character = await database.Characters.FindAsync([player.CurrentCharacterId.Value], cancellationToken);
+            if (character != null)
+            {
+                character.PositionX = player.PositionX;
+                character.PositionY = player.PositionY;
+                character.PositionZ = player.PositionZ;
+                character.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
         player.LastSeenAtUtc = DateTime.UtcNow;
         await database.SaveChangesAsync(cancellationToken);
         return true;
@@ -842,7 +916,9 @@ public sealed class ProfileStore(ProfileDbContext database)
             .ToArray(),
         player.CurrentCharacter?.CharacterId.ToString("D") ?? string.Empty,
         player.CurrentCharacter?.SurvivalJson ?? "{}",
-        player.CurrentCharacter?.Revision ?? 0);
+        player.CurrentCharacter?.Revision ?? 0,
+        player.RegisteredHeirCharacterId?.ToString("D"),
+        player.EstateRevision);
 
     private static decimal ParseSteamId(string value)
     {

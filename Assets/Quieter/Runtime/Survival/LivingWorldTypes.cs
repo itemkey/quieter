@@ -26,6 +26,92 @@ namespace Quieter.Survival
         PatientCare,
     }
 
+    public enum WorkerContractAction : byte
+    {
+        SelectNextJob,
+        RaiseSelectedPriority,
+        LowerSelectedPriority,
+        SetWorkZoneHere,
+        SetStorageHere,
+        NarrowWorkZone,
+        WidenWorkZone,
+        StartEarlier,
+        StartLater,
+        EndEarlier,
+        EndLater,
+        IncreaseRation,
+        DecreaseRation,
+        CyclePayment,
+    }
+
+    public enum NpcDisposition : byte
+    {
+        Passive,
+        Aggressive,
+    }
+
+    public enum NpcActivityKind : byte
+    {
+        Idle,
+        Wander,
+        SeekWater,
+        SeekFood,
+        Rest,
+        Work,
+        Flee,
+        Sabotage,
+        Combat,
+        SeekSanitation,
+    }
+
+    public enum WorkerResponseKind : byte
+    {
+        Stay,
+        Leave,
+        Escape,
+        Sabotage,
+        Rebel,
+    }
+
+    public enum NpcPersonalRequestKind : byte
+    {
+        Food,
+        CleanWater,
+        Medicine,
+        Tool,
+    }
+
+    [Serializable]
+    public sealed class NpcRuntimeState
+    {
+        public NpcDisposition Disposition;
+        public NpcActivityKind Activity;
+        public WorkerJobKind ActiveJob;
+        public WorkerJobKind WorkbookSelectedJob;
+        public Vector3 HomePosition;
+        public Vector3 Destination;
+        public string EmployerAccountId = string.Empty;
+        public string EmployerCharacterId = string.Empty;
+        [Range(0f, 1f)] public float Motivation = 0.65f;
+        [Min(0f)] public float WorkProgressSeconds;
+        public long NextDecisionUtcTicks;
+        public long LastNeedsActionUtcTicks;
+        public long LastWorkCompletedUtcTicks;
+        public long ContractEvaluationGameDay = long.MinValue;
+        [Min(0f)] public float RationCaloriesCurrentDay;
+        public int[] CompletedTasks = new int[8];
+        public NpcPersonalRequestKind PersonalRequest;
+        public bool PersonalRequestPending;
+        public long PersonalRequestGameDay = long.MinValue;
+        public long LastPersonalRequestCompletedGameDay = long.MinValue;
+
+        public void EnsureInitialized()
+        {
+            if (CompletedTasks == null || CompletedTasks.Length != 8)
+                CompletedTasks = new int[8];
+        }
+    }
+
     public enum CaptureStatus : byte
     {
         None,
@@ -77,6 +163,9 @@ namespace Quieter.Survival
         public string EmployerAccountId = string.Empty;
         public string WorkerCharacterId = string.Empty;
         public string AssignedBedObjectId = string.Empty;
+        public Vector3 WorkZoneCenter;
+        [Range(5f, 150f)] public float WorkZoneRadius = 70f;
+        public Vector3 StoragePosition;
         public bool Active;
         public bool Voluntary;
         [Min(0f)] public float DailyRationCalories;
@@ -88,6 +177,21 @@ namespace Quieter.Survival
         [Min(0f)] public double FulfilledContractGameSeconds;
         public int ConsecutiveBreaches;
         public List<WorkerJobKind> AllowedJobs = new();
+        public byte[] JobPriorities = new byte[8];
+
+        public void EnsureInitialized()
+        {
+            AllowedJobs ??= new List<WorkerJobKind>();
+            if (JobPriorities == null || JobPriorities.Length != 8)
+            {
+                JobPriorities = new byte[8];
+            }
+            var hasPriority = false;
+            foreach (var priority in JobPriorities) hasPriority |= priority > 0;
+            if (!hasPriority)
+                foreach (var job in AllowedJobs) JobPriorities[(int)job] = 1;
+            if (WorkZoneRadius <= 0f) WorkZoneRadius = 70f;
+        }
     }
 
     [Serializable]

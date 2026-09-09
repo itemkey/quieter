@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: CookingPotRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
   recipeId: 10
-  displayName: "Глиняный котелок"
+  displayName: "\u0413\u043B\u0438\u043D\u044F\u043D\u044B\u0439 \u043A\u043E\u0442\u0435\u043B\u043E\u043A"
   category: 0
   ingredients:
   - Item: {fileID: 11400000, guid: 45847805ec117f64f82bc1bea4bc37b5, type: 2}

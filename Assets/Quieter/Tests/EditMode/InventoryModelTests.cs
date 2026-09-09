@@ -57,6 +57,50 @@ namespace Quieter.Tests
         }
 
         [Test]
+        public void ClothingLayers_ReplaceOnlyConflictingLayer()
+        {
+            var survivalCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            var model = new InventoryModel(survivalCatalog);
+            Assert.That(model.SetSlot(Inventory(0),
+                new ItemStackState(39, 1, itemInstanceId: 1001)), Is.True);
+            Assert.That(model.SetSlot(Inventory(1),
+                new ItemStackState(39, 1, itemInstanceId: 1002)), Is.True);
+            Assert.That(model.SetSlot(Inventory(2),
+                new ItemStackState(64, 1, itemInstanceId: 1003)), Is.True);
+
+            Assert.That(model.ToggleEquippedClothing(Inventory(0), out var first), Is.True);
+            Assert.That(first, Is.True);
+            Assert.That(model.ToggleEquippedClothing(Inventory(1), out var replacement), Is.True);
+            Assert.That(replacement, Is.True);
+            Assert.That(model.Inventory[0].Equipped, Is.False,
+                "A second mid-layer garment must replace the first one.");
+            Assert.That(model.Inventory[1].Equipped, Is.True);
+
+            Assert.That(model.ToggleEquippedClothing(Inventory(2), out var outer), Is.True);
+            Assert.That(outer, Is.True);
+            Assert.That(model.Inventory[1].Equipped, Is.True,
+                "An outer cloak must coexist with a mid-layer tunic.");
+            Assert.That(model.Inventory[2].Equipped, Is.True);
+        }
+
+        [Test]
+        public void ClothingCatalog_ContainsDistinctCraftableLayers()
+        {
+            var survivalCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
+            var layers = new HashSet<ClothingLayer>();
+            for (ushort itemId = 63; itemId <= 67; itemId++)
+            {
+                Assert.That(survivalCatalog.TryGetItem(itemId, out var item), Is.True);
+                Assert.That(item.Kind, Is.EqualTo(ItemKind.Clothing));
+                Assert.That(item.ClothingLayer, Is.Not.EqualTo(ClothingLayer.None));
+                layers.Add(item.ClothingLayer);
+            }
+            for (ushort recipeId = 30; recipeId <= 34; recipeId++)
+                Assert.That(survivalCatalog.TryGetRecipe(recipeId, out _), Is.True);
+            Assert.That(layers.Count, Is.EqualTo(5));
+        }
+
+        [Test]
         public void LiquidTransfer_RollsBackRejectedDestinationAndConservesPartialVolume()
         {
             var survivalCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");

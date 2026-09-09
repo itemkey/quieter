@@ -11,6 +11,7 @@ namespace Quieter.Survival
     {
         public const float RealSecondsPerGameDay = 7200f;
         public const float MaximumStepSeconds = 1f;
+        public const float ActiveSleepPhysiologyScale = 16f / 3f;
 
         public static void Simulate(
             CharacterSurvivalState character,
@@ -83,9 +84,13 @@ namespace Quieter.Survival
             physiology.ElectrolyteBalance = Mathf.Clamp01(
                 physiology.ElectrolyteBalance + electrolyteContent * amount * 0.1f);
             var digestion = TraitCatalog.Resolve(character.Traits).Digestion;
+            var biological = Mathf.Clamp01(biologicalContamination);
+            character.Conditions.WaterborneInfection = Mathf.Clamp01(
+                character.Conditions.WaterborneInfection
+                + biological * amount * 0.18f / digestion);
             physiology.SystemicInfection = Mathf.Clamp01(
                 physiology.SystemicInfection
-                + Mathf.Clamp01(biologicalContamination) * amount * 0.035f / digestion);
+                + biological * amount * 0.008f / digestion);
             physiology.ToxinLoad = Mathf.Clamp01(
                 physiology.ToxinLoad + Mathf.Clamp01(toxinContamination) * amount * 0.08f);
         }
@@ -96,26 +101,61 @@ namespace Quieter.Survival
             float protein,
             float micronutrients,
             float biologicalContamination,
-            float toxinContamination)
+            float toxinContamination,
+            float fat = 0f,
+            float minerals = 0f)
         {
             character.EnsureInitialized();
             var physiology = character.Physiology;
             var digestion = TraitCatalog.Resolve(character.Traits).Digestion;
+            var chewingEfficiency = Mathf.Lerp(
+                1f, 0.62f, physiology.MissingTeeth / 32f);
             physiology.StomachFullness = Mathf.Clamp01(
                 physiology.StomachFullness + Mathf.Max(0f, calories) / 2600f);
             physiology.EnergyReserve = Mathf.Clamp01(
-                physiology.EnergyReserve + Mathf.Max(0f, calories) / 9000f);
+                physiology.EnergyReserve
+                + Mathf.Max(0f, calories) / 9000f * chewingEfficiency);
             physiology.ProteinReserve = Mathf.Clamp01(
-                physiology.ProteinReserve + Mathf.Max(0f, protein) / 450f);
+                physiology.ProteinReserve
+                + Mathf.Max(0f, protein) / 450f * chewingEfficiency);
+            physiology.FatReserve = Mathf.Clamp01(
+                physiology.FatReserve
+                + Mathf.Max(0f, fat) / 650f * chewingEfficiency);
             physiology.MicronutrientReserve = Mathf.Clamp01(
                 physiology.MicronutrientReserve + Mathf.Max(0f, micronutrients) * 0.1f);
+            physiology.MineralReserve = Mathf.Clamp01(
+                physiology.MineralReserve + Mathf.Max(0f, minerals) * 0.1f);
             physiology.BowelFill = Mathf.Clamp01(
                 physiology.BowelFill + Mathf.Max(0f, calories) / 4500f);
+            var biological = Mathf.Clamp01(biologicalContamination);
+            character.Conditions.FoodborneInfection = Mathf.Clamp01(
+                character.Conditions.FoodborneInfection + biological * 0.18f / digestion);
+            character.Conditions.ParasiteLoad = Mathf.Clamp01(
+                character.Conditions.ParasiteLoad + biological * 0.04f / digestion);
             physiology.SystemicInfection = Mathf.Clamp01(
                 physiology.SystemicInfection
-                + Mathf.Clamp01(biologicalContamination) * 0.05f / digestion);
+                + biological * 0.008f / digestion);
             physiology.ToxinLoad = Mathf.Clamp01(
                 physiology.ToxinLoad + Mathf.Clamp01(toxinContamination) * 0.08f);
+        }
+
+        public static void ConsumeHerbalInfusion(
+            CharacterSurvivalState character,
+            float liters)
+        {
+            character.EnsureInitialized();
+            var amount = Mathf.Clamp(liters, 0f, 1f);
+            if (amount <= 0f) return;
+            character.Conditions.HerbalAnalgesiaSeconds = Mathf.Max(
+                character.Conditions.HerbalAnalgesiaSeconds,
+                240f + amount * 900f);
+            character.Conditions.HerbalAnalgesiaStrength = Mathf.Max(
+                character.Conditions.HerbalAnalgesiaStrength,
+                0.04f + amount * 0.08f);
+            // An ordinary medieval infusion is supportive, variable and not a
+            // substitute for treating infection or trauma.
+            character.Physiology.ToxinLoad = Mathf.Clamp01(
+                character.Physiology.ToxinLoad + amount * 0.004f);
         }
 
         public static void RelieveBladder(CharacterSurvivalState character, bool cleanly)
@@ -211,7 +251,7 @@ namespace Quieter.Survival
                 return new TreatmentResult(false, "Рана не найдена.", 0f);
             }
 
-            var dirtyHands = 1f - character.Physiology.HandCleanliness;
+            var dirtyHands = 1f - context.PractitionerHandCleanliness;
             var contaminationRisk = Mathf.Clamp01(
                 (1f - context.MaterialCleanliness) * 0.55f + dirtyHands * 0.35f);
             switch (action)
@@ -282,6 +322,141 @@ namespace Quieter.Survival
             return new TreatmentResult(true, "Действие выполнено.", contaminationRisk);
         }
 
+        public static TreatmentResult ExtractTooth(
+            CharacterSurvivalState character,
+            TreatmentContext context)
+        {
+            character.EnsureInitialized();
+            var p = character.Physiology;
+            if (p.DentalHealth > 0.55f && p.DentalInfection < 0.12f)
+                return new TreatmentResult(false, "Нет зуба, который явно требует удаления.", 0f);
+            if (!context.HasWater || !context.HasBandage)
+                return new TreatmentResult(false,
+                    "Для удаления нужны чистая вода и ткань для остановки крови.", 0f);
+            var contaminationRisk = Mathf.Clamp01(
+                (1f - context.MaterialCleanliness) * 0.5f
+                + (1f - context.PractitionerHandCleanliness) * 0.35f
+                + (1f - context.Skill) * 0.35f);
+            p.MissingTeeth = (byte)Mathf.Min(32, p.MissingTeeth + 1);
+            p.DentalHealth = Mathf.Clamp01(Mathf.Max(0.38f, p.DentalHealth + 0.18f));
+            p.DentalInfection = Mathf.Clamp01(
+                p.DentalInfection * Mathf.Lerp(0.72f, 0.22f, context.Skill)
+                + contaminationRisk * 0.12f);
+            // A tooth socket is an open wound, but it is not penetrating head
+            // trauma. Creating it directly avoids incorrectly damaging the brain.
+            var severity = Mathf.Lerp(0.3f, 0.12f, context.Skill);
+            var wound = new WoundState
+            {
+                WoundId = character.Anatomy.NextWoundId++,
+                Region = BodyRegion.Head,
+                Type = InjuryType.Puncture,
+                Severity = severity,
+                TissueDamage = severity,
+                Contamination = contaminationRisk,
+                Bleeding = severity * Mathf.Lerp(0.32f, 0.14f, context.Skill),
+                Pain = Mathf.Lerp(0.65f, 0.35f, context.Skill),
+            };
+            character.Anatomy.Wounds.Add(wound);
+            return new TreatmentResult(
+                true,
+                "Зуб удалён. Осталась кровоточащая рана, которую нужно наблюдать и обрабатывать.",
+                contaminationRisk);
+        }
+
+        public static void ExposeRespiratoryInfection(
+            CharacterSurvivalState character,
+            float exposure)
+        {
+            if (character == null || exposure <= 0f) return;
+            character.EnsureInitialized();
+            var immunity = TraitCatalog.Resolve(character.Traits).Immunity;
+            character.Conditions.RespiratoryInfection = Mathf.Clamp01(
+                character.Conditions.RespiratoryInfection
+                + Mathf.Clamp01(exposure) * 0.08f / immunity);
+        }
+
+        public static TreatmentResult ApplySupportiveTreatment(
+            CharacterSurvivalState character,
+            MedicalActionType action,
+            TreatmentContext context)
+        {
+            character.EnsureInitialized();
+            var p = character.Physiology;
+            var conditions = character.Conditions;
+            switch (action)
+            {
+                case MedicalActionType.Warm:
+                    if (!context.HasHeatSource)
+                        return new TreatmentResult(false, "Нужен работающий источник тепла.", 0f);
+                    if (p.CoreTemperatureC >= 37.2f)
+                        return new TreatmentResult(false, "Дополнительное согревание сейчас опасно.", 0f);
+                    conditions.WarmingCareSeconds = Mathf.Max(
+                        conditions.WarmingCareSeconds, Mathf.Lerp(480f, 900f, context.Skill));
+                    conditions.CoolingCareSeconds = 0f;
+                    return new TreatmentResult(true,
+                        "Начато постепенное согревание. Оставайтесь у источника тепла и следите за сознанием.", 0f);
+                case MedicalActionType.Cool:
+                    if (!context.HasWater)
+                        return new TreatmentResult(false, "Для охлаждения нужна чистая вода.", 0f);
+                    if (p.CoreTemperatureC <= 37.6f)
+                        return new TreatmentResult(false, "Охлаждение нормальной температуры навредит.", 0f);
+                    conditions.CoolingCareSeconds = Mathf.Max(
+                        conditions.CoolingCareSeconds, Mathf.Lerp(480f, 900f, context.Skill));
+                    conditions.WarmingCareSeconds = 0f;
+                    return new TreatmentResult(true,
+                        "Начато постепенное охлаждение водой. Резкого выздоровления не будет.", 0f);
+                case MedicalActionType.OralRehydration:
+                    if (!context.HasWater || !context.HasSalt)
+                        return new TreatmentResult(false,
+                            "Нужны чистая вода и каменная соль для питьевого раствора.", 0f);
+                    if (p.Hydration > 0.88f && p.ElectrolyteBalance > 0.8f
+                        && conditions.GastrointestinalInfection < 0.12f)
+                    {
+                        return new TreatmentResult(false,
+                            "Признаков обезвоживания или кишечной потери жидкости нет.", 0f);
+                    }
+                    ConsumeWater(character, 0.35f, 0f, 0f, 0.9f, 1.08f);
+                    return new TreatmentResult(true,
+                        "Раствор выпит. При поносе его придётся готовить повторно и продолжать наблюдение.", 0f);
+                case MedicalActionType.HerbalPainRelief:
+                    if (!context.HasHerbs)
+                        return new TreatmentResult(false, "Нужны лекарственные травы.", 0f);
+                    if (p.Pain < 0.08f && conditions.RespiratoryInfection < 0.15f
+                        && p.SystemicInfection < 0.2f)
+                        return new TreatmentResult(false, "Явных симптомов для такого состава нет.", 0f);
+                    conditions.HerbalAnalgesiaSeconds = Mathf.Max(
+                        conditions.HerbalAnalgesiaSeconds, Mathf.Lerp(600f, 1500f, context.Skill));
+                    conditions.HerbalAnalgesiaStrength = Mathf.Max(
+                        conditions.HerbalAnalgesiaStrength, Mathf.Lerp(0.08f, 0.24f, context.Skill));
+                    var complication = (1f - context.Skill) * 0.16f
+                        + (1f - context.MaterialCleanliness) * 0.12f;
+                    p.ToxinLoad = Mathf.Clamp01(p.ToxinLoad + complication * 0.04f);
+                    return new TreatmentResult(true,
+                        "Травяной состав может приглушить симптомы, но не устраняет их причину.",
+                        complication);
+                case MedicalActionType.AntiparasiticCourse:
+                    if (!context.HasHerbs || !context.HasWater)
+                        return new TreatmentResult(false,
+                            "Для курса нужны лекарственные травы и чистая вода.", 0f);
+                    if (conditions.ParasiteLoad < 0.08f)
+                        return new TreatmentResult(false,
+                            "Признаков паразитарной нагрузки недостаточно; риск состава не оправдан.", 0f);
+                    conditions.AntiparasiticCourseSeconds = Mathf.Max(
+                        conditions.AntiparasiticCourseSeconds, RealSecondsPerGameDay * 2f);
+                    conditions.AntiparasiticCourseStrength = Mathf.Max(
+                        conditions.AntiparasiticCourseStrength,
+                        Mathf.Lerp(0.1f, 0.28f, context.Skill));
+                    var courseRisk = (1f - context.Skill) * 0.28f
+                        + (1f - context.MaterialCleanliness) * 0.18f;
+                    p.ToxinLoad = Mathf.Clamp01(p.ToxinLoad + courseRisk * 0.07f);
+                    return new TreatmentResult(true,
+                        "Начат двухсуточный противопаразитарный курс. Он действует постепенно и сам может вызвать недомогание.",
+                        courseRisk);
+                default:
+                    return new TreatmentResult(false, "Это не действие общего ухода.", 0f);
+            }
+        }
+
         public static SymptomFlags ObserveSymptoms(CharacterSurvivalState character)
         {
             character.EnsureInitialized();
@@ -290,7 +465,13 @@ namespace Quieter.Survival
             if (p.Hydration < 0.78f) symptoms |= SymptomFlags.Thirst;
             if (p.Hydration < 0.55f) symptoms |= SymptomFlags.DryMouth;
             if (p.StomachFullness < 0.35f) symptoms |= SymptomFlags.Hunger;
-            if (p.EnergyReserve < 0.4f || p.BloodVolume < 0.65f) symptoms |= SymptomFlags.Weakness;
+            var nutritionFloor = Mathf.Min(p.EnergyReserve,
+                Mathf.Min(p.ProteinReserve, Mathf.Min(p.FatReserve,
+                    Mathf.Min(p.MicronutrientReserve, p.MineralReserve))));
+            if (nutritionFloor < 0.4f || p.BloodVolume < 0.65f)
+                symptoms |= SymptomFlags.Weakness;
+            if (Mathf.Min(p.MicronutrientReserve, p.MineralReserve) < 0.28f)
+                symptoms |= SymptomFlags.NutritionalDeficiency;
             if (p.SleepDebt > 0.3f) symptoms |= SymptomFlags.Fatigue;
             if (p.SleepDebt > 0.75f) symptoms |= SymptomFlags.Microsleep;
             if (p.CoreTemperatureC < 36.2f) symptoms |= SymptomFlags.Cold;
@@ -305,11 +486,24 @@ namespace Quieter.Survival
             if (p.SystemicInfection > 0.25f || p.ToxinLoad > 0.2f) symptoms |= SymptomFlags.Nausea;
             if (p.Oxygenation < 0.8f) symptoms |= SymptomFlags.Breathless;
             if (p.SmokeIrritation > 0.16f) symptoms |= SymptomFlags.SmokeIrritation;
+            var gastrointestinal = character.Conditions.GastrointestinalInfection;
+            if (character.Conditions.RespiratoryInfection > 0.08f)
+                symptoms |= SymptomFlags.Cough;
+            if (gastrointestinal > 0.1f)
+                symptoms |= SymptomFlags.AbdominalCramps;
+            if (gastrointestinal > 0.24f)
+                symptoms |= SymptomFlags.Diarrhea;
+            if (character.Conditions.ParasiteLoad > 0.22f)
+                symptoms |= SymptomFlags.ParasiteSigns;
+            if (gastrointestinal > 0.16f) symptoms |= SymptomFlags.Nausea;
+            if (character.Conditions.RespiratoryInfection > 0.28f
+                || gastrointestinal > 0.35f) symptoms |= SymptomFlags.Fever;
             if (p.Stress > 0.75f) symptoms |= SymptomFlags.Panic;
             if (p.BladderFill > 0.72f) symptoms |= SymptomFlags.BladderPressure;
             if (p.BowelFill > 0.78f) symptoms |= SymptomFlags.BowelPressure;
             if (p.BodyCleanliness < 0.35f) symptoms |= SymptomFlags.Dirty;
-            if (p.DentalHealth < 0.45f) symptoms |= SymptomFlags.Toothache;
+            if (p.DentalHealth < 0.45f || p.DentalInfection > 0.12f)
+                symptoms |= SymptomFlags.Toothache;
             if (p.LifeState >= CharacterLifeState.Confused) symptoms |= SymptomFlags.Confusion;
             if (p.LifeState >= CharacterLifeState.Unconscious) symptoms |= SymptomFlags.LosingConsciousness;
             if (p.LifeState == CharacterLifeState.Agonal) symptoms |= SymptomFlags.AgonalBreathing;
@@ -331,7 +525,9 @@ namespace Quieter.Survival
             var legs = (leftLeg + rightLeg) * 0.5f;
             var circulation = Mathf.Clamp01(p.BloodVolume * 1.2f);
             var respiration = Mathf.Clamp01(p.Oxygenation * character.Anatomy.LungFunction * 1.25f);
-            var energy = Mathf.Clamp01(Mathf.Min(p.Hydration * 1.3f, p.EnergyReserve * 1.4f));
+            var energy = Mathf.Clamp01(Mathf.Min(
+                p.Hydration * 1.3f,
+                Mathf.Min(p.EnergyReserve * 1.4f, p.ElectrolyteBalance * 1.25f)));
             var consciousness = Mathf.Clamp01(p.Consciousness);
             var painPenalty = Mathf.Lerp(1f, 0.35f, p.Pain);
             var strength = character.Progression.Attributes[(int)CharacterAttributeId.Strength];
@@ -366,16 +562,22 @@ namespace Quieter.Survival
             var p = character.Physiology;
             var a = character.Anatomy;
             var traits = TraitCatalog.Resolve(character.Traits);
-            var internalScale = offlineMetabolismSlowed ? 0.25f : 1f;
-            var metabolicSeconds = seconds * internalScale;
             var sleeping = character.Sleeping;
+            var internalScale = offlineMetabolismSlowed
+                ? 0.25f
+                : sleeping && !character.Offline
+                    ? ActiveSleepPhysiologyScale
+                    : 1f;
+            var metabolicSeconds = seconds * internalScale;
 
             var metabolism = traits.Metabolism * (1f + exertion * 1.35f);
             p.Hydration -= metabolicSeconds / (9000f / metabolism);
             p.StomachFullness -= metabolicSeconds / (2700f / metabolism);
             p.EnergyReserve -= metabolicSeconds / (72000f / metabolism);
             p.ProteinReserve -= metabolicSeconds / (180000f / metabolism);
+            p.FatReserve -= metabolicSeconds / (240000f / metabolism);
             p.MicronutrientReserve -= metabolicSeconds / 300000f;
+            p.MineralReserve -= metabolicSeconds / 360000f;
             p.BladderFill += metabolicSeconds / 3000f * Mathf.Max(0.3f, p.Hydration);
             p.BowelFill += metabolicSeconds / 11000f * Mathf.Max(0.2f, p.StomachFullness);
 
@@ -386,9 +588,11 @@ namespace Quieter.Survival
                     + Mathf.Max(0f, 36f - p.CoreTemperatureC) * 0.3f
                     + Mathf.Max(0f, p.BladderFill - 0.8f)
                     + p.SystemicInfection * 0.4f);
-                p.SleepDebt -= metabolicSeconds / (420f * traits.SleepNeed)
+                // A personal sleep lasts 5-10 real minutes. Internal metabolism is
+                // accelerated separately, but rest duration stays on real time.
+                p.SleepDebt -= seconds / (420f * traits.SleepNeed)
                     * (1f - sleepInterruption * 0.85f);
-                p.AcuteStamina += metabolicSeconds / 30f;
+                p.AcuteStamina += seconds / 30f;
             }
             else
             {
@@ -399,7 +603,9 @@ namespace Quieter.Survival
             }
 
             SimulateTemperature(p, seconds, environment, exertion, traits);
+            ApplySupportiveCare(character, seconds);
             SimulateWounds(character, metabolicSeconds, seconds, traits);
+            SimulateRehabilitation(character, metabolicSeconds, exertion);
             SimulateDiseaseAndOrgans(character, metabolicSeconds, traits);
 
             var lungFunction = Mathf.Max(0.01f, a.LungFunction * traits.LungCapacity);
@@ -418,19 +624,25 @@ namespace Quieter.Survival
             var oxygenTarget = Mathf.Clamp01(
                 lungFunction * (1f - exertion * 0.32f)
                 * Mathf.Lerp(0.55f, 1f, p.BloodVolume)
-                * (1f - smoke * 0.96f));
+                * (1f - smoke * 0.96f)
+                * Mathf.Lerp(1f, 0.62f, character.Conditions.RespiratoryInfection));
             p.Oxygenation = Mathf.MoveTowards(p.Oxygenation, oxygenTarget, seconds * 0.12f);
 
             var chronicPain = character.Traits.Contains(TraitId.ChronicPain) ? 0.18f : 0f;
             var eliminationPressure = Mathf.Max(
                 Mathf.InverseLerp(0.78f, 1f, p.BladderFill),
                 Mathf.InverseLerp(0.82f, 1f, p.BowelFill));
-            var woundPain = chronicPain + eliminationPressure * 0.24f;
+            var dentalPain = Mathf.Max(
+                Mathf.InverseLerp(0.5f, 0.1f, p.DentalHealth) * 0.2f,
+                p.DentalInfection * 0.32f);
+            var woundPain = chronicPain + eliminationPressure * 0.24f + dentalPain;
             foreach (var wound in a.Wounds)
             {
                 if (!wound.Healed) woundPain += wound.Pain * 0.35f;
             }
-            p.Pain = Mathf.Clamp01(woundPain / traits.PainTolerance);
+            var analgesia = character.Conditions.HerbalAnalgesiaSeconds > 0f
+                ? character.Conditions.HerbalAnalgesiaStrength : 0f;
+            p.Pain = Mathf.Clamp01(woundPain / traits.PainTolerance - analgesia);
             var dangerStress = Mathf.Max(
                 Mathf.Max(p.Pain, 1f - p.Oxygenation),
                 eliminationPressure * 0.75f);
@@ -453,7 +665,11 @@ namespace Quieter.Survival
             p.StomachFullness = ClampFinite01(p.StomachFullness);
             p.EnergyReserve = ClampFinite01(p.EnergyReserve);
             p.ProteinReserve = ClampFinite01(p.ProteinReserve);
+            p.FatReserve = ClampFinite01(p.FatReserve);
             p.MicronutrientReserve = ClampFinite01(p.MicronutrientReserve);
+            p.MineralReserve = ClampFinite01(p.MineralReserve);
+            p.DentalHealth = ClampFinite01(p.DentalHealth);
+            p.DentalInfection = ClampFinite01(p.DentalInfection);
             p.SleepDebt = ClampFinite01(p.SleepDebt);
             p.BladderFill = ClampFinite01(p.BladderFill);
             p.BowelFill = ClampFinite01(p.BowelFill);
@@ -463,11 +679,19 @@ namespace Quieter.Survival
             p.ToxinLoad = ClampFinite01(p.ToxinLoad);
             p.SmokeIrritation = ClampFinite01(p.SmokeIrritation);
             p.Consciousness = ClampFinite01(p.Consciousness);
+            character.Conditions.FoodborneInfection = ClampFinite01(
+                character.Conditions.FoodborneInfection);
+            character.Conditions.WaterborneInfection = ClampFinite01(
+                character.Conditions.WaterborneInfection);
+            character.Conditions.ParasiteLoad = ClampFinite01(
+                character.Conditions.ParasiteLoad);
+            character.Conditions.RespiratoryInfection = ClampFinite01(
+                character.Conditions.RespiratoryInfection);
 
             CharacterProgression.SimulateAttributeAdaptation(
                 character.Progression,
                 metabolicSeconds,
-                Mathf.Min(p.EnergyReserve, p.ProteinReserve),
+                Mathf.Min(p.EnergyReserve, Mathf.Min(p.ProteinReserve, p.FatReserve)),
                 1f - Mathf.Max(p.SystemicInfection, p.ToxinLoad),
                 sleeping);
             UpdateLifeState(character, seconds);
@@ -537,7 +761,10 @@ namespace Quieter.Survival
                 p.SystemicInfection += Mathf.Max(0f, wound.Infection - 0.55f)
                     * metabolicSeconds / 18000f;
 
-                var nutrition = Mathf.Min(p.EnergyReserve, Mathf.Min(p.ProteinReserve, p.Hydration));
+                var nutrition = Mathf.Min(p.Hydration,
+                    Mathf.Min(p.EnergyReserve, Mathf.Min(p.ProteinReserve,
+                        Mathf.Min(p.FatReserve,
+                            Mathf.Min(p.MicronutrientReserve, p.MineralReserve)))));
                 var care = (wound.Washed ? 1.1f : 0.65f)
                     * (wound.Bandaged || !wound.IsOpen ? 1.1f : 0.8f)
                     * (wound.IsFracture && !wound.Splinted ? 0.18f : 1f);
@@ -566,27 +793,151 @@ namespace Quieter.Survival
         {
             var p = character.Physiology;
             var a = character.Anatomy;
+            var conditions = character.Conditions;
+            var dietaryReserve = Mathf.Min(p.ProteinReserve,
+                Mathf.Min(p.FatReserve,
+                    Mathf.Min(p.MicronutrientReserve, p.MineralReserve)));
+            var immuneTarget = Mathf.Clamp01(0.12f + dietaryReserve * 0.95f
+                - p.SleepDebt * 0.16f - p.SystemicInfection * 0.25f);
+            p.ImmuneReserve = Mathf.MoveTowards(
+                p.ImmuneReserve, immuneTarget, seconds / (RealSecondsPerGameDay * 6f));
             var immuneRecovery = seconds / 50000f * p.ImmuneReserve * traits.Immunity;
             p.SystemicInfection = Mathf.Max(0f, p.SystemicInfection - immuneRecovery);
             p.ToxinLoad = Mathf.Max(
                 0f,
                 p.ToxinLoad - seconds / 65000f * a.LiverFunction * a.KidneyFunction);
 
+            var dentalPredisposition = character.Traits.Contains(TraitId.RottenTeeth)
+                ? 4f : 1f;
+            var dentalHygiene = Mathf.Lerp(2.5f, 0.65f,
+                Mathf.Min(p.HandCleanliness, p.BodyCleanliness));
+            p.DentalHealth = Mathf.Max(0f, p.DentalHealth
+                - seconds / (RealSecondsPerGameDay * 180f)
+                    * dentalPredisposition * dentalHygiene);
+            if (p.DentalHealth < 0.5f)
+            {
+                p.DentalInfection = Mathf.Clamp01(p.DentalInfection
+                    + (0.5f - p.DentalHealth) * seconds
+                        / (RealSecondsPerGameDay * 5f) / traits.Immunity);
+            }
+            else
+            {
+                p.DentalInfection = Mathf.Max(0f,
+                    p.DentalInfection - seconds / (RealSecondsPerGameDay * 25f)
+                        * traits.Immunity);
+            }
+            p.SystemicInfection = Mathf.Clamp01(p.SystemicInfection
+                + Mathf.Max(0f, p.DentalInfection - 0.35f)
+                    * seconds / (RealSecondsPerGameDay * 8f));
+
+            var immuneEffect = Mathf.Max(0.15f, p.ImmuneReserve * traits.Immunity);
+            conditions.FoodborneInfection = Mathf.Max(0f,
+                conditions.FoodborneInfection
+                - seconds / (RealSecondsPerGameDay * 8f) * immuneEffect);
+            conditions.WaterborneInfection = Mathf.Max(0f,
+                conditions.WaterborneInfection
+                - seconds / (RealSecondsPerGameDay * 7f) * immuneEffect);
+            conditions.RespiratoryInfection = Mathf.Max(0f,
+                conditions.RespiratoryInfection
+                - seconds / (RealSecondsPerGameDay * 12f) * immuneEffect);
+            conditions.ParasiteLoad = Mathf.Max(0f,
+                conditions.ParasiteLoad
+                - seconds / (RealSecondsPerGameDay * 80f) * immuneEffect);
+
+            var gastrointestinal = conditions.GastrointestinalInfection;
+            if (gastrointestinal > 0f)
+            {
+                p.Hydration -= gastrointestinal * seconds
+                    / (RealSecondsPerGameDay * 3.5f);
+                p.ElectrolyteBalance -= gastrointestinal * seconds
+                    / (RealSecondsPerGameDay * 2.6f);
+                p.BowelFill += gastrointestinal * seconds
+                    / (RealSecondsPerGameDay * 0.65f);
+                if (gastrointestinal > 0.68f)
+                {
+                    a.GutFunction = Mathf.Max(0f, a.GutFunction
+                        - (gastrointestinal - 0.68f) * seconds
+                            / (RealSecondsPerGameDay * 18f));
+                }
+            }
+            if (conditions.ParasiteLoad > 0f)
+            {
+                p.EnergyReserve -= conditions.ParasiteLoad * seconds
+                    / (RealSecondsPerGameDay * 16f);
+                p.ProteinReserve -= conditions.ParasiteLoad * seconds
+                    / (RealSecondsPerGameDay * 22f);
+                p.FatReserve -= conditions.ParasiteLoad * seconds
+                    / (RealSecondsPerGameDay * 30f);
+                p.MicronutrientReserve -= conditions.ParasiteLoad * seconds
+                    / (RealSecondsPerGameDay * 12f);
+                p.MineralReserve -= conditions.ParasiteLoad * seconds
+                    / (RealSecondsPerGameDay * 15f);
+            }
+            if (conditions.AntiparasiticCourseSeconds > 0f)
+            {
+                var treatedSeconds = Mathf.Min(
+                    seconds, conditions.AntiparasiticCourseSeconds);
+                conditions.ParasiteLoad = Mathf.Max(0f,
+                    conditions.ParasiteLoad
+                    - conditions.AntiparasiticCourseStrength * treatedSeconds
+                        / (RealSecondsPerGameDay * 2f));
+                conditions.AntiparasiticCourseSeconds = Mathf.Max(
+                    0f, conditions.AntiparasiticCourseSeconds - treatedSeconds);
+                if (conditions.AntiparasiticCourseSeconds <= 0f)
+                    conditions.AntiparasiticCourseStrength = 0f;
+            }
+            if (conditions.RespiratoryInfection > 0.72f)
+            {
+                var respiratoryDamage = (conditions.RespiratoryInfection - 0.72f)
+                    * seconds / (RealSecondsPerGameDay * 24f);
+                a.LeftLungFunction = Mathf.Max(0f, a.LeftLungFunction - respiratoryDamage);
+                a.RightLungFunction = Mathf.Max(0f, a.RightLungFunction - respiratoryDamage);
+            }
+            var inflammatoryLoad = Mathf.Max(gastrointestinal,
+                Mathf.Max(conditions.RespiratoryInfection, p.SystemicInfection));
+            if (inflammatoryLoad > 0.2f)
+            {
+                p.CoreTemperatureC = Mathf.Min(41.5f,
+                    p.CoreTemperatureC
+                    + (inflammatoryLoad - 0.2f) * seconds
+                        / (RealSecondsPerGameDay * 1.4f));
+            }
+            p.SystemicInfection = Mathf.Clamp01(p.SystemicInfection
+                + Mathf.Max(0f, gastrointestinal - 0.58f)
+                    * seconds / (RealSecondsPerGameDay * 6f)
+                + Mathf.Max(0f, conditions.RespiratoryInfection - 0.62f)
+                    * seconds / (RealSecondsPerGameDay * 8f));
+
             var dehydration = Mathf.Max(0f, 0.18f - p.Hydration) / 0.18f;
-            var starvation = Mathf.Max(0f, 0.05f - p.EnergyReserve) / 0.05f;
+            var electrolyteCrisis = Mathf.Max(
+                0f, 0.12f - p.ElectrolyteBalance) / 0.12f;
+            var macroReserve = Mathf.Min(p.EnergyReserve,
+                Mathf.Min(p.ProteinReserve, p.FatReserve));
+            var starvation = Mathf.Max(0f, 0.05f - macroReserve) / 0.05f;
+            var vitaminCrisis = Mathf.Max(
+                0f, 0.025f - p.MicronutrientReserve) / 0.025f;
+            var mineralCrisis = Mathf.Max(
+                0f, 0.025f - p.MineralReserve) / 0.025f;
             var sepsis = Mathf.Max(0f, p.SystemicInfection - 0.65f) / 0.35f;
             var toxins = Mathf.Max(0f, p.ToxinLoad - 0.72f) / 0.28f;
             var thermal = Mathf.Max(
                 Mathf.InverseLerp(34f, 30f, p.CoreTemperatureC),
                 Mathf.InverseLerp(41f, 43f, p.CoreTemperatureC));
-            var organStress = Mathf.Max(dehydration, Mathf.Max(starvation, Mathf.Max(sepsis, Mathf.Max(toxins, thermal))));
+            var organStress = Mathf.Max(
+                Mathf.Max(dehydration, electrolyteCrisis),
+                Mathf.Max(starvation, Mathf.Max(vitaminCrisis,
+                    Mathf.Max(mineralCrisis,
+                        Mathf.Max(sepsis, Mathf.Max(toxins, thermal))))));
             if (organStress > 0f)
             {
                 var damage = organStress * seconds / 900f;
                 a.KidneyFunction = Mathf.Max(0f, a.KidneyFunction - damage * (dehydration + toxins));
                 a.LiverFunction = Mathf.Max(0f, a.LiverFunction - damage * (starvation + toxins + sepsis));
-                a.HeartFunction = Mathf.Max(0f, a.HeartFunction - damage * (thermal + sepsis));
-                a.BrainFunction = Mathf.Max(0f, a.BrainFunction - damage * thermal * 0.8f);
+                a.HeartFunction = Mathf.Max(0f, a.HeartFunction
+                    - damage * (thermal + sepsis + electrolyteCrisis
+                        + mineralCrisis * 0.7f));
+                a.BrainFunction = Mathf.Max(0f, a.BrainFunction
+                    - damage * (thermal * 0.8f + vitaminCrisis * 0.25f));
             }
 
             var organFloor = Mathf.Min(a.BrainFunction, Mathf.Min(a.HeartFunction, Mathf.Min(a.LungFunction, Mathf.Min(a.LiverFunction, a.KidneyFunction))));
@@ -596,6 +947,69 @@ namespace Quieter.Survival
                 * (1f - p.ToxinLoad * 0.55f)
                 * (1f - p.SleepDebt * 0.25f));
             p.Consciousness = Mathf.MoveTowards(p.Consciousness, consciousnessTarget, seconds * 0.18f);
+        }
+
+        private static void ApplySupportiveCare(
+            CharacterSurvivalState character,
+            float seconds)
+        {
+            var conditions = character.Conditions;
+            var p = character.Physiology;
+            if (conditions.WarmingCareSeconds > 0f)
+            {
+                p.CoreTemperatureC = Mathf.MoveTowards(
+                    p.CoreTemperatureC, 37f, seconds / 480f);
+                p.Wetness = Mathf.Max(0f, p.Wetness - seconds / 1200f);
+                conditions.WarmingCareSeconds = Mathf.Max(
+                    0f, conditions.WarmingCareSeconds - seconds);
+            }
+            if (conditions.CoolingCareSeconds > 0f)
+            {
+                p.CoreTemperatureC = Mathf.MoveTowards(
+                    p.CoreTemperatureC, 37.2f, seconds / 540f);
+                conditions.CoolingCareSeconds = Mathf.Max(
+                    0f, conditions.CoolingCareSeconds - seconds);
+            }
+            if (conditions.HerbalAnalgesiaSeconds > 0f)
+            {
+                conditions.HerbalAnalgesiaSeconds = Mathf.Max(
+                    0f, conditions.HerbalAnalgesiaSeconds - seconds);
+                if (conditions.HerbalAnalgesiaSeconds <= 0f)
+                    conditions.HerbalAnalgesiaStrength = 0f;
+            }
+        }
+
+        private static void SimulateRehabilitation(
+            CharacterSurvivalState character,
+            float seconds,
+            float exertion)
+        {
+            if (seconds <= 0f || exertion <= 0.15f || character.Sleeping) return;
+            var nutrition = Mathf.Min(
+                character.Physiology.Hydration,
+                Mathf.Min(character.Physiology.EnergyReserve,
+                    Mathf.Min(character.Physiology.ProteinReserve,
+                        Mathf.Min(character.Physiology.FatReserve,
+                            Mathf.Min(character.Physiology.MicronutrientReserve,
+                                character.Physiology.MineralReserve)))));
+            var health = 1f - Mathf.Max(
+                character.Physiology.SystemicInfection,
+                character.Physiology.ToxinLoad);
+            var rehabilitation = seconds / (40f * 3600f)
+                * Mathf.InverseLerp(0.15f, 0.75f, exertion)
+                * nutrition * health;
+            if (rehabilitation <= 0f) return;
+            foreach (var wound in character.Anatomy.Wounds)
+            {
+                if (wound == null || !wound.Healed || wound.PermanentImpairment <= 0f)
+                    continue;
+                // Severe structural damage leaves a small irreducible deficit. The
+                // rest needs many real hours of safe movement to rehabilitate.
+                var residual = Mathf.Max(0f, wound.Severity - 0.7f)
+                    * (wound.IsFracture ? 0.18f : 0.08f);
+                wound.PermanentImpairment = Mathf.Max(
+                    residual, wound.PermanentImpairment - rehabilitation);
+            }
         }
 
         private static void UpdateLifeState(CharacterSurvivalState character, float seconds)
@@ -703,7 +1117,9 @@ namespace Quieter.Survival
             if (p.CoreTemperatureC <= 29.5f) return DeathCause.Hypothermia;
             if (p.CoreTemperatureC >= 43f) return DeathCause.Hyperthermia;
             if (p.Hydration <= 0.001f && a.KidneyFunction <= 0.18f) return DeathCause.Dehydration;
-            if (p.EnergyReserve <= 0.001f && a.LiverFunction <= 0.18f) return DeathCause.Starvation;
+            if (Mathf.Min(p.EnergyReserve, Mathf.Min(p.ProteinReserve, p.FatReserve))
+                    <= 0.001f && a.LiverFunction <= 0.18f)
+                return DeathCause.Starvation;
             if (p.SystemicInfection >= 0.99f && a.HeartFunction <= 0.22f) return DeathCause.Sepsis;
             if (p.ToxinLoad >= 0.99f && a.LiverFunction <= 0.22f) return DeathCause.Poisoning;
             var failedOrgans = 0;
@@ -774,7 +1190,12 @@ namespace Quieter.Survival
                 var function = 1f;
                 foreach (var wound in anatomy.Wounds)
                 {
-                    if (wound.Region != region || wound.Healed) continue;
+                    if (wound.Region != region) continue;
+                    if (wound.Healed)
+                    {
+                        function -= wound.PermanentImpairment;
+                        continue;
+                    }
                     var immobilizedFracture = wound.IsFracture && !wound.Splinted ? 0.75f : 0f;
                     function -= wound.TissueDamage * 0.55f
                         + wound.PermanentImpairment

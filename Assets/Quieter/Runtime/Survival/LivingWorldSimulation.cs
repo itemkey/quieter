@@ -166,6 +166,151 @@ namespace Quieter.Survival
             return Mathf.Max(0f, baseUnits * skill * body * conditions);
         }
 
+        public static WorkerResponseKind EvaluateContractDay(
+            WorkerContractState contract,
+            RelationshipState relationship,
+            float deliveredRationCalories,
+            float experiencedSafety,
+            float deterministicRoll,
+            bool paymentDelivered = true)
+        {
+            if (contract == null || relationship == null || !contract.Active)
+                return WorkerResponseKind.Leave;
+            contract.EnsureInitialized();
+            var rationMet = deliveredRationCalories + 1f >= contract.DailyRationCalories;
+            var safetyMet = experiencedSafety + 0.001f >= contract.PromisedSafety;
+            if (rationMet && safetyMet && (!contract.Voluntary || paymentDelivered))
+            {
+                contract.FulfilledContractGameSeconds += GameSecondsPerDay;
+                contract.ConsecutiveBreaches = Math.Max(0, contract.ConsecutiveBreaches - 1);
+                relationship.Trust = Mathf.Clamp01(relationship.Trust + 0.035f);
+                relationship.Resentment = Mathf.Clamp01(relationship.Resentment - 0.028f);
+                relationship.Loyalty = Mathf.Clamp01(relationship.Loyalty
+                    + (contract.Voluntary ? 0.04f : 0.018f));
+            }
+            else
+            {
+                contract.ConsecutiveBreaches++;
+                relationship.Trust = Mathf.Clamp01(relationship.Trust - 0.08f);
+                relationship.Resentment = Mathf.Clamp01(relationship.Resentment + 0.11f);
+                relationship.Loyalty = Mathf.Clamp01(relationship.Loyalty - 0.07f);
+            }
+
+            if (!contract.Voluntary && contract.FulfilledContractGameSeconds
+                    >= GameSecondsPerDay * 30d
+                && relationship.Trust >= 0.68f && relationship.Loyalty >= 0.62f
+                && relationship.Resentment <= 0.3f)
+            {
+                contract.Voluntary = true;
+                relationship.VoluntaryLoyalty = true;
+            }
+
+            var roll = Mathf.Clamp01(deterministicRoll);
+            if (contract.Voluntary && contract.ConsecutiveBreaches >= 3
+                && roll < Mathf.Clamp01(0.18f + relationship.Resentment * 0.55f))
+                return WorkerResponseKind.Leave;
+            if (!contract.Voluntary && relationship.Resentment >= 0.82f
+                && relationship.Fear < 0.38f && roll < 0.32f)
+                return WorkerResponseKind.Rebel;
+            if (!contract.Voluntary && roll < 0.08f + relationship.Resentment * 0.16f)
+                return WorkerResponseKind.Escape;
+            if (relationship.Resentment >= 0.58f && roll < 0.24f)
+                return WorkerResponseKind.Sabotage;
+            return WorkerResponseKind.Stay;
+        }
+
+        public static float CalculateWorkerMotivation(
+            WorkerContractState contract,
+            RelationshipState relationship,
+            PhysiologyState physiology)
+        {
+            if (physiology == null) return 0f;
+            var physicalNeeds = Mathf.Clamp01(Mathf.Min(
+                physiology.Hydration,
+                Mathf.Min(physiology.EnergyReserve, 1f - physiology.SleepDebt)));
+            var trust = relationship == null ? 0.4f : relationship.Trust;
+            var resentment = relationship == null ? 0f : relationship.Resentment;
+            var willing = contract?.Voluntary == true ? 0.25f : 0f;
+            return Mathf.Clamp01(0.22f + physicalNeeds * 0.45f + trust * 0.22f
+                + willing - resentment * 0.38f);
+        }
+
+        public static byte GetJobPriority(WorkerContractState contract, WorkerJobKind job)
+        {
+            contract?.EnsureInitialized();
+            return contract == null || (int)job >= contract.JobPriorities.Length
+                ? (byte)0 : contract.JobPriorities[(int)job];
+        }
+
+        public static byte AdjustJobPriority(
+            WorkerContractState contract,
+            WorkerJobKind job,
+            int delta)
+        {
+            if (contract == null) return 0;
+            contract.EnsureInitialized();
+            var value = (byte)Mathf.Clamp(contract.JobPriorities[(int)job] + delta, 0, 3);
+            contract.JobPriorities[(int)job] = value;
+            var contains = contract.AllowedJobs.Contains(job);
+            if (value > 0 && !contains) contract.AllowedJobs.Add(job);
+            else if (value == 0 && contains) contract.AllowedJobs.Remove(job);
+            return value;
+        }
+
+        public static bool TrySelectPriorityJob(
+            WorkerContractState contract,
+            WorkerJobKind current,
+            out WorkerJobKind selected)
+        {
+            selected = current;
+            if (contract == null) return false;
+            contract.EnsureInitialized();
+            var best = 0;
+            foreach (WorkerJobKind job in Enum.GetValues(typeof(WorkerJobKind)))
+            {
+                var priority = GetJobPriority(contract, job);
+                if (priority < best || priority == 0) continue;
+                if (priority == best && job != current) continue;
+                best = priority;
+                selected = job;
+            }
+            return best > 0;
+        }
+
+        public static NpcActivityKind ChooseNpcActivity(
+            PhysiologyState physiology,
+            bool hasDrink,
+            bool hasFood,
+            bool threatened,
+            bool assignedWork,
+            bool withinWorkHours)
+        {
+            if (physiology == null) return NpcActivityKind.Idle;
+            if (threatened) return NpcActivityKind.Flee;
+            if (physiology.Hydration < 0.62f && !hasDrink)
+                return NpcActivityKind.SeekWater;
+            if ((physiology.StomachFullness < 0.4f
+                    || physiology.EnergyReserve < 0.52f) && !hasFood)
+                return NpcActivityKind.SeekFood;
+            if (physiology.SleepDebt >= 0.68f) return NpcActivityKind.Rest;
+            if (assignedWork && withinWorkHours) return NpcActivityKind.Work;
+            return NpcActivityKind.Wander;
+        }
+
+        public static bool IsWithinWorkHours(
+            float hour,
+            float startHour,
+            float endHour)
+        {
+            hour = Mathf.Repeat(hour, 24f);
+            startHour = Mathf.Repeat(startHour, 24f);
+            endHour = Mathf.Repeat(endHour, 24f);
+            if (Mathf.Approximately(startHour, endHour)) return true;
+            return startHour < endHour
+                ? hour >= startHour && hour < endHour
+                : hour >= startHour || hour < endHour;
+        }
+
         public static (int Minimum, int Maximum) RevealSkillRange(
             int actualSkill,
             int relevantCompletedTasks)
@@ -181,6 +326,23 @@ namespace Quieter.Survival
                 _ => 0,
             };
             return (Mathf.Max(0, actualSkill - uncertainty), Mathf.Min(10, actualSkill + uncertainty));
+        }
+
+        public static NpcPersonalRequestKind SelectPersonalRequest(
+            string characterId, long gameDay)
+        {
+            unchecked
+            {
+                var hash = 1469598103934665603UL;
+                foreach (var character in characterId ?? string.Empty)
+                {
+                    hash ^= character;
+                    hash *= 1099511628211UL;
+                }
+                hash ^= (ulong)gameDay;
+                hash *= 1099511628211UL;
+                return (NpcPersonalRequestKind)(hash % 4UL);
+            }
         }
 
         public static void DepositWaste(SanitationNodeState pit, float liters, float biologicalLoad)

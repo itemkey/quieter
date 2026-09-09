@@ -113,7 +113,7 @@ namespace Quieter.UI
             cardRect.anchorMin = new Vector2(0.5f, 0.5f);
             cardRect.anchorMax = new Vector2(0.5f, 0.5f);
             cardRect.pivot = new Vector2(0.5f, 0.5f);
-            cardRect.sizeDelta = new Vector2(680f, 540f);
+            cardRect.sizeDelta = new Vector2(680f, 700f);
 
             var title = CreateText(card.transform, "QUIETER", 42, FontStyle.Bold, TextAnchor.MiddleCenter);
             SetRect(title.rectTransform, 40f, -28f, 600f, 62f, new Vector2(0f, 1f));
@@ -153,6 +153,57 @@ namespace Quieter.UI
             statusText.color = new Color(0.73f, 0.76f, 0.8f);
             SetRect(statusText.rectTransform, 52f, -244f, 576f, 60f, new Vector2(0f, 1f));
 
+            var accessibilityLabel = CreateText(
+                card.transform,
+                "Доступность ощущений",
+                16,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft);
+            accessibilityLabel.color = new Color(0.74f, 0.8f, 0.88f);
+            SetRect(accessibilityLabel.rectTransform, 52f, 370f, 576f, 24f, Vector2.zero);
+
+            var vignetteToggle = CreatePreferenceToggle(
+                card.transform,
+                "Затемнение и цвет",
+                ClientPreferences.ScreenEffectsEnabled,
+                value => ClientPreferences.ScreenEffectsEnabled = value);
+            SetRect(vignetteToggle.GetComponent<RectTransform>(), 52f, 328f, 270f, 38f, Vector2.zero);
+
+            var focusToggle = CreatePreferenceToggle(
+                card.transform,
+                "Расфокус и FOV",
+                ClientPreferences.FocusEffectsEnabled,
+                value => ClientPreferences.FocusEffectsEnabled = value);
+            SetRect(focusToggle.GetComponent<RectTransform>(), 330f, 328f, 298f, 38f, Vector2.zero);
+
+            var shakeToggle = CreatePreferenceToggle(
+                card.transform,
+                "Тряска от симптомов",
+                ClientPreferences.CameraShakeEnabled,
+                value => ClientPreferences.CameraShakeEnabled = value);
+            SetRect(shakeToggle.GetComponent<RectTransform>(), 52f, 286f, 270f, 38f, Vector2.zero);
+
+            var flashingToggle = CreatePreferenceToggle(
+                card.transform,
+                "Мигание и микросон",
+                ClientPreferences.FlashingEffectsEnabled,
+                value => ClientPreferences.FlashingEffectsEnabled = value);
+            SetRect(flashingToggle.GetComponent<RectTransform>(), 330f, 286f, 298f, 38f, Vector2.zero);
+
+            var audioToggle = CreatePreferenceToggle(
+                card.transform,
+                "Пульс, звон, дыхание",
+                ClientPreferences.ConditionAudioEnabled,
+                value => ClientPreferences.ConditionAudioEnabled = value);
+            SetRect(audioToggle.GetComponent<RectTransform>(), 52f, 244f, 270f, 38f, Vector2.zero);
+
+            var symptomTextToggle = CreatePreferenceToggle(
+                card.transform,
+                "Текст вместо эффектов",
+                ClientPreferences.SymptomTextEnabled,
+                value => ClientPreferences.SymptomTextEnabled = value);
+            SetRect(symptomTextToggle.GetComponent<RectTransform>(), 330f, 244f, 298f, 38f, Vector2.zero);
+
             headBobToggle = CreateToggle(card.transform, "Естественное покачивание камеры");
             SetRect(
                 headBobToggle.GetComponent<RectTransform>(),
@@ -171,13 +222,13 @@ namespace Quieter.UI
                 FontStyle.Normal,
                 TextAnchor.MiddleLeft);
             sensitivityLabel.color = new Color(0.73f, 0.76f, 0.8f);
-            SetRect(sensitivityLabel.rectTransform, 330f, 224f, 298f, 24f, Vector2.zero);
+            SetRect(sensitivityLabel.rectTransform, 330f, 218f, 298f, 20f, Vector2.zero);
 
             sensitivitySlider = CreateSlider(card.transform);
             SetRect(
                 sensitivitySlider.GetComponent<RectTransform>(),
                 330f,
-                195f,
+                190f,
                 230f,
                 28f,
                 Vector2.zero);
@@ -191,7 +242,7 @@ namespace Quieter.UI
                 15,
                 FontStyle.Bold,
                 TextAnchor.MiddleCenter);
-            SetRect(sensitivityValueText.rectTransform, 570f, 195f, 58f, 28f, Vector2.zero);
+            SetRect(sensitivityValueText.rectTransform, 570f, 190f, 58f, 28f, Vector2.zero);
             sensitivitySlider.onValueChanged.AddListener(OnSensitivityChanged);
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -477,6 +528,18 @@ namespace Quieter.UI
 
             toggle.targetGraphic = background;
             toggle.graphic = check;
+            return toggle;
+        }
+
+        private static Toggle CreatePreferenceToggle(
+            Transform parent,
+            string label,
+            bool value,
+            UnityEngine.Events.UnityAction<bool> onChanged)
+        {
+            var toggle = CreateToggle(parent, label);
+            toggle.SetIsOnWithoutNotify(value);
+            toggle.onValueChanged.AddListener(onChanged);
             return toggle;
         }
 

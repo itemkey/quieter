@@ -8,12 +8,98 @@ namespace Quieter.World
         public const ushort LeanToItemId = 44;
         public const ushort HearthItemId = 45;
         public const ushort UnlinedWastePitItemId = 46;
+        public const ushort HoldingCellItemId = 47;
+        public const ushort BedItemId = 48;
+        public const ushort FloorItemId = 50;
+        public const ushort WallItemId = 51;
+        public const ushort RoofItemId = 52;
+        public const ushort DoorwayItemId = 53;
+        public const ushort DoorItemId = 54;
+        public const ushort ChestItemId = 55;
+        public const ushort CartographyTableItemId = 56;
+        public const ushort LatrineItemId = 57;
+        public const ushort WashBasinItemId = 58;
+        public const ushort BarrelItemId = 59;
+        public const ushort WellItemId = 60;
+        public const ushort DrainItemId = 61;
+        public const ushort LinedWastePitItemId = 62;
         public const int MaximumFuelUnits = 20;
         public const ushort WastePitCapacityMilliliters = 60000;
+        public const ushort WashBasinCapacityMilliliters = 6000;
+        public const ushort WaterBarrelCapacityMilliliters = 60000;
 
         public static bool SupportsPlacement(ushort itemId) => itemId is
             ResourceBalance.ResearchTableItemId or LeanToItemId or HearthItemId
-                or UnlinedWastePitItemId;
+                or UnlinedWastePitItemId or HoldingCellItemId or BedItemId
+                or FloorItemId or WallItemId or RoofItemId or DoorwayItemId
+                or DoorItemId or ChestItemId or CartographyTableItemId
+                or LatrineItemId or WashBasinItemId or BarrelItemId
+                or WellItemId or DrainItemId or LinedWastePitItemId;
+
+        public static bool IsWastePit(ushort itemId) => itemId is
+            UnlinedWastePitItemId or LinedWastePitItemId;
+
+        public static float WasteLeakageMultiplier(ushort itemId) => itemId switch
+        {
+            UnlinedWastePitItemId => 1f,
+            LinedWastePitItemId => 0.08f,
+            _ => 0f,
+        };
+
+        public static bool IsSanitaryFixture(ushort itemId) => itemId is
+            LatrineItemId or WashBasinItemId;
+
+        public static bool StoresWater(ushort itemId) => itemId is
+            WashBasinItemId or BarrelItemId;
+
+        public static ushort WaterStorageCapacity(ushort itemId) => itemId switch
+        {
+            WashBasinItemId => WashBasinCapacityMilliliters,
+            BarrelItemId => WaterBarrelCapacityMilliliters,
+            _ => 0,
+        };
+
+        public static bool CanConnectSanitation(
+            ushort upstreamItemId,
+            Vector3 upstreamPosition,
+            ushort downstreamItemId,
+            Vector3 downstreamPosition)
+        {
+            if (upstreamItemId is not (LatrineItemId or WashBasinItemId or DrainItemId)
+                || downstreamItemId != DrainItemId && !IsWastePit(downstreamItemId))
+                return false;
+            var planar = Vector2.Distance(
+                new Vector2(upstreamPosition.x, upstreamPosition.z),
+                new Vector2(downstreamPosition.x, downstreamPosition.z));
+            var maximum = IsWastePit(downstreamItemId) ? 3f : 2.35f;
+            return planar <= maximum
+                && downstreamPosition.y <= upstreamPosition.y + 0.35f
+                && upstreamPosition.y - downstreamPosition.y <= 1.25f;
+        }
+
+        public static bool SupportsLock(ushort itemId) => itemId is
+            HoldingCellItemId or DoorItemId or ChestItemId;
+
+        public static bool IsModularBuildingPart(ushort itemId) => itemId is
+            FloorItemId or WallItemId or RoofItemId or DoorwayItemId or DoorItemId;
+
+        public static Vector3 SnapPlacement(Vector3 position, ushort itemId)
+        {
+            if (!IsModularBuildingPart(itemId) && itemId != DrainItemId) return position;
+            position.x = Mathf.Round(position.x * 2f) * 0.5f;
+            position.z = Mathf.Round(position.z * 2f) * 0.5f;
+            return position;
+        }
+
+        public static float SnapYaw(float yaw, ushort itemId) =>
+            IsModularBuildingPart(itemId) || itemId == DrainItemId
+                ? Mathf.Repeat(Mathf.Round(yaw / 90f) * 90f, 360f)
+                : Mathf.Repeat(yaw, 360f);
+
+        public static bool AllowsModularOverlap(ushort placedItemId, ushort existingItemId) =>
+            IsModularBuildingPart(placedItemId)
+            && IsModularBuildingPart(existingItemId)
+            && placedItemId != existingItemId;
 
         public static bool IsFuel(ushort itemId) => itemId is 2 or 37;
 
@@ -75,8 +161,31 @@ namespace Quieter.World
             LeanToItemId => new Vector3(2.05f, 1.55f, 1.55f),
             HearthItemId => new Vector3(0.72f, 0.35f, 0.72f),
             UnlinedWastePitItemId => new Vector3(0.9f, 0.25f, 0.9f),
+            HoldingCellItemId => new Vector3(2.15f, 1.55f, 2.15f),
+            BedItemId => new Vector3(0.95f, 0.45f, 1.15f),
+            FloorItemId => new Vector3(2f, 0.1f, 2f),
+            WallItemId => new Vector3(2f, 1.5f, 0.1f),
+            RoofItemId => new Vector3(2f, 0.1f, 2f),
+            DoorwayItemId => new Vector3(2f, 1.5f, 0.1f),
+            DoorItemId => new Vector3(0.72f, 1.4f, 0.09f),
+            ChestItemId => new Vector3(0.75f, 0.55f, 0.45f),
+            CartographyTableItemId => new Vector3(1.05f, 0.75f, 0.65f),
+            LatrineItemId => new Vector3(0.65f, 0.65f, 0.65f),
+            WashBasinItemId => new Vector3(0.58f, 0.65f, 0.45f),
+            BarrelItemId => new Vector3(0.55f, 0.85f, 0.55f),
+            WellItemId => new Vector3(1.15f, 0.7f, 1.15f),
+            DrainItemId => new Vector3(1f, 0.16f, 0.3f),
+            LinedWastePitItemId => new Vector3(1f, 0.3f, 1f),
             _ => new Vector3(0.82f, 0.5f, 0.42f),
         };
+
+        public static bool IsInsideHoldingCell(
+            Vector3 subjectPosition, Vector3 cellPosition, float cellYaw)
+        {
+            var local = Quaternion.Euler(0f, -cellYaw, 0f) * (subjectPosition - cellPosition);
+            return Mathf.Abs(local.x) <= 1.72f && Mathf.Abs(local.z) <= 1.72f
+                && local.y >= -0.45f && local.y <= 2.8f;
+        }
 
         public static (float Biological, float Toxins) CalculatePitLeakage(
             Vector3 pitPosition,
@@ -142,15 +251,72 @@ namespace Quieter.World
             return root;
         }
 
-        public void ApplyState(ItemStackState input)
+        public void ApplyState(ItemStackState input, bool locked = false)
         {
             Burning = ItemId == SurvivalStructureRules.HearthItemId && !input.IsEmpty;
             var glow = transform.Find("FireGlow");
             if (glow != null) glow.gameObject.SetActive(Burning);
+            var door = transform.Find("DoorCollision");
+            if (door != null)
+            {
+                var collider = door.GetComponent<Collider>();
+                if (collider != null) collider.enabled = locked;
+            }
+            var doorVisual = transform.Find("DoorVisual");
+            if (doorVisual != null) doorVisual.gameObject.SetActive(locked);
+            var modularDoor = transform.Find("Door");
+            if (modularDoor != null && ItemId == SurvivalStructureRules.DoorItemId)
+                modularDoor.gameObject.SetActive(locked);
         }
 
         private static void BuildColliders(Transform root, ushort itemId)
         {
+            if (itemId == SurvivalStructureRules.HoldingCellItemId)
+            {
+                AddSolidPart(root, "BackCollision", new Vector3(0f, 1.45f, -1.9f),
+                    new Vector3(4f, 2.9f, 0.14f), Quaternion.identity);
+                AddSolidPart(root, "LeftCollision", new Vector3(-1.9f, 1.45f, 0f),
+                    new Vector3(0.14f, 2.9f, 4f), Quaternion.identity);
+                AddSolidPart(root, "RightCollision", new Vector3(1.9f, 1.45f, 0f),
+                    new Vector3(0.14f, 2.9f, 4f), Quaternion.identity);
+                AddSolidPart(root, "FrontLeftCollision", new Vector3(-1.32f, 1.45f, 1.9f),
+                    new Vector3(1.36f, 2.9f, 0.14f), Quaternion.identity);
+                AddSolidPart(root, "FrontRightCollision", new Vector3(1.32f, 1.45f, 1.9f),
+                    new Vector3(1.36f, 2.9f, 0.14f), Quaternion.identity);
+                AddSolidPart(root, "RoofCollision", new Vector3(0f, 2.9f, 0f),
+                    new Vector3(4f, 0.14f, 4f), Quaternion.identity);
+                AddSolidPart(root, "DoorCollision", new Vector3(0f, 1.45f, 1.9f),
+                    new Vector3(1.28f, 2.9f, 0.14f), Quaternion.identity);
+                return;
+            }
+            if (itemId == SurvivalStructureRules.BedItemId)
+            {
+                AddSolidPart(root, "BedCollision", new Vector3(0f, 0.38f, 0f),
+                    new Vector3(1.8f, 0.76f, 2.15f), Quaternion.identity);
+                return;
+            }
+            if (itemId == SurvivalStructureRules.DoorwayItemId)
+            {
+                AddSolidPart(root, "DoorwayLeft", new Vector3(-1.45f, 1.5f, 0f),
+                    new Vector3(1.1f, 3f, 0.2f), Quaternion.identity);
+                AddSolidPart(root, "DoorwayRight", new Vector3(1.45f, 1.5f, 0f),
+                    new Vector3(1.1f, 3f, 0.2f), Quaternion.identity);
+                AddSolidPart(root, "DoorwayTop", new Vector3(0f, 2.72f, 0f),
+                    new Vector3(1.8f, 0.56f, 0.2f), Quaternion.identity);
+                return;
+            }
+            if (itemId == SurvivalStructureRules.RoofItemId)
+            {
+                AddSolidPart(root, "RoofCollision", new Vector3(0f, 3f, 0f),
+                    new Vector3(4.2f, 0.2f, 4.2f), Quaternion.identity);
+                return;
+            }
+            if (itemId == SurvivalStructureRules.DoorItemId)
+            {
+                AddSolidPart(root, "DoorCollision", new Vector3(0f, 1.4f, 0f),
+                    new Vector3(1.44f, 2.8f, 0.18f), Quaternion.identity);
+                return;
+            }
             if (itemId != SurvivalStructureRules.LeanToItemId)
             {
                 var collider = root.gameObject.AddComponent<BoxCollider>();
@@ -189,6 +355,25 @@ namespace Quieter.World
 
         private static void BuildVisual(Transform root, ushort itemId)
         {
+            if (itemId == SurvivalStructureRules.HoldingCellItemId)
+            {
+                BuildHoldingCellVisual(root);
+                return;
+            }
+            if (itemId == SurvivalStructureRules.BedItemId)
+            {
+                var timber = new Color(0.31f, 0.18f, 0.07f);
+                CreatePart(root, "BedFrame", PrimitiveType.Cube,
+                    new Vector3(0f, 0.31f, 0f), new Vector3(1.8f, 0.22f, 2.15f), timber);
+                CreatePart(root, "BedTick", PrimitiveType.Cube,
+                    new Vector3(0f, 0.49f, 0f), new Vector3(1.64f, 0.22f, 1.98f),
+                    new Color(0.49f, 0.42f, 0.25f));
+                CreatePart(root, "BedPillow", PrimitiveType.Cube,
+                    new Vector3(0f, 0.66f, -0.72f), new Vector3(1.25f, 0.18f, 0.42f),
+                    new Color(0.7f, 0.66f, 0.53f));
+                return;
+            }
+            if (BuildModularVisual(root, itemId)) return;
             if (itemId == SurvivalStructureRules.UnlinedWastePitItemId)
             {
                 CreatePart(root, "PitOpening", PrimitiveType.Cylinder,
@@ -242,6 +427,125 @@ namespace Quieter.World
             CreatePart(root, "BackWindbreak", PrimitiveType.Cube,
                 new Vector3(0f, 1.4f, -1.35f), new Vector3(3.8f, 2.8f, 0.1f),
                 new Color(0.34f, 0.29f, 0.13f));
+        }
+
+        private static void BuildHoldingCellVisual(Transform root)
+        {
+            var timber = new Color(0.25f, 0.14f, 0.055f);
+            CreatePart(root, "Floor", PrimitiveType.Cube, new Vector3(0f, 0.08f, 0f),
+                new Vector3(4f, 0.16f, 4f), new Color(0.22f, 0.18f, 0.12f));
+            CreatePart(root, "Roof", PrimitiveType.Cube, new Vector3(0f, 2.9f, 0f),
+                new Vector3(4f, 0.16f, 4f), timber);
+            for (var side = -1; side <= 1; side += 2)
+            {
+                for (var index = -4; index <= 4; index++)
+                {
+                    CreatePart(root, $"SideBar_{side}_{index}", PrimitiveType.Cylinder,
+                        new Vector3(side * 1.9f, 1.48f, index * 0.43f),
+                        new Vector3(0.055f, 1.45f, 0.055f), timber);
+                }
+            }
+            for (var index = -4; index <= 4; index++)
+            {
+                CreatePart(root, $"BackBar_{index}", PrimitiveType.Cylinder,
+                    new Vector3(index * 0.43f, 1.48f, -1.9f),
+                    new Vector3(0.055f, 1.45f, 0.055f), timber);
+                if (Mathf.Abs(index) <= 1) continue;
+                CreatePart(root, $"FrontBar_{index}", PrimitiveType.Cylinder,
+                    new Vector3(index * 0.43f, 1.48f, 1.9f),
+                    new Vector3(0.055f, 1.45f, 0.055f), timber);
+            }
+            CreatePart(root, "DoorVisual", PrimitiveType.Cube,
+                new Vector3(0f, 1.45f, 1.9f), new Vector3(1.28f, 2.75f, 0.08f),
+                new Color(0.18f, 0.1f, 0.035f));
+        }
+
+        private static bool BuildModularVisual(Transform root, ushort itemId)
+        {
+            var timber = new Color(0.32f, 0.19f, 0.07f);
+            switch (itemId)
+            {
+                case SurvivalStructureRules.FloorItemId:
+                    CreatePart(root, "Floor", PrimitiveType.Cube,
+                        new Vector3(0f, 0.1f, 0f), new Vector3(4f, 0.2f, 4f), timber);
+                    return true;
+                case SurvivalStructureRules.WallItemId:
+                    CreatePart(root, "Wall", PrimitiveType.Cube,
+                        new Vector3(0f, 1.5f, 0f), new Vector3(4f, 3f, 0.2f), timber);
+                    return true;
+                case SurvivalStructureRules.RoofItemId:
+                    CreatePart(root, "Roof", PrimitiveType.Cube,
+                        new Vector3(0f, 3f, 0f), new Vector3(4.2f, 0.2f, 4.2f),
+                        new Color(0.25f, 0.145f, 0.055f));
+                    return true;
+                case SurvivalStructureRules.DoorwayItemId:
+                    CreatePart(root, "LeftJamb", PrimitiveType.Cube,
+                        new Vector3(-1.45f, 1.5f, 0f), new Vector3(1.1f, 3f, 0.2f), timber);
+                    CreatePart(root, "RightJamb", PrimitiveType.Cube,
+                        new Vector3(1.45f, 1.5f, 0f), new Vector3(1.1f, 3f, 0.2f), timber);
+                    CreatePart(root, "Lintel", PrimitiveType.Cube,
+                        new Vector3(0f, 2.72f, 0f), new Vector3(1.8f, 0.56f, 0.2f), timber);
+                    return true;
+                case SurvivalStructureRules.DoorItemId:
+                    CreatePart(root, "Door", PrimitiveType.Cube,
+                        new Vector3(0f, 1.4f, 0f), new Vector3(1.44f, 2.8f, 0.18f),
+                        new Color(0.24f, 0.115f, 0.035f));
+                    return true;
+                case SurvivalStructureRules.ChestItemId:
+                    CreatePart(root, "Chest", PrimitiveType.Cube,
+                        new Vector3(0f, 0.46f, 0f), new Vector3(1.5f, 0.92f, 0.9f), timber);
+                    CreatePart(root, "ChestLid", PrimitiveType.Cube,
+                        new Vector3(0f, 0.94f, 0f), new Vector3(1.56f, 0.12f, 0.96f),
+                        new Color(0.22f, 0.11f, 0.03f));
+                    return true;
+                case SurvivalStructureRules.CartographyTableItemId:
+                    CreatePart(root, "TableTop", PrimitiveType.Cube,
+                        new Vector3(0f, 0.78f, 0f), new Vector3(2.1f, 0.14f, 1.3f), timber);
+                    for (var side = -1; side <= 1; side += 2)
+                        CreatePart(root, $"TableLeg{side}", PrimitiveType.Cube,
+                            new Vector3(side * 0.78f, 0.39f, 0f),
+                            new Vector3(0.14f, 0.78f, 0.9f), timber);
+                    return true;
+                case SurvivalStructureRules.LatrineItemId:
+                    CreatePart(root, "LatrineBox", PrimitiveType.Cube,
+                        new Vector3(0f, 0.48f, 0f), new Vector3(1.3f, 0.82f, 1.3f), timber);
+                    CreatePart(root, "LatrineOpening", PrimitiveType.Cylinder,
+                        new Vector3(0f, 0.91f, 0f), new Vector3(0.28f, 0.05f, 0.28f),
+                        new Color(0.06f, 0.045f, 0.03f));
+                    return true;
+                case SurvivalStructureRules.WashBasinItemId:
+                    CreatePart(root, "Basin", PrimitiveType.Cylinder,
+                        new Vector3(0f, 0.72f, 0f), new Vector3(0.58f, 0.16f, 0.48f),
+                        new Color(0.48f, 0.36f, 0.23f));
+                    return true;
+                case SurvivalStructureRules.BarrelItemId:
+                    CreatePart(root, "Barrel", PrimitiveType.Cylinder,
+                        new Vector3(0f, 0.85f, 0f), new Vector3(0.55f, 0.85f, 0.55f), timber);
+                    return true;
+                case SurvivalStructureRules.WellItemId:
+                    for (var index = 0; index < 10; index++)
+                    {
+                        var angle = index / 10f * Mathf.PI * 2f;
+                        CreatePart(root, $"WellStone{index}", PrimitiveType.Cube,
+                            new Vector3(Mathf.Cos(angle) * 0.82f, 0.42f,
+                                Mathf.Sin(angle) * 0.82f), new Vector3(0.5f, 0.42f, 0.3f),
+                            new Color(0.34f, 0.33f, 0.3f),
+                            Quaternion.Euler(0f, -index * 36f, 0f));
+                    }
+                    return true;
+                case SurvivalStructureRules.DrainItemId:
+                    CreatePart(root, "Drain", PrimitiveType.Cube,
+                        new Vector3(0f, 0.08f, 0f), new Vector3(2f, 0.16f, 0.6f),
+                        new Color(0.36f, 0.28f, 0.19f));
+                    return true;
+                case SurvivalStructureRules.LinedWastePitItemId:
+                    CreatePart(root, "LinedPit", PrimitiveType.Cylinder,
+                        new Vector3(0f, 0.12f, 0f), new Vector3(0.95f, 0.12f, 0.95f),
+                        new Color(0.24f, 0.23f, 0.2f));
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         private static GameObject CreatePart(

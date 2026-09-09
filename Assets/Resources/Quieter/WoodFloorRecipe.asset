@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
+  m_Name: WoodFloorRecipe
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
+  recipeId: 17
+  displayName: "\u0414\u0435\u0440\u0435\u0432\u044F\u043D\u043D\u044B\u0439 \u043F\u043E\u043B"
+  category: 2
+  ingredients:
+  - Item: {fileID: 11400000, guid: 8b5771b4673410a4c955b61d872249ea, type: 2}
+    Quantity: 6
+  output: {fileID: 11400000, guid: 6554d361e4bade7418d3b2ee4e20cd4f, type: 2}
+  outputQuantity: 1
+  workSeconds: 40
+  requiresBurningHearth: 0
+  practiceSkill: 18

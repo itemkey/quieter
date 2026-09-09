@@ -232,6 +232,75 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public async Task SanitaryDrainAndWaterStorage_MoveRealPersistentLiquids()
+        {
+            const string owner = "76561198012345678";
+            var repository = new DelayedWorldRepository
+            {
+                StoredPlacedObjects = new[]
+                {
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "910", OwnerAccountId = owner,
+                        ItemId = SurvivalStructureRules.LatrineItemId,
+                        X = 0f, Y = 20f, Z = 0f,
+                    },
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "911", OwnerAccountId = owner,
+                        ItemId = SurvivalStructureRules.DrainItemId,
+                        X = 2f, Y = 19.8f, Z = 0f,
+                    },
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "912", OwnerAccountId = owner,
+                        ItemId = SurvivalStructureRules.LinedWastePitItemId,
+                        X = 4.5f, Y = 19.4f, Z = 0f,
+                    },
+                    new StoredPlacedObject
+                    {
+                        WorldId = 1, ObjectId = "913", OwnerAccountId = owner,
+                        ItemId = SurvivalStructureRules.BarrelItemId,
+                        X = 8f, Y = 20f, Z = 0f,
+                    },
+                },
+            };
+            var managerObject = new GameObject("Sanitary network server role");
+            objects.Add(managerObject);
+            var manager = managerObject.AddComponent<NetworkManager>();
+            SetNetworkServerRole(manager);
+            var serviceObject = new GameObject("Sanitary network service");
+            objects.Add(serviceObject);
+            var service = serviceObject.AddComponent<PlacedObjectWorldService>();
+            service.Configure(manager);
+            await service.InitializeServerAsync(
+                WorldDefinition.CreateDefault(223344), repository, CancellationToken.None);
+
+            Assert.That(service.TryRouteSanitaryWaste(
+                910, 550, 1f, 0.2f, out var pitId, out var error), Is.True, error);
+            Assert.That(pitId, Is.EqualTo(912));
+            Assert.That(service.TryGetWastePitSpace(912, out _, out var pitSpace), Is.True);
+            Assert.That(pitSpace, Is.EqualTo(59450));
+
+            Assert.That(service.TryStoreWater(913, 5000, 0.2f, 0.1f), Is.True);
+            var received = 0;
+            Assert.That(service.TryDrawStoredWater(913, 1200,
+                (amount, biological, toxins) =>
+                {
+                    received = amount;
+                    Assert.That(biological, Is.EqualTo(0.2f).Within(0.001f));
+                    Assert.That(toxins, Is.EqualTo(0.1f).Within(0.001f));
+                    return true;
+                }, out var transferred), Is.True);
+            Assert.That(received, Is.EqualTo(1200));
+            Assert.That(transferred, Is.EqualTo(1200));
+            Assert.That(service.TryGetWaterStorage(
+                913, out _, out var stored, out var available), Is.True);
+            Assert.That(stored, Is.EqualTo(3800));
+            Assert.That(available, Is.EqualTo(56200));
+        }
+
+        [Test]
         public async Task PlayerSave_WaitsForActiveWriteThenCapturesFreshestState()
         {
             const ulong steamId = 76561198012345678;

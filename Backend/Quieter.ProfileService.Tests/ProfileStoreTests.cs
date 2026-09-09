@@ -212,6 +212,49 @@ public sealed class ProfileStoreTests
     }
 
     [Fact]
+    public async Task HoldingCell_OwnerAndLockState_ArePersistent()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
+        const string owner = "76561198000000991";
+        Assert.True(await store.SavePlacedObjectsAsync(world.WorldId,
+            new PlacedObjectListResponse(new[]
+            {
+                new PlacedObjectResponse("991001", 47, 5f, 8f, 9f, 90f, null,
+                    DateTime.UtcNow, DateTime.UtcNow, owner, true),
+            }), default));
+
+        var cell = Assert.Single((await store.LoadPlacedObjectsAsync(world.WorldId, default)).Objects);
+        Assert.Equal(owner, cell.OwnerAccountId);
+        Assert.True(cell.Locked);
+    }
+
+    [Fact]
+    public async Task BedAssignment_IsPersistentAndRestrictedToBeds()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
+        var characterId = Guid.NewGuid().ToString("D");
+        Assert.True(await store.SavePlacedObjectsAsync(world.WorldId,
+            new PlacedObjectListResponse(new[]
+            {
+                new PlacedObjectResponse("991002", 48, 3f, 8f, 4f, 0f, null,
+                    DateTime.UtcNow, DateTime.UtcNow, "76561198000000991", false,
+                    characterId),
+            }), default));
+        var bed = Assert.Single((await store.LoadPlacedObjectsAsync(
+            world.WorldId, default)).Objects);
+        Assert.Equal(characterId, bed.AssignedCharacterId);
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SavePlacedObjectsAsync(
+            world.WorldId, new PlacedObjectListResponse(new[]
+            {
+                bed with { ItemId = 47 },
+            }), default));
+    }
+
+    [Fact]
     public async Task ResourceState_IsShared_AndKnowledgeRemainsPlayerScoped()
     {
         await using var database = CreateDatabase();
@@ -442,6 +485,11 @@ public sealed class ProfileStoreTests
         Assert.Contains("202609020002_MakeMapNotesPhysical", migrations);
         Assert.Contains("202609020003_AddEquippedItemState", migrations);
         Assert.Contains("202609070001_AddCharacterItems", migrations);
+        Assert.Contains("202609070002_AddPermanentCharacters", migrations);
+        Assert.Contains("202609080001_AddOwnedHoldingCells", migrations);
+        Assert.Contains("202609080002_AddBedAssignments", migrations);
+        Assert.Contains("202609080003_AddInheritance", migrations);
+        Assert.Contains("202609090001_AddHeirOffers", migrations);
     }
 
     [Fact]
@@ -556,12 +604,331 @@ public sealed class ProfileStoreTests
         Assert.Single(await database.CharacterItems.ToArrayAsync());
     }
 
-    private static PlayerSnapshotRequest Snapshot(string characterId, long revision, float x, ushort itemId, bool dead = false)
+    [Fact]
+    public async Task NewStranger_LeavesDeadBodyAndItemsAndIsIdempotent()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var profile = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000255", "Mortal", 0f, 8f, 0f), default);
+        Assert.True(await store.SaveSnapshotAsync(
+            profile.SteamId, Snapshot(profile.CharacterId, 6, 22f, 30, dead: true), default));
+        database.PlayerDepositKnowledge.Add(new PlayerDepositKnowledgeEntity
+        {
+            SteamId = decimal.Parse(profile.SteamId), WorldId = 1, InstanceId = 99,
+            StudyBasisPoints = 5000, DiscoveredAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow,
+        });
+        await database.SaveChangesAsync();
+        var operation = Guid.NewGuid();
+        var request = new NewStrangerRequest(operation.ToString("D"), profile.CharacterId, 6,
+            new PositionRequest(-3f, 9f, 4f));
+
+        var next = await store.CreateNewStrangerAsync(profile.SteamId, request, default);
+        var retry = await store.CreateNewStrangerAsync(profile.SteamId, request, default);
+
+        Assert.Equal(next.CharacterId, retry.CharacterId);
+        Assert.NotEqual(profile.CharacterId, next.CharacterId);
+        Assert.Empty(next.InventorySlots);
+        Assert.Empty(next.DepositKnowledge);
+        var oldId = Guid.Parse(profile.CharacterId);
+        var oldBody = await database.Characters.Include(character => character.Items)
+            .SingleAsync(character => character.CharacterId == oldId);
+        Assert.Null(oldBody.ControllingPlayer);
+        Assert.Equal((byte)4, oldBody.LifeState);
+        Assert.Equal(22f, oldBody.PositionX);
+        Assert.Equal((ushort)30, Assert.Single(oldBody.Items).ItemId);
+        Assert.Single(await database.CharacterReplacements.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task CapturedCharacter_CannotRegainControlAndMayStartNewStranger()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var profile = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000265", "Captured", 0f, 8f, 0f), default);
+        Assert.True(await store.SaveSnapshotAsync(profile.SteamId,
+            Snapshot(profile.CharacterId, 4, 33f, 30, captured: true), default));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SaveSnapshotAsync(
+            profile.SteamId, Snapshot(profile.CharacterId, 5, 2f, 40), default));
+
+        var next = await store.CreateNewStrangerAsync(profile.SteamId,
+            new NewStrangerRequest(Guid.NewGuid().ToString("D"), profile.CharacterId, 4,
+                new PositionRequest(0f, 8f, 0f)), default);
+        Assert.NotEqual(profile.CharacterId, next.CharacterId);
+        Assert.Empty(next.InventorySlots);
+        var captured = await database.Characters.Include(character => character.Items)
+            .SingleAsync(character => character.CharacterId == Guid.Parse(profile.CharacterId));
+        Assert.Null(captured.ControllingPlayer);
+        Assert.Contains("\"ControlKind\":3", captured.SurvivalJson);
+        Assert.Equal((ushort)30, Assert.Single(captured.Items).ItemId);
+    }
+
+    [Fact]
+    public async Task WorldNpcCreation_IsPersistentAndIdempotent()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var id = Guid.NewGuid().ToString("D");
+        var snapshot = new PlayerSnapshotRequest(id, new PositionRequest(80f, 0f, -70f),
+            new InventoryRequest(0, new[] { new InventorySlotResponse(0, 25, 3) }),
+            new SurvivalRequest(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                CharacterId = id,
+                ControlKind = 1,
+                Physiology = new { LifeState = 0, DeathCause = 0 },
+            }), 1));
+
+        var first = await store.CreateWorldNpcAsync(new CreateWorldNpcRequest("Mira", snapshot), default);
+        var retry = await store.CreateWorldNpcAsync(new CreateWorldNpcRequest("Ignored", snapshot), default);
+        Assert.Equal(first.CharacterId, retry.CharacterId);
+        Assert.Equal("Mira", first.DisplayName);
+        Assert.Equal((ushort)25, Assert.Single(first.InventorySlots).ItemId);
+        Assert.Equal("0", first.SteamId);
+        Assert.Single(await database.Characters.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task DetachedBody_SaveCannotTargetControlledOrResurrectDeadCharacter()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var profile = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000256", "Body", 0f, 8f, 0f), default);
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => store.SaveDetachedCharacterAsync(
+            Snapshot(profile.CharacterId, 1, 1f, 30), default));
+        await store.SaveSnapshotAsync(profile.SteamId, Snapshot(profile.CharacterId, 2, 5f, 30, true), default);
+        await store.CreateNewStrangerAsync(profile.SteamId,
+            new NewStrangerRequest(Guid.NewGuid().ToString("D"), profile.CharacterId, 2,
+                new PositionRequest(0f, 8f, 0f)), default);
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SaveDetachedCharacterAsync(
+            Snapshot(profile.CharacterId, 4, 8f, 40), default));
+    }
+
+    [Fact]
+    public async Task WorldCharacters_IncludeDetachedBodyAtItsOwnPosition()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var profile = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000257", "World Body", 0f, 8f, 0f), default);
+        await store.SaveSnapshotAsync(profile.SteamId, Snapshot(profile.CharacterId, 3, 47f, 30, true), default);
+        await store.CreateNewStrangerAsync(profile.SteamId,
+            new NewStrangerRequest(Guid.NewGuid().ToString("D"), profile.CharacterId, 3,
+                new PositionRequest(0f, 8f, 0f)), default);
+
+        var body = Assert.Single((await store.LoadWorldCharactersAsync(default)).Characters);
+        Assert.Equal(profile.CharacterId, body.CharacterId);
+        Assert.Equal(47f, body.PositionX);
+        Assert.Equal((ushort)30, Assert.Single(body.InventorySlots).ItemId);
+    }
+
+    [Fact]
+    public async Task CharacterPairTransfer_CommitsBodyAndReceiverTogetherAndCanRetry()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var first = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000258", "Looter", 0f, 8f, 0f), default);
+        await store.SaveSnapshotAsync(first.SteamId, Snapshot(first.CharacterId, 3, 20f, 30, true), default);
+        var next = await store.CreateNewStrangerAsync(first.SteamId,
+            new NewStrangerRequest(Guid.NewGuid().ToString("D"), first.CharacterId, 3,
+                new PositionRequest(0f, 8f, 0f)), default);
+        var source = Snapshot(first.CharacterId, 5, 20f, 30, true) with
+        {
+            Inventory = new InventoryRequest(0, []),
+        };
+        var destination = Snapshot(next.CharacterId, 1, 1f, 30);
+        var operation = new CharacterPairSnapshotRequest(
+            Guid.NewGuid().ToString("D"), source, first.SteamId, destination);
+
+        Assert.True(await store.SaveCharacterPairAsync(operation, default));
+        Assert.True(await store.SaveCharacterPairAsync(operation, default));
+
+        var oldId = Guid.Parse(first.CharacterId);
+        var newId = Guid.Parse(next.CharacterId);
+        Assert.Empty(await database.CharacterItems.Where(item => item.CharacterId == oldId).ToArrayAsync());
+        Assert.Equal((ushort)30,
+            (await database.CharacterItems.SingleAsync(item => item.CharacterId == newId)).ItemId);
+        Assert.Equal(5, (await database.Characters.SingleAsync(item => item.CharacterId == oldId)).Revision);
+        Assert.Equal(1, (await database.Characters.SingleAsync(item => item.CharacterId == newId)).Revision);
+        Assert.Single(await database.CharacterTransfers.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task RegisteredHeir_AssumesBodyAtomicallyWithoutMovingDeceasedItems()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
+        var owner = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000281", "Owner", 0f, 8f, 0f), default);
+        Assert.True(await store.SaveSnapshotAsync(owner.SteamId,
+            Snapshot(owner.CharacterId, 1, 2f, 49), default));
+        var heirId = Guid.NewGuid().ToString("D");
+        var heirJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            CharacterId = heirId,
+            CharacterName = "Heir",
+            ControlKind = 2,
+            Offline = false,
+            Physiology = new { LifeState = 0, DeathCause = 0 },
+            WorkerContract = new
+            {
+                Active = true,
+                Voluntary = true,
+                EmployerAccountId = owner.SteamId,
+                FulfilledContractGameSeconds = 172800d,
+            },
+            Relationships = new[]
+            {
+                new
+                {
+                    TargetCharacterId = owner.CharacterId,
+                    VoluntaryLoyalty = true,
+                    PersonalRequestsCompleted = 3,
+                },
+            },
+            Npc = new { EmployerAccountId = owner.SteamId, EmployerCharacterId = owner.CharacterId },
+        });
+        await store.CreateWorldNpcAsync(new CreateWorldNpcRequest("Heir",
+            new PlayerSnapshotRequest(heirId, new PositionRequest(77f, 8f, -4f),
+                new InventoryRequest(0, new[] { new InventorySlotResponse(0, 25, 2) }),
+                new SurvivalRequest(heirJson, 1))), default);
+        Assert.True(await store.SavePlacedObjectsAsync(world.WorldId,
+            new PlacedObjectListResponse(new[]
+            {
+                new PlacedObjectResponse("881100", 48, 75f, 8f, -4f, 0f, null,
+                    DateTime.UtcNow, DateTime.UtcNow, owner.SteamId, false, heirId),
+            }), default));
+
+        var registered = await store.RegisterHeirAsync(owner.SteamId,
+            new RegisterHeirRequest(heirId, 0), default);
+        Assert.Equal(heirId, registered.RegisteredHeirCharacterId);
+        Assert.Equal(1, registered.EstateRevision);
+        Assert.True(await store.SaveSnapshotAsync(owner.SteamId,
+            Snapshot(owner.CharacterId, 2, 2f, 49, dead: true), default));
+        var operation = Guid.NewGuid().ToString("D");
+        var assumed = await store.AssumeRegisteredHeirAsync(owner.SteamId,
+            new AssumeHeirRequest(operation, owner.CharacterId, 2), default);
+        var retry = await store.AssumeRegisteredHeirAsync(owner.SteamId,
+            new AssumeHeirRequest(operation, owner.CharacterId, 2), default);
+
+        Assert.Equal(heirId, assumed.CharacterId);
+        Assert.Equal(heirId, retry.CharacterId);
+        Assert.Equal(77f, assumed.PositionX);
+        Assert.Equal((ushort)25, Assert.Single(assumed.InventorySlots).ItemId);
+        Assert.Null(assumed.RegisteredHeirCharacterId);
+        Assert.Equal(2, assumed.EstateRevision);
+        var oldBody = await database.Characters.Include(character => character.Items)
+            .SingleAsync(character => character.CharacterId == Guid.Parse(owner.CharacterId));
+        Assert.Null(oldBody.ControllingPlayer);
+        Assert.Equal((ushort)49, Assert.Single(oldBody.Items).ItemId);
+        Assert.Single(await database.InheritanceTransitions.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task DonatedHeir_IsIrrevocableAndCanBeAcceptedOnlyOnce()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
+        var donor = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000291", "Donor", 0f, 8f, 0f), default);
+        var recipient = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000292", "Recipient", 0f, 8f, 0f), default);
+        Assert.True(await store.SaveSnapshotAsync(donor.SteamId,
+            Snapshot(donor.CharacterId, 1, 4f, 49), default));
+        var heirId = Guid.NewGuid().ToString("D");
+        var heirJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            CharacterId = heirId,
+            CharacterName = "Gifted Heir",
+            ControlKind = 2,
+            Offline = false,
+            Physiology = new { LifeState = 0, DeathCause = 0 },
+            WorkerContract = new
+            {
+                Active = true,
+                Voluntary = true,
+                EmployerAccountId = donor.SteamId,
+                FulfilledContractGameSeconds = 172800d,
+            },
+            Relationships = new[]
+            {
+                new
+                {
+                    TargetCharacterId = donor.CharacterId,
+                    VoluntaryLoyalty = true,
+                    PersonalRequestsCompleted = 3,
+                },
+            },
+            Npc = new { EmployerAccountId = donor.SteamId, EmployerCharacterId = donor.CharacterId },
+        });
+        await store.CreateWorldNpcAsync(new CreateWorldNpcRequest("Gifted Heir",
+            new PlayerSnapshotRequest(heirId, new PositionRequest(61f, 8f, 9f),
+                new InventoryRequest(0, new[] { new InventorySlotResponse(0, 25, 3) }),
+                new SurvivalRequest(heirJson, 1))), default);
+        Assert.True(await store.SavePlacedObjectsAsync(world.WorldId,
+            new PlacedObjectListResponse(new[]
+            {
+                new PlacedObjectResponse("881200", 48, 61f, 8f, 9f, 0f, null,
+                    DateTime.UtcNow, DateTime.UtcNow, donor.SteamId, false, heirId),
+            }), default));
+        var registered = await store.RegisterHeirAsync(donor.SteamId,
+            new RegisterHeirRequest(heirId, 0), default);
+        Assert.True(await store.SaveSnapshotAsync(recipient.SteamId,
+            Snapshot(recipient.CharacterId, 1, 33f, 30, dead: true), default));
+
+        var offerOperation = Guid.NewGuid().ToString("D");
+        var offered = await store.CreateHeirOfferAsync(donor.SteamId,
+            new CreateHeirOfferRequest(
+                offerOperation, recipient.SteamId, recipient.CharacterId,
+                registered.EstateRevision), default);
+        var retryOffer = await store.CreateHeirOfferAsync(donor.SteamId,
+            new CreateHeirOfferRequest(
+                offerOperation, recipient.SteamId, recipient.CharacterId,
+                registered.EstateRevision), default);
+        Assert.Equal(offered.OfferId, retryOffer.OfferId);
+        var donorEntity = await database.Players.SingleAsync(entry =>
+            entry.SteamId == decimal.Parse(donor.SteamId));
+        Assert.Null(donorEntity.RegisteredHeirCharacterId);
+        Assert.Equal(2, donorEntity.EstateRevision);
+
+        var pending = await store.GetPendingHeirOfferAsync(recipient.SteamId, default);
+        Assert.NotNull(pending);
+        Assert.Equal(heirId, pending.HeirCharacterId);
+        Assert.True(pending.ExpiresAtUtc <= DateTime.UtcNow.AddHours(2).AddSeconds(1));
+        var acceptOperation = Guid.NewGuid().ToString("D");
+        var accepted = await store.AcceptHeirOfferAsync(recipient.SteamId,
+            Guid.Parse(pending.OfferId),
+            new AcceptHeirOfferRequest(
+                acceptOperation, recipient.CharacterId, 1), default);
+        var acceptedRetry = await store.AcceptHeirOfferAsync(recipient.SteamId,
+            Guid.Parse(pending.OfferId),
+            new AcceptHeirOfferRequest(
+                acceptOperation, recipient.CharacterId, 1), default);
+
+        Assert.Equal(heirId, accepted.CharacterId);
+        Assert.Equal(heirId, acceptedRetry.CharacterId);
+        Assert.Equal((ushort)25, Assert.Single(accepted.InventorySlots).ItemId);
+        var deceased = await database.Characters.Include(character => character.Items)
+            .SingleAsync(character => character.CharacterId == Guid.Parse(recipient.CharacterId));
+        Assert.Null(deceased.ControllingPlayer);
+        Assert.Equal((ushort)30, Assert.Single(deceased.Items).ItemId);
+        Assert.Equal((byte)1, (await database.HeirOffers.SingleAsync()).Status);
+        Assert.Single(await database.InheritanceTransitions.ToArrayAsync());
+    }
+
+    private static PlayerSnapshotRequest Snapshot(
+        string characterId, long revision, float x, ushort itemId,
+        bool dead = false, bool captured = false)
         => new(characterId, new PositionRequest(x, 8f, 0f),
             new InventoryRequest(0, new[] { new InventorySlotResponse(0, itemId, 1, ItemInstanceId: "701") }),
             new SurvivalRequest(System.Text.Json.JsonSerializer.Serialize(new
             {
                 CharacterId = characterId,
+                ControlKind = captured ? 3 : 0,
                 Physiology = new { LifeState = dead ? 4 : 0, DeathCause = dead ? 1 : 0 },
             }), revision));
 

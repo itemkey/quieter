@@ -456,18 +456,21 @@ namespace Quieter.World
             ChunkCoord coordinate,
             ICollection<WorldObjectSpawn> result)
         {
-            for (var index = 0; index < 12; index++)
+            for (var index = 0; index < 16; index++)
             {
                 var angle = (43f + index * 137.50776f) * Mathf.Deg2Rad;
                 var radius = 21f + (index % 4) * 4.2f;
                 var worldX = Mathf.Cos(angle) * radius;
                 var worldZ = Mathf.Sin(angle) * radius;
                 if (!WorldPointBelongsToChunk(definition, coordinate, worldX, worldZ)) continue;
-                var itemId = index < 5
-                    ? ResourceBalance.WildBerriesItemId
-                    : index < 9
-                        ? ResourceBalance.EdibleRootsItemId
-                        : ResourceBalance.WildMushroomsItemId;
+                var itemId = index switch
+                {
+                    < 5 => ResourceBalance.WildBerriesItemId,
+                    < 9 => ResourceBalance.EdibleRootsItemId,
+                    < 11 => ResourceBalance.WildMushroomsItemId,
+                    < 13 => ResourceBalance.WildNutsItemId,
+                    _ => ResourceBalance.MedicinalHerbsItemId,
+                };
                 var instanceId = Hash64(
                     definition.Seed ^ unchecked((long)0xE7037ED1A0B428DBUL),
                     index,
@@ -496,11 +499,15 @@ namespace Quieter.World
                 return;
             }
             var roll = (hash >> 48) % 100UL;
-            var itemId = roll < 45UL
+            var itemId = roll < 35UL
                 ? ResourceBalance.WildBerriesItemId
-                : roll < 80UL
+                : roll < 63UL
                     ? ResourceBalance.EdibleRootsItemId
-                    : ResourceBalance.WildMushroomsItemId;
+                    : roll < 75UL
+                        ? ResourceBalance.WildMushroomsItemId
+                        : roll < 90UL
+                            ? ResourceBalance.WildNutsItemId
+                            : ResourceBalance.MedicinalHerbsItemId;
             AddLoosePickup(
                 definition, result, hash, itemId, position.x, position.z, 2400);
         }
@@ -613,6 +620,8 @@ namespace Quieter.World
                 ResourceBalance.WildBerriesItemId => new Vector3(0.7f, 0.58f, 0.7f),
                 ResourceBalance.EdibleRootsItemId => new Vector3(0.48f, 0.46f, 0.48f),
                 ResourceBalance.WildMushroomsItemId => new Vector3(0.42f, 0.36f, 0.42f),
+                ResourceBalance.MedicinalHerbsItemId => new Vector3(0.54f, 0.5f, 0.54f),
+                ResourceBalance.WildNutsItemId => new Vector3(0.58f, 0.34f, 0.58f),
                 _ => new Vector3(0.3f, 0.3f, 0.3f),
             };
             result.Add(new WorldObjectSpawn(

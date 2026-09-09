@@ -24,6 +24,9 @@ public sealed class PlayerEntity
     public DateTime LastSeenAtUtc { get; set; }
     public byte SelectedHotbarIndex { get; set; }
     public Guid? CurrentCharacterId { get; set; }
+    public Guid? RegisteredHeirCharacterId { get; set; }
+    public DateTime? HeirRegisteredAtUtc { get; set; }
+    public long EstateRevision { get; set; }
     public CharacterEntity? CurrentCharacter { get; set; }
     public List<PlayerInventorySlotEntity> InventorySlots { get; set; } = [];
     public List<PlayerPendingItemEntity> PendingItems { get; set; } = [];
@@ -38,10 +41,58 @@ public sealed class CharacterEntity
     public long Revision { get; set; }
     public byte LifeState { get; set; }
     public byte DeathCause { get; set; }
+    public float PositionX { get; set; }
+    public float PositionY { get; set; }
+    public float PositionZ { get; set; }
+    public byte SelectedHotbarIndex { get; set; }
+    public DateTime? DiedAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
     public PlayerEntity? ControllingPlayer { get; set; }
     public List<CharacterItemEntity> Items { get; set; } = [];
+}
+
+public sealed class CharacterReplacementEntity
+{
+    public Guid OperationId { get; set; }
+    public decimal SteamId { get; set; }
+    public Guid PreviousCharacterId { get; set; }
+    public Guid NewCharacterId { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public PlayerEntity Player { get; set; } = null!;
+}
+
+public sealed class CharacterTransferEntity
+{
+    public Guid OperationId { get; set; }
+    public Guid SourceCharacterId { get; set; }
+    public Guid DestinationCharacterId { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+}
+
+public sealed class InheritanceTransitionEntity
+{
+    public Guid OperationId { get; set; }
+    public decimal SteamId { get; set; }
+    public Guid DeceasedCharacterId { get; set; }
+    public Guid HeirCharacterId { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public PlayerEntity Player { get; set; } = null!;
+}
+
+public sealed class HeirOfferEntity
+{
+    public Guid OfferId { get; set; }
+    public Guid OperationId { get; set; }
+    public decimal DonorSteamId { get; set; }
+    public decimal RecipientSteamId { get; set; }
+    public Guid DeceasedCharacterId { get; set; }
+    public Guid HeirCharacterId { get; set; }
+    public DateTime OfferedAtUtc { get; set; }
+    public DateTime? AcceptanceStartedAtUtc { get; set; }
+    public DateTime HardExpiresAtUtc { get; set; }
+    public DateTime? AcceptedAtUtc { get; set; }
+    public byte Status { get; set; }
 }
 
 public sealed class CharacterItemEntity
@@ -143,11 +194,14 @@ public sealed class WorldPlacedObjectEntity
 {
     public int WorldId { get; set; }
     public decimal ObjectId { get; set; }
+    public decimal? OwnerAccountId { get; set; }
+    public Guid? AssignedCharacterId { get; set; }
     public ushort ItemId { get; set; }
     public float X { get; set; }
     public float Y { get; set; }
     public float Z { get; set; }
     public float Yaw { get; set; }
+    public bool Locked { get; set; }
     public ushort InputItemId { get; set; }
     public ushort InputQuantity { get; set; }
     public ushort InputCondition { get; set; }

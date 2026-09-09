@@ -33,6 +33,8 @@ namespace Quieter.World
         public int ActiveChunkCount => activeChunks.Count;
         public event Action<ResourceNodeView> ResourceNodeAdded;
 
+        public IEnumerable<ResourceNodeView> LoadedResourceNodes => resourceNodes.Values;
+
         public bool TryGetResourceNode(ulong instanceId, out ResourceNodeView view) =>
             resourceNodes.TryGetValue(instanceId, out view) && view != null;
 

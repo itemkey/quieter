@@ -124,6 +124,12 @@ namespace Quieter.World
         private ulong serverBoilItemInstanceId;
         private double serverBoilCompletesAt;
         private ItemStackState serverBoilContents;
+        private LiquidKind serverBoilResultKind;
+        private ushort serverBoilIngredientItemId;
+        private ulong serverCookHearthId;
+        private ItemStackState serverCookContents;
+        private ushort serverCookedItemId;
+        private double serverCookCompletesAt;
         private ulong serverRinseSourceId;
         private ItemStackState serverRinseItem;
         private double serverRinseCompletesAt;
@@ -150,7 +156,8 @@ namespace Quieter.World
         public ResourceNodeView FocusedNode => focusedNode;
         public ResearchTableView FocusedTable => focusedTable;
         public SurvivalStructureView FocusedStructure => focusedStructure;
-        public bool HasServerManualWork => serverBoilHearthId != 0 || serverRinseSourceId != 0;
+        public bool HasServerManualWork => serverBoilHearthId != 0
+            || serverCookHearthId != 0 || serverRinseSourceId != 0;
         public ulong CurrentResearchTableId => localOpenTableId;
         public bool IsPlacementMode => placementPreview != null;
         public bool ConsumesPrimaryAction => IsPlacementMode
@@ -757,6 +764,7 @@ namespace Quieter.World
             {
                 UpdateServerResearch();
                 UpdateServerBoiling();
+                UpdateServerCooking();
                 UpdateServerRinsing();
                 if ((knowledgeDirty || notesDirty) && !saveRunning
                     && Time.unscaledTime >= nextKnowledgeSaveAt)
@@ -787,8 +795,8 @@ namespace Quieter.World
 
         private void UpdateOwnerInput()
         {
-            if (SurvivalView.IsCreationOpen || SurvivalView.IsBodyOpen
-                || SurvivalView.IsProgressionOpen)
+            if (SurvivalView.IsCreationOpen || SurvivalView.IsDeathOpen || SurvivalView.IsBodyOpen
+                || SurvivalView.IsProgressionOpen || SurvivalView.IsWorkerBookOpen)
             {
                 focusedNode = null;
                 focusedTable = null;
@@ -840,6 +848,44 @@ namespace Quieter.World
             }
 
             if (focusedStructure != null
+                && focusedStructure.ItemId == SurvivalStructureRules.WellItemId
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                GatherWellWaterServerRpc(focusedStructure.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
+                && SurvivalStructureRules.StoresWater(focusedStructure.ItemId)
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                var shift = keyboard.leftShiftKey.isPressed
+                    || keyboard.rightShiftKey.isPressed;
+                if (focusedStructure.ItemId == SurvivalStructureRules.WashBasinItemId
+                    && !shift)
+                    WashAtBasinServerRpc(focusedStructure.ObjectId);
+                else
+                    TransferStoredWaterServerRpc(focusedStructure.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
+                && focusedStructure.ItemId == SurvivalStructureRules.LatrineItemId
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                UseLatrineServerRpc(focusedStructure.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
+                && focusedStructure.ItemId == SurvivalStructureRules.CartographyTableItemId
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                CopyOrMergeMapsServerRpc(focusedStructure.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
                 && focusedStructure.ItemId == SurvivalStructureRules.HearthItemId
                 && keyboard.eKey.wasPressedThisFrame)
             {
@@ -852,7 +898,19 @@ namespace Quieter.World
                     && active.LiquidKind == LiquidKind.Water
                     && active.LiquidMilliliters > 0)
                 {
-                    BeginBoilingServerRpc(focusedStructure.ObjectId);
+                    var resultKind = keyboard.leftCtrlKey.isPressed
+                            || keyboard.rightCtrlKey.isPressed
+                        ? LiquidKind.Broth
+                        : keyboard.leftShiftKey.isPressed
+                            || keyboard.rightShiftKey.isPressed
+                            ? LiquidKind.HerbalInfusion
+                            : LiquidKind.Water;
+                    BeginBoilingServerRpc(focusedStructure.ObjectId, resultKind);
+                }
+                else if (ResourceBalance.TryGetCookedFoodItemId(
+                             active.ItemId, out var cookedItemId))
+                {
+                    BeginCookingServerRpc(focusedStructure.ObjectId, cookedItemId);
                 }
                 else
                 {
@@ -862,10 +920,24 @@ namespace Quieter.World
             }
 
             if (focusedStructure != null
-                && focusedStructure.ItemId == SurvivalStructureRules.UnlinedWastePitItemId
+                && SurvivalStructureRules.IsWastePit(focusedStructure.ItemId)
                 && keyboard.eKey.wasPressedThisFrame)
             {
                 DumpWasteServerRpc(focusedStructure.ObjectId);
+                return;
+            }
+
+            if (focusedStructure != null
+                && SurvivalStructureRules.SupportsLock(focusedStructure.ItemId)
+                && keyboard.eKey.wasPressedThisFrame)
+            {
+                if (focusedStructure.ItemId == SurvivalStructureRules.ChestItemId
+                    && (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed))
+                {
+                    TransferChestItemServerRpc(focusedStructure.ObjectId);
+                    return;
+                }
+                ToggleHoldingCellLockServerRpc(focusedStructure.ObjectId);
                 return;
             }
 
@@ -948,8 +1020,10 @@ namespace Quieter.World
                 var wheel = mouse.scroll.ReadValue().y;
                 if (Mathf.Abs(wheel) > 0.01f)
                 {
-                    placementYaw = Mathf.Repeat(
-                        placementYaw + (wheel > 0f ? 15f : -15f), 360f);
+                    var step = SurvivalStructureRules.IsModularBuildingPart(placementItemId)
+                        || placementItemId == SurvivalStructureRules.DrainItemId ? 90f : 15f;
+                    placementYaw = SurvivalStructureRules.SnapYaw(
+                        placementYaw + (wheel > 0f ? step : -step), placementItemId);
                 }
                 if (mouse.rightButton.wasPressedThisFrame)
                 {
@@ -995,7 +1069,8 @@ namespace Quieter.World
                     continue;
                 }
                 if (hit.collider.gameObject.GetComponent<WorldChunkView>() == null) break;
-                placementPosition = hit.point;
+                placementPosition = SurvivalStructureRules.SnapPlacement(
+                    hit.point, placementItemId);
                 placementHasSurface = true;
                 placementValid = hit.normal.y >= 0.94f
                     && Vector3.Distance(camera.transform.position, placementPosition)
@@ -1037,6 +1112,9 @@ namespace Quieter.World
                 {
                     continue;
                 }
+                var structure = hit.GetComponentInParent<SurvivalStructureView>();
+                if (structure != null && SurvivalStructureRules.AllowsModularOverlap(
+                        itemId, structure.ItemId)) continue;
                 return true;
             }
             return false;
@@ -1063,17 +1141,20 @@ namespace Quieter.World
         [ServerRpc]
         private void PlaceObjectServerRpc(Vector3 position, float yaw, ushort itemId)
         {
+            position = SurvivalStructureRules.SnapPlacement(position, itemId);
+            yaw = SurvivalStructureRules.SnapYaw(yaw, itemId);
             if (!ValidateObjectPlacementServer(position, yaw, itemId)
                 || inventory.ServerActiveStack.ItemId != itemId
                 || !SurvivalStructureRules.SupportsPlacement(itemId)
-                || !placedObjects.TryPlace(position, yaw, itemId, out var objectId))
+                || !placedObjects.TryPlace(
+                    position, yaw, itemId, steamId.ToString(), out var objectId))
             {
                 SendPlacementResultClientRpc(false, 0, itemId);
                 return;
             }
             if (!inventory.TryConsumeActiveItemServer(itemId))
             {
-                placedObjects.TryDismantle(objectId, out _);
+                placedObjects.TryRemoveJustPlaced(objectId, steamId.ToString());
                 SendPlacementResultClientRpc(false, 0, itemId);
                 return;
             }
@@ -1138,6 +1219,9 @@ namespace Quieter.World
                 {
                     continue;
                 }
+                var structure = overlap.GetComponentInParent<SurvivalStructureView>();
+                if (structure != null && SurvivalStructureRules.AllowsModularOverlap(
+                        itemId, structure.ItemId)) continue;
                 return false;
             }
             return true;
@@ -1192,6 +1276,235 @@ namespace Quieter.World
         }
 
         [ServerRpc]
+        private void ToggleHoldingCellLockServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || survival == null || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetStructureSecurity(objectId, out var locked, out _))
+            {
+                SendHoldingCellFeedbackClientRpc("Камера недоступна.");
+                return;
+            }
+            if (!placedObjects.TrySetOwnedStructureLocked(
+                    objectId, steamId.ToString(), !locked, out var error))
+            {
+                SendHoldingCellFeedbackClientRpc(error);
+                return;
+            }
+            SendHoldingCellFeedbackClientRpc(
+                locked ? "Замок открыт." : "Замок закрыт.");
+        }
+
+        [ClientRpc]
+        private void SendHoldingCellFeedbackClientRpc(FixedString512Bytes message)
+        {
+            if (IsOwner) SetFeedback(message.ToString(), 3.5f);
+        }
+
+        [ServerRpc]
+        private void GatherWellWaterServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+            {
+                SendHoldingCellFeedbackClientRpc("Колодец недоступен.");
+                return;
+            }
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            var rain = weather != null
+                ? weather.GetEnvironment(transform.position).Precipitation : 0f;
+            if (!placedObjects.TrySampleWellWater(
+                    objectId, rain, out var biological, out var toxins)
+                || !inventory.TryFillActiveContainerServer(
+                    1000, biological, toxins, out var filled))
+            {
+                SendHoldingCellFeedbackClientRpc(
+                    "Возьмите в руку неполный сосуд без другой жидкости.");
+                return;
+            }
+            survival.ServerRegisterPractice(SkillId.WaterSafety, 4f, 0.2f, 1f, 0f);
+            SendHoldingCellFeedbackClientRpc(
+                $"Из колодца набрано {filled} мл. Загрязнение нельзя определить на глаз.");
+        }
+
+        [ServerRpc]
+        private void TransferStoredWaterServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetWaterStorage(
+                    objectId, out _, out var stored, out var available))
+            {
+                SendHoldingCellFeedbackClientRpc("Ёмкость для воды недоступна.");
+                return;
+            }
+            var active = inventory.ServerActiveStack;
+            if (!active.IsEmpty && active.LiquidKind == LiquidKind.Water
+                && active.LiquidMilliliters > 0)
+            {
+                var amount = (ushort)Mathf.Min(active.LiquidMilliliters, available);
+                if (amount == 0 || !inventory.TryDepositActiveWaterServer(
+                        placedObjects, objectId, amount, out var deposited))
+                {
+                    SendHoldingCellFeedbackClientRpc("Ёмкость уже полна или вода несовместима.");
+                    return;
+                }
+                SendHoldingCellFeedbackClientRpc($"Перелито {deposited} мл воды.");
+                return;
+            }
+            if (stored == 0 || !placedObjects.TryDrawStoredWater(
+                    objectId, 1000,
+                    (amount, biological, toxins) =>
+                        inventory.TryFillActiveContainerServer(
+                            amount, biological, toxins, out _),
+                    out var drawn))
+            {
+                SendHoldingCellFeedbackClientRpc(
+                    stored == 0 ? "Ёмкость пуста." : "Возьмите в руку неполный сосуд.");
+                return;
+            }
+            SendHoldingCellFeedbackClientRpc($"Набрано {drawn} мл хранившейся воды.");
+        }
+
+        [ServerRpc]
+        private void WashAtBasinServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+            {
+                SendHoldingCellFeedbackClientRpc("Умывальник недоступен.");
+                return;
+            }
+            if (!placedObjects.TryConsumeBasinWater(
+                    objectId, 500, out var biological, out var toxins))
+            {
+                SendHoldingCellFeedbackClientRpc(
+                    "Для мытья в умывальнике нужно не меньше 500 мл воды.");
+                return;
+            }
+            var usedSoap = inventory.TryConsumeAnyItemServer(31);
+            var drained = placedObjects.TryRouteSanitaryWaste(
+                objectId, 500, Mathf.Clamp01(0.5f + biological),
+                Mathf.Clamp01(0.08f + toxins), out _, out _);
+            survival.ServerWashAtBasin(
+                biological, toxins, usedSoap, drained, out var message);
+            SendHoldingCellFeedbackClientRpc(usedSoap
+                ? message : $"{message} Без мыла очищение заметно хуже.");
+        }
+
+        [ServerRpc]
+        private void UseLatrineServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+            {
+                SendHoldingCellFeedbackClientRpc("Уборная недоступна.");
+                return;
+            }
+            survival.ServerUseLatrine(placedObjects, objectId, out var message);
+            SendHoldingCellFeedbackClientRpc(message);
+        }
+
+        [ServerRpc]
+        private void CopyOrMergeMapsServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+            {
+                SendHoldingCellFeedbackClientRpc("Картографический стол недоступен.");
+                return;
+            }
+            var maps = inventory.GetServerItemInstances(36, 2);
+            if (maps.Count == 0 || inventory.GetServerItemQuantity(35) < 1
+                || inventory.GetServerItemQuantity(37) < 1)
+            {
+                SendHoldingCellFeedbackClientRpc(
+                    "Нужны карта, чистый лист и древесный уголь. Две карты будут объединены.");
+                return;
+            }
+            if (!inventory.TryConsumeAnyItemServer(35)
+                || !inventory.TryConsumeAnyItemServer(37)) return;
+            var mapId = CreatePhysicalMapId();
+            if (!inventory.TryGiveServerStack(new ItemStackState(
+                    36, 1, itemInstanceId: mapId)))
+            {
+                inventory.TryGiveServerItem(35);
+                inventory.TryGiveServerItem(37);
+                SendHoldingCellFeedbackClientRpc("Для новой карты нет места.");
+                return;
+            }
+            var copied = new List<MapNoteNetworkState>();
+            foreach (var note in serverMapNotes.Values)
+            {
+                if (note.MapItemInstanceId == maps[0]
+                    || maps.Count > 1 && note.MapItemInstanceId == maps[1]) copied.Add(note);
+            }
+            ServerReceiveMapDocument(mapId, copied);
+            survival.ServerRegisterPractice(
+                SkillId.Cartography, 30f, maps.Count > 1 ? 0.5f : 0.3f, 1f, 0f);
+            SendHoldingCellFeedbackClientRpc(maps.Count > 1
+                ? "Карты объединены в новый физический документ."
+                : "Карта скопирована в новый физический документ.");
+        }
+
+        private ulong CreatePhysicalMapId()
+        {
+            ulong id;
+            var existing = inventory.GetServerItemInstances(36, InventoryLayout.InventorySlotCount);
+            do
+            {
+                id = BitConverter.ToUInt64(Guid.NewGuid().ToByteArray(), 0);
+            } while (id == 0 || existing.Contains(id));
+            return id;
+        }
+
+        [ServerRpc]
+        private void TransferChestItemServerRpc(ulong objectId)
+        {
+            if (placedObjects == null || inventory == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+            {
+                SendHoldingCellFeedbackClientRpc("Сундук недоступен.");
+                return;
+            }
+            var active = inventory.ServerActiveStack;
+            if (!active.IsEmpty)
+            {
+                if (!inventory.TryRemoveActiveItemServer(active.ItemId, out var removed)) return;
+                if (placedObjects.TryInsertChestItem(
+                        objectId, steamId.ToString(), removed, out var insertError))
+                {
+                    SendHoldingCellFeedbackClientRpc("Предмет помещён в сундук.");
+                    return;
+                }
+                inventory.InsertStackServer(removed);
+                SendHoldingCellFeedbackClientRpc(insertError);
+                return;
+            }
+            if (!placedObjects.TryTakeChestItem(
+                    objectId, steamId.ToString(), out var stack, out var takeError))
+            {
+                SendHoldingCellFeedbackClientRpc(takeError);
+                return;
+            }
+            var remainder = inventory.InsertStackServer(stack);
+            if (remainder == 0)
+            {
+                SendHoldingCellFeedbackClientRpc("Предмет взят из сундука.");
+                return;
+            }
+            placedObjects.TryInsertChestItem(
+                objectId, steamId.ToString(), stack.WithQuantity(remainder), out _);
+            SendHoldingCellFeedbackClientRpc("В инвентаре нет места.");
+        }
+
+        [ServerRpc]
         private void FuelHearthServerRpc(ulong objectId)
         {
             if (placedObjects == null || inventory == null || survival == null
@@ -1239,9 +1552,15 @@ namespace Quieter.World
         }
 
         [ServerRpc]
-        private void BeginBoilingServerRpc(ulong objectId)
+        private void BeginBoilingServerRpc(ulong objectId, LiquidKind resultKind)
         {
             var active = inventory?.ServerActiveStack ?? default;
+            var ingredientItemId = resultKind switch
+            {
+                LiquidKind.Broth => (ushort)26,
+                LiquidKind.HerbalInfusion => (ushort)28,
+                _ => (ushort)0,
+            };
             if (HasServerManualWork || inventory == null || inventory.IsCrafting
                 || placedObjects == null || survival == null
                 || !survival.CanPerformServerAction()
@@ -1251,20 +1570,35 @@ namespace Quieter.World
                     > ResourceBalance.InteractionDistance + 0.5f
                 || active.IsEmpty || active.ItemId != 30 || active.ItemInstanceId == 0
                 || active.LiquidKind != LiquidKind.Water
-                || active.LiquidMilliliters == 0)
+                || active.LiquidMilliliters == 0
+                || resultKind is not (LiquidKind.Water
+                    or LiquidKind.Broth or LiquidKind.HerbalInfusion)
+                || ingredientItemId != 0 && !inventory.HasServerItem(ingredientItemId))
             {
                 SendHearthFeedbackClientRpc(
-                    "Для кипячения держите котелок с водой у горящего очага.");
+                    resultKind == LiquidKind.Broth
+                        ? "Для отвара нужны котелок воды и съедобные коренья."
+                        : resultKind == LiquidKind.HerbalInfusion
+                            ? "Для настоя нужны котелок воды и лекарственные травы."
+                            : "Для кипячения держите котелок с водой у горящего очага.");
                 return;
             }
             serverBoilHearthId = objectId;
             serverBoilItemId = active.ItemId;
             serverBoilItemInstanceId = active.ItemInstanceId;
             serverBoilContents = active;
+            serverBoilResultKind = resultKind;
+            serverBoilIngredientItemId = ingredientItemId;
             serverBoilCompletesAt = NetworkManager.ServerTime.Time
-                + 8d + active.LiquidMilliliters / 250d;
+                + 8d + active.LiquidMilliliters / 250d
+                + (resultKind == LiquidKind.Water ? 0d : 8d);
             SendHearthFeedbackClientRpc(
-                "Вода нагревается. Оставайтесь у очага и держите сосуд в руках.");
+                resultKind switch
+                {
+                    LiquidKind.Broth => "Коренья варятся. Оставайтесь у очага и держите котелок в руках.",
+                    LiquidKind.HerbalInfusion => "Травы настаиваются. Оставайтесь у очага и держите котелок в руках.",
+                    _ => "Вода нагревается. Оставайтесь у очага и держите сосуд в руках.",
+                });
         }
 
         private void UpdateServerBoiling()
@@ -1291,20 +1625,31 @@ namespace Quieter.World
             }
             if (NetworkManager.ServerTime.Time < serverBoilCompletesAt) return;
             var succeeded = inventory.TryBoilActiveLiquidServer(
-                serverBoilItemId, serverBoilItemInstanceId);
+                serverBoilItemId, serverBoilItemInstanceId,
+                serverBoilResultKind, serverBoilIngredientItemId);
+            var completedKind = serverBoilResultKind;
             serverBoilHearthId = 0;
             serverBoilItemId = 0;
             serverBoilItemInstanceId = 0;
             serverBoilCompletesAt = 0d;
+            serverBoilResultKind = LiquidKind.None;
+            serverBoilIngredientItemId = 0;
             if (!succeeded)
             {
                 SendHearthFeedbackClientRpc("Кипячение не удалось.");
                 return;
             }
             survival?.ServerRegisterPractice(SkillId.WaterSafety, 10f, 0.28f, 1f, 0f);
-            survival?.ServerRegisterPractice(SkillId.Cooking, 10f, 0.2f, 1f, 0f);
+            survival?.ServerRegisterPractice(SkillId.Cooking,
+                completedKind == LiquidKind.Water ? 10f : 18f,
+                completedKind == LiquidKind.Water ? 0.2f : 0.34f, 1f, 0f);
             SendHearthFeedbackClientRpc(
-                "Вода прокипячена. Биологическое заражение уничтожено; токсины могли остаться.");
+                completedKind switch
+                {
+                    LiquidKind.Broth => "Приготовлен питательный отвар. Токсины из воды могли остаться.",
+                    LiquidKind.HerbalInfusion => "Приготовлен травяной настой. Он облегчает симптомы, но не лечит их причину.",
+                    _ => "Вода прокипячена. Биологическое заражение уничтожено; токсины могли остаться.",
+                });
         }
 
         private void CancelServerBoiling(string message)
@@ -1313,6 +1658,88 @@ namespace Quieter.World
             serverBoilItemId = 0;
             serverBoilItemInstanceId = 0;
             serverBoilCompletesAt = 0d;
+            serverBoilResultKind = LiquidKind.None;
+            serverBoilIngredientItemId = 0;
+            SendHearthFeedbackClientRpc(message);
+        }
+
+        [ServerRpc]
+        private void BeginCookingServerRpc(ulong objectId, ushort cookedItemId)
+        {
+            var active = inventory?.ServerActiveStack ?? default;
+            if (HasServerManualWork || inventory == null || inventory.IsCrafting
+                || placedObjects == null || survival == null
+                || !survival.CanPerformServerAction()
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(objectId, out var position)
+                || Vector3.Distance(transform.position, position)
+                    > ResourceBalance.InteractionDistance + 0.5f
+                || active.IsEmpty
+                || !ResourceBalance.TryGetCookedFoodItemId(
+                    active.ItemId, out var expectedCookedItemId)
+                || expectedCookedItemId != cookedItemId)
+            {
+                SendHearthFeedbackClientRpc(
+                    "Для готовки держите сырые коренья, грибы или орехи у горящего очага.");
+                return;
+            }
+            serverCookHearthId = objectId;
+            serverCookContents = active;
+            serverCookedItemId = cookedItemId;
+            serverCookCompletesAt = NetworkManager.ServerTime.Time
+                + 10d + active.Quantity * 4d;
+            SendHearthFeedbackClientRpc(
+                "Пища готовится. Оставайтесь у очага и держите её в руках.");
+        }
+
+        private void UpdateServerCooking()
+        {
+            if (serverCookHearthId == 0) return;
+            var active = inventory?.ServerActiveStack ?? default;
+            if (inventory == null || placedObjects == null || survival == null
+                || !survival.CanPerformServerAction() || inventory.IsCrafting
+                || !placedObjects.CanInteract(serverCookHearthId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(
+                    serverCookHearthId, out var hearthPosition)
+                || Vector3.Distance(transform.position, hearthPosition)
+                    > ResourceBalance.InteractionDistance + 0.5f
+                || !active.Equals(serverCookContents))
+            {
+                CancelServerCooking("Готовка прервана.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverCookCompletesAt) return;
+            var rawItemId = serverCookContents.ItemId;
+            var quantity = serverCookContents.Quantity;
+            var cookedItemId = serverCookedItemId;
+            var succeeded = inventory.TryCookActiveSolidFoodServer(
+                serverCookContents, cookedItemId);
+            serverCookHearthId = 0;
+            serverCookContents = default;
+            serverCookedItemId = 0;
+            serverCookCompletesAt = 0d;
+            if (!succeeded)
+            {
+                SendHearthFeedbackClientRpc("Готовка не удалась.");
+                return;
+            }
+            survival.ServerRegisterPractice(
+                SkillId.Cooking, 12f * quantity, 0.34f, 1f, 0f);
+            SendHearthFeedbackClientRpc(rawItemId switch
+            {
+                ResourceBalance.WildMushroomsItemId =>
+                    "Грибы приготовлены. Жар убил микробы, но природный яд мог сохраниться.",
+                ResourceBalance.WildNutsItemId => "Орехи поджарены и подсушены.",
+                _ => "Коренья приготовлены и стали легче для пищеварения.",
+            });
+        }
+
+        private void CancelServerCooking(string message)
+        {
+            serverCookHearthId = 0;
+            serverCookContents = default;
+            serverCookedItemId = 0;
+            serverCookCompletesAt = 0d;
             SendHearthFeedbackClientRpc(message);
         }
 
@@ -1737,6 +2164,16 @@ namespace Quieter.World
                 node.Descriptor.Kind == WorldObjectKind.FiberPlant ? 0.12f : 0.2f,
                 1f,
                 0f);
+            if (ResourceBalance.IsWildForage(node.Descriptor.ResourceItemId))
+            {
+                var identificationDifficulty = node.Descriptor.ResourceItemId is
+                    ResourceBalance.WildMushroomsItemId
+                    or ResourceBalance.MedicinalHerbsItemId
+                        ? 0.38f
+                        : 0.22f;
+                survival?.ServerRegisterPractice(
+                    SkillId.Botany, 2f, identificationDifficulty, 1f, 0f);
+            }
         }
 
         [ServerRpc]
@@ -1776,7 +2213,7 @@ namespace Quieter.World
         [ServerRpc]
         private void BeginRinsingServerRpc(ulong sourceId)
         {
-            if (serverRinseSourceId != 0 || serverBoilHearthId != 0 || inventory == null
+            if (HasServerManualWork || inventory == null
                 || inventory.IsCrafting || survival == null || !survival.CanPerformServerAction()
                 || resourceWorld == null || !resourceWorld.TryGetNode(sourceId, out var node)
                 || !node.Descriptor.IsWaterSource || !ValidateInteraction(node)) return;

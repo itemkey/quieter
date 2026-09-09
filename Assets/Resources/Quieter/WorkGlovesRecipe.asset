@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
+  m_Name: WorkGlovesRecipe
+  m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
+  recipeId: 33
+  displayName: "\u0420\u0430\u0431\u043E\u0447\u0438\u0435 \u0440\u0443\u043A\u0430\u0432\u0438\u0446\u044B"
+  category: 0
+  ingredients:
+  - Item: {fileID: 11400000, guid: e7076783273e3b54fb739ee406d1c40d, type: 2}
+    Quantity: 1
+  output: {fileID: 11400000, guid: 315d2bf81ec557942b408aee687213a2, type: 2}
+  outputQuantity: 1
+  workSeconds: 35
+  requiresBurningHearth: 0
+  practiceSkill: 17

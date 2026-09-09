@@ -54,6 +54,10 @@ app.MapGet("/internal/world/current", (
     ProfileStore store,
     CancellationToken cancellationToken) => store.GetOrCreateWorldAsync(cancellationToken));
 
+app.MapGet("/internal/world/characters", (
+    ProfileStore store,
+    CancellationToken cancellationToken) => store.LoadWorldCharactersAsync(cancellationToken));
+
 app.MapGet("/internal/worlds/{worldId:int}/resource-nodes", (
     int worldId,
     ProfileStore store,
@@ -165,6 +169,169 @@ app.MapPut("/internal/players/{steamId}/snapshot", async (
     catch (DbUpdateConcurrencyException)
     {
         return Results.Conflict(new { error = "Character revision or account binding changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/world/characters/{characterId}/snapshot", async (
+    string characterId, PlayerSnapshotRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        if (!string.Equals(characterId, request.CharacterId, StringComparison.OrdinalIgnoreCase))
+            return Results.BadRequest(new { error = "Character identifiers disagree." });
+        return await store.SaveDetachedCharacterAsync(request, cancellationToken)
+            ? Results.NoContent() : Results.NotFound();
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Character revision or ownership changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/players/{steamId}/new-stranger", async (
+    string steamId, NewStrangerRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.CreateNewStrangerAsync(steamId, request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Character changed before the new life was accepted." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/internal/players/{steamId}/heir", async (
+    string steamId, RegisterHeirRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.RegisterHeirAsync(steamId, request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Estate registration changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/players/{steamId}/assume-heir", async (
+    string steamId, AssumeHeirRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.AssumeRegisteredHeirAsync(
+            steamId, request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Inheritance transition changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/players/{steamId}/heir-offers", async (
+    string steamId, CreateHeirOfferRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.CreateHeirOfferAsync(steamId, request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Heir donation state changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapGet("/internal/players/{steamId}/heir-offer", async (
+    string steamId, ProfileStore store, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var offer = await store.GetPendingHeirOfferAsync(steamId, cancellationToken);
+        return offer is null ? Results.NoContent() : Results.Ok(offer);
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/players/{steamId}/heir-offers/{offerId:guid}/accept", async (
+    string steamId, Guid offerId, AcceptHeirOfferRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.AcceptHeirOfferAsync(
+            steamId, offerId, request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Heir offer acceptance changed." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/world/character-transfer", async (
+    CharacterPairSnapshotRequest request, ProfileStore store,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return await store.SaveCharacterPairAsync(request, cancellationToken)
+            ? Results.NoContent() : Results.NotFound();
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Character state changed during item transfer." });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/internal/world/npcs", async (
+    CreateWorldNpcRequest request, ProfileStore store, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await store.CreateWorldNpcAsync(request, cancellationToken));
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        return Results.Conflict(new { error = "Character identifier is already controlled." });
     }
     catch (ArgumentException exception)
     {

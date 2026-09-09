@@ -8,6 +8,10 @@ namespace Quieter.Player
         private const string MouseSensitivityKey = "quieter.input.mouse-sensitivity";
         private const string SymptomTextKey = "quieter.accessibility.symptom-text";
         private const string ScreenEffectsKey = "quieter.accessibility.screen-effects";
+        private const string FocusEffectsKey = "quieter.accessibility.focus-effects";
+        private const string CameraShakeKey = "quieter.accessibility.camera-shake";
+        private const string FlashingEffectsKey = "quieter.accessibility.flashing-effects";
+        private const string ConditionAudioKey = "quieter.accessibility.condition-audio";
         private const float DefaultMouseSensitivity = 0.12f;
 
         public const float MinimumMouseSensitivity = 0.03f;
@@ -56,6 +60,36 @@ namespace Quieter.Player
                 PlayerPrefs.SetInt(ScreenEffectsKey, value ? 1 : 0);
                 PlayerPrefs.Save();
             }
+        }
+
+        public static bool FocusEffectsEnabled
+        {
+            get => PlayerPrefs.GetInt(FocusEffectsKey, 1) != 0;
+            set => SaveBoolean(FocusEffectsKey, value);
+        }
+
+        public static bool CameraShakeEnabled
+        {
+            get => PlayerPrefs.GetInt(CameraShakeKey, 1) != 0;
+            set => SaveBoolean(CameraShakeKey, value);
+        }
+
+        public static bool FlashingEffectsEnabled
+        {
+            get => PlayerPrefs.GetInt(FlashingEffectsKey, 1) != 0;
+            set => SaveBoolean(FlashingEffectsKey, value);
+        }
+
+        public static bool ConditionAudioEnabled
+        {
+            get => PlayerPrefs.GetInt(ConditionAudioKey, 1) != 0;
+            set => SaveBoolean(ConditionAudioKey, value);
+        }
+
+        private static void SaveBoolean(string key, bool value)
+        {
+            PlayerPrefs.SetInt(key, value ? 1 : 0);
+            PlayerPrefs.Save();
         }
     }
 }
