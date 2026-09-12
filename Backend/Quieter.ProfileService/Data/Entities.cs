@@ -30,7 +30,6 @@ public sealed class PlayerEntity
     public CharacterEntity? CurrentCharacter { get; set; }
     public List<PlayerInventorySlotEntity> InventorySlots { get; set; } = [];
     public List<PlayerPendingItemEntity> PendingItems { get; set; } = [];
-    public List<PlayerDepositKnowledgeEntity> DepositKnowledge { get; set; } = [];
 }
 
 public sealed class CharacterEntity
@@ -50,6 +49,7 @@ public sealed class CharacterEntity
     public DateTime UpdatedAtUtc { get; set; }
     public PlayerEntity? ControllingPlayer { get; set; }
     public List<CharacterItemEntity> Items { get; set; } = [];
+    public List<CharacterDepositKnowledgeEntity> DepositKnowledge { get; set; } = [];
 }
 
 public sealed class CharacterReplacementEntity
@@ -130,16 +130,196 @@ public sealed class WorldResourceNodeEntity
     public WorldEntity World { get; set; } = null!;
 }
 
-public sealed class PlayerDepositKnowledgeEntity
+public sealed class CharacterDepositKnowledgeEntity
 {
-    public decimal SteamId { get; set; }
+    public Guid CharacterId { get; set; }
     public int WorldId { get; set; }
     public decimal InstanceId { get; set; }
     public ushort StudyBasisPoints { get; set; }
     public DateTime DiscoveredAtUtc { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
-    public PlayerEntity Player { get; set; } = null!;
+    public CharacterEntity Character { get; set; } = null!;
     public WorldEntity World { get; set; } = null!;
+}
+
+public sealed class CharacterPhysiologyEntity
+{
+    public Guid CharacterId { get; set; }
+    public float AcuteStamina { get; set; }
+    public float Oxygenation { get; set; }
+    public float BloodVolume { get; set; }
+    public float Hydration { get; set; }
+    public float ElectrolyteBalance { get; set; }
+    public float EnergyReserve { get; set; }
+    public float ProteinReserve { get; set; }
+    public float FatReserve { get; set; }
+    public float MicronutrientReserve { get; set; }
+    public float MineralReserve { get; set; }
+    public float SleepDebt { get; set; }
+    public float CircadianFatigue { get; set; }
+    public float CoreTemperatureC { get; set; }
+    public float Pain { get; set; }
+    public float Stress { get; set; }
+    public float Consciousness { get; set; }
+    public float SystemicInfection { get; set; }
+    public float ToxinLoad { get; set; }
+    public float FoodborneInfection { get; set; }
+    public float WaterborneInfection { get; set; }
+    public float ParasiteLoad { get; set; }
+    public float RespiratoryInfection { get; set; }
+    public float BrainFunction { get; set; }
+    public float HeartFunction { get; set; }
+    public float LeftLungFunction { get; set; }
+    public float RightLungFunction { get; set; }
+    public float LiverFunction { get; set; }
+    public float KidneyFunction { get; set; }
+    public float GutFunction { get; set; }
+    public DateTime UpdatedAtUtc { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterTraitEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte TraitId { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterAttributeEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte AttributeId { get; set; }
+    public float Value { get; set; }
+    public float TrainingLoad { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterSkillEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte SkillId { get; set; }
+    public float PracticeHours { get; set; }
+    public float RelevantPracticeHours { get; set; }
+    public float PendingConsolidationHours { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterWoundEntity
+{
+    public Guid CharacterId { get; set; }
+    public long WoundId { get; set; }
+    public byte BodyRegion { get; set; }
+    public byte InjuryType { get; set; }
+    public float Severity { get; set; }
+    public float TissueDamage { get; set; }
+    public float Contamination { get; set; }
+    public float Infection { get; set; }
+    public float Bleeding { get; set; }
+    public float InternalBleedingSeverity { get; set; }
+    public float Pain { get; set; }
+    public float PermanentImpairment { get; set; }
+    public bool PressureApplied { get; set; }
+    public bool Washed { get; set; }
+    public bool Disinfected { get; set; }
+    public bool Sutured { get; set; }
+    public bool Bandaged { get; set; }
+    public bool Splinted { get; set; }
+    public bool Healed { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterRelationshipEntity
+{
+    public Guid CharacterId { get; set; }
+    public Guid TargetCharacterId { get; set; }
+    public float Trust { get; set; }
+    public float Fear { get; set; }
+    public float Resentment { get; set; }
+    public float Loyalty { get; set; }
+    public bool VoluntaryLoyalty { get; set; }
+    public int PersonalRequestsCompleted { get; set; }
+    public int PersuasionAttempts { get; set; }
+    public int IntimidationAttempts { get; set; }
+    public long NextSocialAttemptUtcTicks { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterWorkerContractEntity
+{
+    public Guid CharacterId { get; set; }
+    public Guid ContractId { get; set; }
+    public decimal EmployerAccountId { get; set; }
+    public decimal? AssignedBedObjectId { get; set; }
+    public bool Active { get; set; }
+    public bool Voluntary { get; set; }
+    public float DailyRationCalories { get; set; }
+    public float PromisedSafety { get; set; }
+    public float WorkdayStartHour { get; set; }
+    public float WorkdayEndHour { get; set; }
+    public ushort PaymentItemId { get; set; }
+    public ushort PaymentQuantity { get; set; }
+    public double FulfilledContractGameSeconds { get; set; }
+    public int ConsecutiveBreaches { get; set; }
+    public float WorkZoneX { get; set; }
+    public float WorkZoneY { get; set; }
+    public float WorkZoneZ { get; set; }
+    public float WorkZoneRadius { get; set; }
+    public float StorageX { get; set; }
+    public float StorageY { get; set; }
+    public float StorageZ { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterNpcRuntimeEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte Disposition { get; set; }
+    public byte Activity { get; set; }
+    public byte ActiveJob { get; set; }
+    public byte WorkbookSelectedJob { get; set; }
+    public float HomeX { get; set; }
+    public float HomeY { get; set; }
+    public float HomeZ { get; set; }
+    public float DestinationX { get; set; }
+    public float DestinationY { get; set; }
+    public float DestinationZ { get; set; }
+    public decimal? EmployerAccountId { get; set; }
+    public Guid? EmployerCharacterId { get; set; }
+    public float Motivation { get; set; }
+    public float WorkProgressSeconds { get; set; }
+    public long NextDecisionUtcTicks { get; set; }
+    public long LastNeedsActionUtcTicks { get; set; }
+    public long LastWorkCompletedUtcTicks { get; set; }
+    public long ContractEvaluationGameDay { get; set; }
+    public float RationCaloriesCurrentDay { get; set; }
+    public byte PersonalRequest { get; set; }
+    public bool PersonalRequestPending { get; set; }
+    public long PersonalRequestGameDay { get; set; }
+    public long LastPersonalRequestCompletedGameDay { get; set; }
+    public int PendingSabotageActions { get; set; }
+    public long FleeUntilUtcTicks { get; set; }
+    public byte LastLeadershipAction { get; set; }
+    public long LastLeadershipPracticeUtcTicks { get; set; }
+    public int LeadershipInstructions { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterWorkerJobEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte JobId { get; set; }
+    public bool Allowed { get; set; }
+    public byte Priority { get; set; }
+    public int CompletedTasks { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
+}
+
+public sealed class CharacterNpcLessonEntity
+{
+    public Guid CharacterId { get; set; }
+    public byte SkillId { get; set; }
+    public int LessonsReceived { get; set; }
+    public CharacterEntity Character { get; set; } = null!;
 }
 
 public sealed class PlayerInventorySlotEntity
@@ -226,7 +406,7 @@ public sealed class WorldPlacedObjectEntity
 
 public sealed class PlayerMapNoteEntity
 {
-    public decimal SteamId { get; set; }
+    public decimal LastEditorSteamId { get; set; }
     public int WorldId { get; set; }
     public decimal MapItemInstanceId { get; set; }
     public decimal NoteId { get; set; }

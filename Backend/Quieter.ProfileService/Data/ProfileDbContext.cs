@@ -15,7 +15,17 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
     public DbSet<PlayerInventorySlotEntity> PlayerInventorySlots => Set<PlayerInventorySlotEntity>();
     public DbSet<PlayerPendingItemEntity> PlayerPendingItems => Set<PlayerPendingItemEntity>();
     public DbSet<WorldResourceNodeEntity> WorldResourceNodes => Set<WorldResourceNodeEntity>();
-    public DbSet<PlayerDepositKnowledgeEntity> PlayerDepositKnowledge => Set<PlayerDepositKnowledgeEntity>();
+    public DbSet<CharacterDepositKnowledgeEntity> CharacterDepositKnowledge => Set<CharacterDepositKnowledgeEntity>();
+    public DbSet<CharacterPhysiologyEntity> CharacterPhysiology => Set<CharacterPhysiologyEntity>();
+    public DbSet<CharacterTraitEntity> CharacterTraits => Set<CharacterTraitEntity>();
+    public DbSet<CharacterAttributeEntity> CharacterAttributes => Set<CharacterAttributeEntity>();
+    public DbSet<CharacterSkillEntity> CharacterSkills => Set<CharacterSkillEntity>();
+    public DbSet<CharacterWoundEntity> CharacterWounds => Set<CharacterWoundEntity>();
+    public DbSet<CharacterRelationshipEntity> CharacterRelationships => Set<CharacterRelationshipEntity>();
+    public DbSet<CharacterWorkerContractEntity> CharacterWorkerContracts => Set<CharacterWorkerContractEntity>();
+    public DbSet<CharacterNpcRuntimeEntity> CharacterNpcRuntime => Set<CharacterNpcRuntimeEntity>();
+    public DbSet<CharacterWorkerJobEntity> CharacterWorkerJobs => Set<CharacterWorkerJobEntity>();
+    public DbSet<CharacterNpcLessonEntity> CharacterNpcLessons => Set<CharacterNpcLessonEntity>();
     public DbSet<PlayerMapNoteEntity> PlayerMapNotes => Set<PlayerMapNoteEntity>();
     public DbSet<WorldPlacedObjectEntity> WorldPlacedObjects => Set<WorldPlacedObjectEntity>();
 
@@ -160,20 +170,108 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<PlayerDepositKnowledgeEntity>(entity =>
+        modelBuilder.Entity<CharacterDepositKnowledgeEntity>(entity =>
         {
-            entity.ToTable("player_deposit_knowledge");
-            entity.HasKey(entry => new { entry.SteamId, entry.WorldId, entry.InstanceId });
-            entity.Property(entry => entry.SteamId).HasPrecision(20, 0);
+            entity.ToTable("character_deposit_knowledge");
+            entity.HasKey(entry => new { entry.CharacterId, entry.WorldId, entry.InstanceId });
             entity.Property(entry => entry.InstanceId).HasPrecision(20, 0);
-            entity.HasOne(entry => entry.Player)
-                .WithMany(player => player.DepositKnowledge)
-                .HasForeignKey(entry => entry.SteamId)
+            entity.HasOne(entry => entry.Character)
+                .WithMany(character => character.DepositKnowledge)
+                .HasForeignKey(entry => entry.CharacterId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(entry => entry.World)
                 .WithMany()
                 .HasForeignKey(entry => entry.WorldId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterPhysiologyEntity>(entity =>
+        {
+            entity.ToTable("character_physiology");
+            entity.HasKey(entry => entry.CharacterId);
+            entity.HasOne(entry => entry.Character).WithOne()
+                .HasForeignKey<CharacterPhysiologyEntity>(entry => entry.CharacterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterTraitEntity>(entity =>
+        {
+            entity.ToTable("character_traits");
+            entity.HasKey(entry => new { entry.CharacterId, entry.TraitId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterAttributeEntity>(entity =>
+        {
+            entity.ToTable("character_attributes");
+            entity.HasKey(entry => new { entry.CharacterId, entry.AttributeId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterSkillEntity>(entity =>
+        {
+            entity.ToTable("character_skills");
+            entity.HasKey(entry => new { entry.CharacterId, entry.SkillId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterWoundEntity>(entity =>
+        {
+            entity.ToTable("character_wounds");
+            entity.HasKey(entry => new { entry.CharacterId, entry.WoundId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterRelationshipEntity>(entity =>
+        {
+            entity.ToTable("character_relationships");
+            entity.HasKey(entry => new { entry.CharacterId, entry.TargetCharacterId });
+            entity.HasIndex(entry => entry.TargetCharacterId);
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterWorkerContractEntity>(entity =>
+        {
+            entity.ToTable("character_worker_contracts");
+            entity.HasKey(entry => entry.CharacterId);
+            entity.Property(entry => entry.EmployerAccountId).HasPrecision(20, 0);
+            entity.Property(entry => entry.AssignedBedObjectId).HasPrecision(20, 0);
+            entity.HasOne(entry => entry.Character).WithOne()
+                .HasForeignKey<CharacterWorkerContractEntity>(entry => entry.CharacterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterNpcRuntimeEntity>(entity =>
+        {
+            entity.ToTable("character_npc_runtime");
+            entity.HasKey(entry => entry.CharacterId);
+            entity.Property(entry => entry.EmployerAccountId).HasPrecision(20, 0);
+            entity.HasIndex(entry => entry.EmployerAccountId);
+            entity.HasIndex(entry => entry.EmployerCharacterId);
+            entity.HasOne(entry => entry.Character).WithOne()
+                .HasForeignKey<CharacterNpcRuntimeEntity>(entry => entry.CharacterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterWorkerJobEntity>(entity =>
+        {
+            entity.ToTable("character_worker_jobs");
+            entity.HasKey(entry => new { entry.CharacterId, entry.JobId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CharacterNpcLessonEntity>(entity =>
+        {
+            entity.ToTable("character_npc_lessons");
+            entity.HasKey(entry => new { entry.CharacterId, entry.SkillId });
+            entity.HasOne(entry => entry.Character).WithMany()
+                .HasForeignKey(entry => entry.CharacterId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<PlayerMapNoteEntity>(entity =>
@@ -185,7 +283,7 @@ public sealed class ProfileDbContext(DbContextOptions<ProfileDbContext> options)
                 note.MapItemInstanceId,
                 note.NoteId,
             });
-            entity.Property(note => note.SteamId).HasPrecision(20, 0);
+            entity.Property(note => note.LastEditorSteamId).HasPrecision(20, 0);
             entity.Property(note => note.MapItemInstanceId).HasPrecision(20, 0);
             entity.Property(note => note.NoteId).HasPrecision(20, 0);
             entity.Property(note => note.Text).HasMaxLength(80);

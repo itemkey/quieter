@@ -179,7 +179,7 @@ namespace Quieter.Tests
             const string nodeId = "18446744073709551001";
             var first = new LocalJsonRepository(path);
             var world = await first.GetOrCreateWorldAsync();
-            await first.LoginAsync(steamId, "Prospector", Vector3.up * 8f);
+            var original = await first.LoginAsync(steamId, "Prospector", Vector3.up * 8f);
             await first.SaveResourceNodeStatesAsync(world.WorldId, new[]
             {
                 new StoredResourceNodeState
@@ -190,7 +190,8 @@ namespace Quieter.Tests
                     AvailableAtUtc = "2026-08-30T18:00:00.0000000Z",
                 },
             });
-            await first.SaveDepositKnowledgeAsync(steamId, world.WorldId, new[]
+            await first.SaveDepositKnowledgeAsync(steamId, original.Survival.CharacterId,
+                world.WorldId, new[]
             {
                 new StoredDepositKnowledge
                 {

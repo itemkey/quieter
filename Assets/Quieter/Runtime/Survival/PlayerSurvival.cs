@@ -29,6 +29,7 @@ namespace Quieter.Survival
         public bool HasPersonalRequest;
         public CorpseDecayStage CorpseStage;
         public byte CorpseContamination;
+        public BodyPosture BodyPosture;
 
         public void NetworkSerialize<T>(BufferSerializer<T> serializer)
             where T : IReaderWriter
@@ -49,6 +50,7 @@ namespace Quieter.Survival
             serializer.SerializeValue(ref HasPersonalRequest);
             serializer.SerializeValue(ref CorpseStage);
             serializer.SerializeValue(ref CorpseContamination);
+            serializer.SerializeValue(ref BodyPosture);
         }
 
         public bool Equals(PublicSymptomState other)
@@ -67,7 +69,8 @@ namespace Quieter.Survival
                 && PersonalRequest == other.PersonalRequest
                 && HasPersonalRequest == other.HasPersonalRequest
                 && CorpseStage == other.CorpseStage
-                && CorpseContamination == other.CorpseContamination;
+                && CorpseContamination == other.CorpseContamination
+                && BodyPosture == other.BodyPosture;
     }
 
     public struct OwnerConditionState : INetworkSerializable, IEquatable<OwnerConditionState>
@@ -92,6 +95,9 @@ namespace Quieter.Survival
         public bool Bound;
         public bool Captive;
         public bool BeingCarried;
+        public bool VoluntaryPassingAttemptActive;
+        public byte VoluntaryPassingStage;
+        public BodyPosture BodyPosture;
         public CharacterControlKind ControlKind;
         public byte TraitSelectionError;
         public ushort Revision;
@@ -119,6 +125,9 @@ namespace Quieter.Survival
             serializer.SerializeValue(ref Bound);
             serializer.SerializeValue(ref Captive);
             serializer.SerializeValue(ref BeingCarried);
+            serializer.SerializeValue(ref VoluntaryPassingAttemptActive);
+            serializer.SerializeValue(ref VoluntaryPassingStage);
+            serializer.SerializeValue(ref BodyPosture);
             serializer.SerializeValue(ref ControlKind);
             serializer.SerializeValue(ref TraitSelectionError);
             serializer.SerializeValue(ref Revision);
@@ -145,6 +154,9 @@ namespace Quieter.Survival
                 && Bound == other.Bound
                 && Captive == other.Captive
                 && BeingCarried == other.BeingCarried
+                && VoluntaryPassingAttemptActive == other.VoluntaryPassingAttemptActive
+                && VoluntaryPassingStage == other.VoluntaryPassingStage
+                && BodyPosture == other.BodyPosture
                 && ControlKind == other.ControlKind
                 && TraitSelectionError == other.TraitSelectionError
                 && Revision == other.Revision;
@@ -399,6 +411,7 @@ namespace Quieter.Survival
     public sealed class PlayerSurvival : NetworkBehaviour
     {
         public const float ServerSimulationInterval = 0.5f;
+        public const float LessonDurationSeconds = 120f;
 
         private readonly NetworkVariable<PublicSymptomState> publicSymptoms = new(
             default,
@@ -461,6 +474,14 @@ namespace Quieter.Survival
         private ulong serverSteamId;
         private bool captureCompletionRaised;
         private float nextCorpseUpdateAt;
+        private PlayerSurvival lessonCounterpart;
+        private double lessonCompletesAt;
+
+        private bool HasPendingTreatment => pendingTreatmentActive
+            || serverState?.MedicalActivity?.Active == true;
+        private bool HasBlockingActivity => HasPendingTreatment
+            || serverState?.VoluntaryPassing?.AttemptActive == true
+            || serverState?.LessonActivity?.Active == true;
 
         public event Action Changed;
         public event Action<CharacterSurvivalState> ServerDied;
@@ -501,6 +522,8 @@ namespace Quieter.Survival
             ? CharacterControlKind.Player : focusedMedicalTarget.PublicSymptoms.ControlKind;
         public CharacterLifeState FocusedTargetLifeState => focusedMedicalTarget == null
             ? CharacterLifeState.Conscious : focusedMedicalTarget.PublicSymptoms.LifeState;
+        public BodyPosture FocusedTargetBodyPosture => focusedMedicalTarget == null
+            ? BodyPosture.FaceUp : focusedMedicalTarget.PublicSymptoms.BodyPosture;
         public NpcActivityKind FocusedTargetActivity => focusedMedicalTarget == null
             ? NpcActivityKind.Idle : focusedMedicalTarget.PublicSymptoms.Activity;
         public WorkerJobKind FocusedTargetJob => focusedMedicalTarget == null
@@ -539,8 +562,15 @@ namespace Quieter.Survival
                 if (keyboard.yKey.wasPressedThisFrame) RespondToMedicalConsent(true);
                 else if (keyboard.nKey.wasPressedThisFrame) RespondToMedicalConsent(false);
             }
-            if (focusedMedicalTarget == null) return;
             var shifted = keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed;
+            var controlled = keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed;
+            if (keyboard.xKey.wasPressedThisFrame
+                && (ownerCondition.Value.Bound || ownerCondition.Value.Captive))
+            {
+                if (shifted && controlled) BeginVoluntaryPassingServerRpc();
+                else if (ownerCondition.Value.Bound) BeginRestraintEscapeServerRpc();
+            }
+            if (focusedMedicalTarget == null) return;
             if (shifted)
             {
                 if (keyboard.f1Key.wasPressedThisFrame)
@@ -577,12 +607,18 @@ namespace Quieter.Survival
             else if (keyboard.f8Key.wasPressedThisFrame)
                 RequestToggleBinding();
             else if (keyboard.f9Key.wasPressedThisFrame)
-                RequestToggleCarry();
+            {
+                if (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed)
+                    RequestTurnBody();
+                else RequestToggleCarry();
+            }
             else if (keyboard.f10Key.wasPressedThisFrame)
                 RequestBeginCapture();
             else if (keyboard.f11Key.wasPressedThisFrame)
             {
-                if (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed)
+                if (keyboard.leftCtrlKey.isPressed || keyboard.rightCtrlKey.isPressed)
+                    RequestIntimidate();
+                else if (keyboard.leftShiftKey.isPressed || keyboard.rightShiftKey.isPressed)
                     RequestRegisterHeir();
                 else RequestOfferContract();
             }
@@ -659,6 +695,9 @@ namespace Quieter.Survival
                 return;
             }
 
+            TryRestorePendingTreatment();
+            TryRestorePendingLesson();
+
             accumulator += Time.fixedDeltaTime;
             if (accumulator < ServerSimulationInterval)
             {
@@ -668,6 +707,12 @@ namespace Quieter.Survival
             var elapsed = accumulator;
             accumulator = 0f;
             var wasDead = ServerIsDead;
+            var accidentRevision = serverState.Physiology.EliminationAccidentRevision;
+            SynchronizePendingTreatmentState();
+            SynchronizePendingLessonState();
+            TickRestraintEscape(elapsed);
+            TickVoluntaryPassing(elapsed);
+            TickLesson();
             if (pendingTreatmentActive && ServerClock >= pendingTreatmentCompletesAt)
             {
                 CompletePendingTreatment();
@@ -690,9 +735,22 @@ namespace Quieter.Survival
                 ResolveEnvironment(transform.position, elapsed),
                 exertion,
                 offlineMetabolismSlowed: slowOfflineMetabolism);
+            if (serverState.Physiology.EliminationAccidentRevision != accidentRevision)
+            {
+                HandleEliminationAccident(
+                    serverState.Physiology.LastEliminationAccidentWasBowel);
+            }
             ApplyNearbyCorpseExposure(elapsed);
             ApplyNearbyRespiratoryExposure(elapsed);
-            if (!wasDead && ServerIsDead) EnsureCorpseState();
+            if (!wasDead && ServerIsDead)
+            {
+                CancelPendingTreatment("Лечение прервано смертью пациента или лекаря.");
+                activeExternalHealer?.CancelPendingTreatment(
+                    "Лечение прервано: пострадавший умер.");
+                CancelVoluntaryPassingAttempt(string.Empty);
+                CancelLessonActivity("Занятие прервано смертью участника.");
+                EnsureCorpseState();
+            }
             if (serverState.Sleeping)
             {
                 serverState.Physiology.CurrentSleepSeconds += elapsed;
@@ -747,12 +805,12 @@ namespace Quieter.Survival
             {
                 serverState.CharacterName = string.IsNullOrWhiteSpace(name) ? "Чужак" : name;
             }
-            serverState.Offline = false;
             serverSteamId = steamId;
             serverState.CarriedByCharacterId = string.Empty;
             captureCompletionRaised = false;
-            serverState.Physiology.SafeOfflineSeconds = 0f;
             if (ServerIsDead) EnsureCorpseState();
+            TryRestorePendingTreatment();
+            TryRestorePendingLesson();
             ReplicateState();
             ReplicateProgression();
         }
@@ -766,6 +824,8 @@ namespace Quieter.Survival
 
             // JsonUtility supplies a simple deep copy and prevents persistence from
             // observing a later tick while the save is in flight.
+            SynchronizePendingTreatmentState();
+            SynchronizePendingLessonState();
             return JsonUtility.FromJson<CharacterSurvivalState>(
                 JsonUtility.ToJson(serverState));
         }
@@ -773,17 +833,11 @@ namespace Quieter.Survival
         public void ServerSetOffline(bool offline)
         {
             if (!IsServer || serverState == null) return;
-            serverState.Offline = offline;
-            serverState.Physiology.SafeOfflineSeconds = 0f;
-            if (offline && serverState.Physiology.LifeState <= CharacterLifeState.Confused)
-            {
-                PhysiologySimulation.BeginSleep(serverState);
-            }
-            else if (!offline && serverState.Sleeping)
-            {
-                PhysiologySimulation.EndSleep(serverState, CalculateSleepQuality(serverState));
-                serverState.Physiology.CurrentSleepSeconds = 0f;
-            }
+            var changed = serverState.Offline != offline;
+            if (offline && changed) CancelLessonActivity(
+                "Занятие прервано: один из участников покинул мир.");
+            LivingWorldSimulation.ApplyOfflinePresence(
+                serverState, offline, CalculateSleepQuality(serverState));
             ReplicateState();
         }
 
@@ -802,6 +856,29 @@ namespace Quieter.Survival
             serverState.Physiology.CurrentSleepSeconds = 0f;
             serverState.Physiology.SleepCycleConsolidated = false;
             ReplicateState();
+        }
+
+        private void HandleEliminationAccident(bool bowelAccident)
+        {
+            inventory?.ServerSoilEquippedClothing(bowelAccident);
+            if (serverState.Sleeping)
+            {
+                QuieterRuntimeBootstrap.Instance?.Session?.PlacedObjects
+                    ?.TrySoilAssignedBed(
+                        transform.position, serverState.CharacterId, bowelAccident);
+                if (!serverState.Offline)
+                {
+                    serverState.Sleeping = false;
+                    serverState.Physiology.CurrentSleepSeconds = 0f;
+                    serverState.Physiology.SleepCycleConsolidated = false;
+                }
+            }
+            SetExternalMedicalFeedbackClientRpc(
+                bowelAccident
+                    ? "Кишечник не выдержал. Тело, одежда и постель могли быть загрязнены."
+                    : "Мочевой пузырь не выдержал. Одежда и постель могли промокнуть.",
+                0,
+                NetworkObjectId);
         }
 
         public void ServerSetExertion(float value)
@@ -1277,6 +1354,15 @@ namespace Quieter.Survival
             return true;
         }
 
+        public void ServerSoilHandsFromBlood(float sourceBiologicalLoad)
+        {
+            if (!IsServer || serverState?.Physiology == null) return;
+            serverState.Physiology.HandCleanliness = Mathf.Min(
+                serverState.Physiology.HandCleanliness,
+                Mathf.Lerp(0.48f, 0.18f, Mathf.Clamp01(sourceBiologicalLoad)));
+            ReplicateState();
+        }
+
         public WoundState ServerApplyDamage(
             BodyRegion region,
             DamageKind damageKind,
@@ -1287,6 +1373,8 @@ namespace Quieter.Survival
             if (!IsServer || serverState == null || ServerIsDead) return null;
             CancelPendingTreatment("Лечение прервано новой травмой.");
             activeExternalHealer?.CancelPendingTreatment("Лечение прервано: пострадавший получил новую травму.");
+            CancelVoluntaryPassingAttempt("Сосредоточение сорвано новой травмой.");
+            CancelLessonActivity("Занятие прервано новой травмой.");
             var wound = PhysiologySimulation.AddInjury(
                 serverState,
                 region,
@@ -1334,7 +1422,7 @@ namespace Quieter.Survival
                 && serverState.ControlKind == CharacterControlKind.Player
                 && !serverState.Sleeping
                 && !serverState.Bound
-                && !pendingTreatmentActive
+                && !HasBlockingActivity
                 && serverState.Physiology.LifeState <= CharacterLifeState.Confused;
 
         public bool CanPerformAutonomousServerAction()
@@ -1346,7 +1434,7 @@ namespace Quieter.Survival
                     or CharacterControlKind.ForcedNpc
                 && !serverState.Sleeping
                 && !serverState.Bound
-                && !pendingTreatmentActive
+                && !HasBlockingActivity
                 && serverState.Physiology.LifeState <= CharacterLifeState.Confused;
 
         public void RequestTreatment(uint woundId, MedicalActionType action)
@@ -1392,6 +1480,13 @@ namespace Quieter.Survival
                 ToggleCarryServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
         }
 
+        private void RequestTurnBody()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                TurnBodyServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
         private void RequestBeginCapture()
         {
             if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
@@ -1402,6 +1497,13 @@ namespace Quieter.Survival
         {
             if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
                 OfferContractServerRpc(new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
+        }
+
+        private void RequestIntimidate()
+        {
+            if (IsOwner && focusedMedicalTarget != null && focusedMedicalTarget.IsSpawned)
+                IntimidateNpcServerRpc(
+                    new NetworkObjectReference(focusedMedicalTarget.NetworkObject));
         }
 
         private void RequestRegisterHeir()
@@ -1462,6 +1564,16 @@ namespace Quieter.Survival
                     0, target.NetworkObjectId);
                 return;
             }
+            var relationship = FindOrCreateRelationship(
+                target.serverState, target.serverState.CharacterId, serverState.CharacterId);
+            var nowUtcTicks = DateTime.UtcNow.Ticks;
+            if (relationship.NextSocialAttemptUtcTicks > nowUtcTicks)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Собеседнику нужно время обдумать сказанное.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
             if (inventory == null || !inventory.HasServerItem(26)
                 && !inventory.HasServerItem(25))
             {
@@ -1487,11 +1599,24 @@ namespace Quieter.Survival
                     "Паёк исчез до заключения договора.", 0, target.NetworkObjectId);
                 return;
             }
-            var relationship = FindOrCreateRelationship(
-                target.serverState, target.serverState.CharacterId, serverState.CharacterId);
-            var persuasion = CharacterProgression.GetSkillLevel(
-                serverState.Progression, SkillId.Persuasion);
-            relationship.Trust = Mathf.Clamp01(relationship.Trust + 0.28f + persuasion * 0.015f);
+            var accepted = LivingWorldSimulation.AdvancePersuasion(
+                serverState, target.serverState, relationship, nowUtcTicks, out _);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression, SkillId.Persuasion,
+                30f, 0.38f, accepted ? 1f : 0.55f,
+                Mathf.Clamp01(relationship.PersuasionAttempts / 12f),
+                TraitCatalog.Resolve(serverState.Traits));
+            target.ReplicateState();
+            ReplicateProgression();
+            if (!accepted)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    relationship.Trust < 0.35f
+                        ? "Человек выслушал предложение, но пока не доверяет вам. Паёк принят."
+                        : "Предложение уже воспринимают всерьёз, но решение ещё не принято.",
+                    0, target.NetworkObjectId);
+                return;
+            }
             relationship.Loyalty = Mathf.Clamp01(relationship.Loyalty + 0.12f);
             relationship.VoluntaryLoyalty = true;
             target.serverState.ControlKind = CharacterControlKind.ContractedNpc;
@@ -1525,15 +1650,63 @@ namespace Quieter.Survival
                 target.serverState.CharacterId, gameDay);
             target.serverState.Npc.PersonalRequestPending = true;
             target.serverState.Npc.PersonalRequestGameDay = gameDay;
-            CharacterProgression.RegisterPractice(
-                serverState.Progression, SkillId.Persuasion,
-                30f, 0.38f, 1f, 0f, TraitCatalog.Resolve(serverState.Traits));
             target.ReplicateState();
             ReplicateProgression();
             SetExternalMedicalFeedbackClientRpc(
                 $"Договор принят, кровать закреплена. Первый личный запрос: "
                 + $"{PersonalRequestName(target.serverState.Npc.PersonalRequest)}.",
                 0, target.NetworkObjectId);
+        }
+
+        [ServerRpc]
+        private void IntimidateNpcServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction()
+                || !TryResolveNearbyTarget(targetReference, out var target)
+                || target.serverState.ControlKind != CharacterControlKind.FreeNpc
+                || target.serverState.Npc == null || target.ServerIsDead)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Запугивание сейчас невозможно.", 0, 0);
+                return;
+            }
+            var relationship = FindOrCreateRelationship(
+                target.serverState, target.serverState.CharacterId, serverState.CharacterId);
+            var nowUtcTicks = DateTime.UtcNow.Ticks;
+            if (relationship.NextSocialAttemptUtcTicks > nowUtcTicks)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Цель ещё реагирует на предыдущую угрозу.", 0,
+                    target.NetworkObjectId);
+                return;
+            }
+            var surrendered = LivingWorldSimulation.AdvanceIntimidation(
+                serverState, target.serverState, relationship, nowUtcTicks, out _);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression, SkillId.Intimidation,
+                20f, target.serverState.Npc.Disposition == NpcDisposition.Aggressive
+                    ? 0.62f : 0.34f,
+                surrendered ? 1f : 0.35f,
+                Mathf.Clamp01(relationship.IntimidationAttempts / 10f),
+                TraitCatalog.Resolve(serverState.Traits));
+            if (surrendered)
+            {
+                target.serverState.Npc.Disposition = NpcDisposition.Passive;
+                target.serverState.Npc.Activity = NpcActivityKind.Idle;
+                SetExternalMedicalFeedbackClientRpc(
+                    "Человек отступил и сдался. Это страх, а не добровольная лояльность.",
+                    0, target.NetworkObjectId);
+            }
+            else
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    target.serverState.Npc.Disposition == NpcDisposition.Aggressive
+                        ? "Угроза не сломила противника. Он остаётся опасен."
+                        : "Человек испугался, но не подчинился.",
+                    0, target.NetworkObjectId);
+            }
+            target.ReplicateState();
+            ReplicateProgression();
         }
 
         [ServerRpc]
@@ -1624,8 +1797,13 @@ namespace Quieter.Survival
             npc.PersonalRequestPending = false;
             npc.LastPersonalRequestCompletedGameDay = CurrentGameDay();
             target.ReplicateState();
+            var compassRewarded = relationship.PersonalRequestsCompleted >= 3
+                && target.inventory != null && inventory != null
+                && target.inventory.TryTransferAnyItemServer(inventory, 41);
             SetExternalMedicalFeedbackClientRpc(
-                $"Личный запрос исполнен ({relationship.PersonalRequestsCompleted}/3 для наследования).",
+                compassRewarded
+                    ? "Личный запрос исполнен. В знак доверия вам передан редкий компас."
+                    : $"Личный запрос исполнен ({relationship.PersonalRequestsCompleted}/3 для наследования).",
                 0, target.NetworkObjectId);
         }
 
@@ -1687,6 +1865,15 @@ namespace Quieter.Survival
             NpcPersonalRequestKind.Medicine => "лекарственные травы или чистая ткань",
             NpcPersonalRequestKind.Tool => "личный рабочий инструмент",
             _ => "помощь",
+        };
+
+        private static string BodyPostureName(BodyPosture posture) => posture switch
+        {
+            BodyPosture.FaceUp => "на спине",
+            BodyPosture.RightSide => "на правом боку",
+            BodyPosture.FaceDown => "на животе",
+            BodyPosture.LeftSide => "на левом боку",
+            _ => "неясно",
         };
 
         [ServerRpc]
@@ -1769,14 +1956,278 @@ namespace Quieter.Survival
                         contract.PaymentQuantity = 2;
                     }
                     break;
+                case WorkerContractAction.BeginLesson:
+                    BeginLessonActivity(target, ObservableWorkSkill(npc.WorkbookSelectedJob));
+                    return;
                 default:
                     return;
             }
+            RegisterLeadershipInstruction(target, action);
             target.ReplicateState();
             SetExternalMedicalFeedbackClientRpc(
                 $"Рабочая книга обновлена: {WorkerJobName(npc.WorkbookSelectedJob)}, "
                 + $"приоритет {LivingWorldSimulation.GetJobPriority(contract, npc.WorkbookSelectedJob)}.",
                 0, target.NetworkObjectId);
+        }
+
+        private void RegisterLeadershipInstruction(
+            PlayerSurvival target,
+            WorkerContractAction action)
+        {
+            var npc = target?.serverState?.Npc;
+            if (npc == null) return;
+            var now = DateTime.UtcNow.Ticks;
+            var elapsed = npc.LastLeadershipPracticeUtcTicks <= 0
+                ? double.MaxValue
+                : TimeSpan.FromTicks(Math.Max(
+                    0, now - npc.LastLeadershipPracticeUtcTicks)).TotalSeconds;
+            if (elapsed < 15d) return;
+
+            var sameInstruction = npc.LastLeadershipAction == (byte)action;
+            npc.LastLeadershipAction = (byte)action;
+            npc.LastLeadershipPracticeUtcTicks = now;
+            npc.LeadershipInstructions++;
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.Leadership,
+                10f,
+                Mathf.Clamp01(0.32f
+                    + target.serverState.WorkerContract.ConsecutiveBreaches * 0.06f),
+                target.serverState.WorkerContract.Voluntary ? 1f : 0.55f,
+                Mathf.Clamp01(npc.LeadershipInstructions / 24f
+                    + (sameInstruction ? 0.45f : 0f)),
+                TraitCatalog.Resolve(serverState.Traits));
+            ReplicateProgression();
+        }
+
+        private void BeginLessonActivity(PlayerSurvival student, SkillId skill)
+        {
+            if (student == null || student.serverState == null
+                || student.ServerIsDead || student == this
+                || !student.CanPerformAutonomousServerAction()
+                || serverState.LessonActivity?.Active == true
+                || student.serverState.LessonActivity?.Active == true)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Занятие сейчас невозможно: оба участника должны быть свободны и способны действовать.",
+                    0, student?.NetworkObjectId ?? 0);
+                return;
+            }
+
+            serverState.LessonActivity ??= new PersistentLessonActivityState();
+            student.serverState.LessonActivity ??= new PersistentLessonActivityState();
+            SetLessonState(
+                serverState.LessonActivity, true, student.serverState.CharacterId,
+                skill, LessonDurationSeconds);
+            SetLessonState(
+                student.serverState.LessonActivity, false, serverState.CharacterId,
+                skill, LessonDurationSeconds);
+            lessonCounterpart = student;
+            student.lessonCounterpart = this;
+            lessonCompletesAt = ServerClock + LessonDurationSeconds;
+            student.serverState.Npc.Activity = NpcActivityKind.Idle;
+            student.networkPlayer?.ServerClearAutonomousInput();
+            SetTreatmentMessage(
+                $"Вы проводите практическое занятие: {SkillNameForMessage(skill)}…");
+            student.ReplicateState();
+            ReplicateState();
+            SetExternalMedicalFeedbackClientRpc(
+                $"Начато двухминутное практическое занятие: {SkillNameForMessage(skill)}. "
+                + "Оба участника должны оставаться рядом.",
+                0, student.NetworkObjectId);
+        }
+
+        private static void SetLessonState(
+            PersistentLessonActivityState activity,
+            bool instructor,
+            string counterpartCharacterId,
+            SkillId skill,
+            float remainingSeconds)
+        {
+            activity.Active = true;
+            activity.Instructor = instructor;
+            activity.CounterpartCharacterId = counterpartCharacterId ?? string.Empty;
+            activity.Skill = skill;
+            activity.RemainingSeconds = Mathf.Max(0f, remainingSeconds);
+        }
+
+        private static string SkillNameForMessage(SkillId skill) => skill switch
+        {
+            SkillId.Mining => "добыча",
+            SkillId.Woodcutting => "рубка",
+            SkillId.Foraging => "собирательство",
+            SkillId.LoadCarrying => "перенос грузов",
+            SkillId.Construction => "строительство",
+            SkillId.Cooking => "готовка",
+            SkillId.Sanitation => "санитария",
+            SkillId.Nursing => "уход за больными",
+            _ => "практический навык",
+        };
+
+        private void TryRestorePendingLesson()
+        {
+            var activity = serverState?.LessonActivity;
+            if (activity?.Active != true || lessonCounterpart != null
+                || string.IsNullOrWhiteSpace(activity.CounterpartCharacterId))
+                return;
+            PlayerSurvival counterpart = null;
+            foreach (var candidate in FindObjectsByType<PlayerSurvival>())
+            {
+                if (candidate == null || candidate == this
+                    || candidate.serverState?.CharacterId
+                        != activity.CounterpartCharacterId) continue;
+                counterpart = candidate;
+                break;
+            }
+            if (counterpart == null) return;
+
+            lessonCounterpart = counterpart;
+            counterpart.lessonCounterpart = this;
+            if (activity.Instructor)
+            {
+                counterpart.serverState.LessonActivity ??=
+                    new PersistentLessonActivityState();
+                var reciprocal = counterpart.serverState.LessonActivity;
+                if (!reciprocal.Active || reciprocal.Instructor
+                    || reciprocal.CounterpartCharacterId != serverState.CharacterId)
+                {
+                    SetLessonState(
+                        reciprocal, false, serverState.CharacterId,
+                        activity.Skill, activity.RemainingSeconds);
+                }
+                lessonCompletesAt = ServerClock
+                    + Mathf.Max(0.1f, activity.RemainingSeconds);
+                counterpart.ReplicateState();
+            }
+            else
+            {
+                var instructorActivity = counterpart.serverState?.LessonActivity;
+                if (instructorActivity?.Active == true
+                    && instructorActivity.Instructor
+                    && instructorActivity.CounterpartCharacterId == serverState.CharacterId)
+                {
+                    counterpart.lessonCompletesAt = counterpart.ServerClock
+                        + Mathf.Max(0.1f, instructorActivity.RemainingSeconds);
+                }
+            }
+        }
+
+        private void SynchronizePendingLessonState()
+        {
+            var activity = serverState?.LessonActivity;
+            if (activity?.Active != true || !activity.Instructor
+                || lessonCounterpart == null) return;
+            var remaining = Mathf.Max(
+                0f, (float)(lessonCompletesAt - ServerClock));
+            activity.RemainingSeconds = remaining;
+            if (lessonCounterpart.serverState?.LessonActivity?.Active == true)
+                lessonCounterpart.serverState.LessonActivity.RemainingSeconds = remaining;
+        }
+
+        private void TickLesson()
+        {
+            var activity = serverState?.LessonActivity;
+            if (activity?.Active != true || !activity.Instructor) return;
+            var student = lessonCounterpart;
+            var studentActivity = student?.serverState?.LessonActivity;
+            var invalid = student == null || !student.IsSpawned || student.ServerIsDead
+                || studentActivity?.Active != true || studentActivity.Instructor
+                || studentActivity.CounterpartCharacterId != serverState.CharacterId
+                || studentActivity.Skill != activity.Skill
+                || Vector3.Distance(transform.position, student.transform.position) > 3.75f
+                || serverState.Sleeping || serverState.Offline || serverState.Bound
+                || student.serverState.Sleeping || student.serverState.Offline
+                || student.serverState.Bound
+                || serverState.Physiology.LifeState > CharacterLifeState.Confused
+                || student.serverState.Physiology.LifeState > CharacterLifeState.Confused;
+            if (invalid)
+            {
+                CancelLessonActivity(
+                    "Занятие прервано: участники больше не могут продолжать рядом.");
+                return;
+            }
+            if (ServerClock < lessonCompletesAt) return;
+            CompleteLessonActivity(student, activity.Skill);
+        }
+
+        private void CompleteLessonActivity(PlayerSurvival student, SkillId skill)
+        {
+            var studentState = student.serverState;
+            studentState.Npc.EnsureInitialized();
+            var teachingLevel = CharacterProgression.GetSkillLevel(
+                serverState.Progression, SkillId.Teaching);
+            var instructorLevel = CharacterProgression.GetSkillLevel(
+                serverState.Progression, skill);
+            var studentLevel = CharacterProgression.GetSkillLevel(
+                studentState.Progression, skill);
+            var lessonCount = studentState.Npc.LessonsReceived[(int)skill];
+            var voluntary = studentState.WorkerContract?.Voluntary == true;
+            var quality = LivingWorldSimulation.CalculateLessonQuality(
+                teachingLevel, instructorLevel, studentLevel, voluntary);
+            var challenge = LivingWorldSimulation.CalculateLessonChallenge(
+                instructorLevel, studentLevel);
+            var repetition = Mathf.Clamp01(lessonCount / 10f);
+
+            student.ServerRegisterPractice(
+                skill, LessonDurationSeconds, challenge, quality, repetition);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.Teaching,
+                LessonDurationSeconds,
+                Mathf.Clamp01(0.38f + studentLevel * 0.045f),
+                quality,
+                Mathf.Clamp01(serverState.LessonActivity.CompletedLessons / 20f),
+                TraitCatalog.Resolve(serverState.Traits));
+            studentState.Npc.LessonsReceived[(int)skill]++;
+            serverState.LessonActivity.CompletedLessons++;
+            studentState.LessonActivity.CompletedLessons++;
+
+            ClearLessonState(serverState.LessonActivity);
+            ClearLessonState(studentState.LessonActivity);
+            lessonCounterpart = null;
+            student.lessonCounterpart = null;
+            SetTreatmentMessage(
+                $"Практическое занятие завершено: {SkillNameForMessage(skill)}.");
+            student.SetTreatmentMessage("Практическое занятие завершено.");
+            ReplicateProgression();
+            student.ReplicateProgression();
+            ReplicateState();
+            student.ReplicateState();
+            SetExternalMedicalFeedbackClientRpc(
+                quality >= 0.65f
+                    ? "Ученик хорошо усвоил практическое занятие. Часть опыта закрепится после сна."
+                    : "Занятие завершено, но нехватка опыта учителя или мотивации ограничила результат.",
+                0, student.NetworkObjectId);
+        }
+
+        private void CancelLessonActivity(string message)
+        {
+            var activity = serverState?.LessonActivity;
+            if (activity?.Active != true) return;
+            var counterpart = lessonCounterpart;
+            ClearLessonState(activity);
+            lessonCounterpart = null;
+            if (counterpart?.serverState?.LessonActivity?.Active == true
+                && counterpart.serverState.LessonActivity.CounterpartCharacterId
+                    == serverState.CharacterId)
+            {
+                ClearLessonState(counterpart.serverState.LessonActivity);
+                counterpart.lessonCounterpart = null;
+                if (!string.IsNullOrWhiteSpace(message))
+                    counterpart.SetTreatmentMessage(message);
+                counterpart.ReplicateState();
+            }
+            if (!string.IsNullOrWhiteSpace(message)) SetTreatmentMessage(message);
+            ReplicateState();
+        }
+
+        private static void ClearLessonState(PersistentLessonActivityState activity)
+        {
+            if (activity == null) return;
+            activity.Active = false;
+            activity.Instructor = false;
+            activity.CounterpartCharacterId = string.Empty;
+            activity.RemainingSeconds = 0f;
         }
 
         private bool TryResolveNearbyTarget(
@@ -1861,6 +2312,7 @@ namespace Quieter.Survival
                     return;
                 }
                 target.serverState.Bound = false;
+                target.serverState.Restraint = new RestraintState();
                 target.CancelCaptureState();
                 target.serverState.CaptorCharacterId = string.Empty;
                 target.ReplicateState();
@@ -1883,6 +2335,15 @@ namespace Quieter.Survival
                 return;
             }
             target.serverState.Bound = true;
+            var binderStrength = serverState.Progression.Attributes[
+                (int)CharacterAttributeId.Strength] / 100f;
+            var binderFineMotor = serverState.Progression.Attributes[
+                (int)CharacterAttributeId.FineMotorControl] / 100f;
+            target.serverState.Restraint = new RestraintState
+            {
+                Integrity = Mathf.Clamp01(
+                    0.72f + binderStrength * 0.16f + binderFineMotor * 0.12f),
+            };
             target.serverState.CaptorCharacterId = actorId;
             target.CancelCaptureState();
             target.ServerWakeFromDanger();
@@ -2028,6 +2489,47 @@ namespace Quieter.Survival
                 ? parsed.ToUniversalTime().Ticks : 0;
 
         [ServerRpc]
+        private void TurnBodyServerRpc(NetworkObjectReference targetReference)
+        {
+            if (!CanPerformServerAction()
+                || !targetReference.TryGet(out var targetObject)
+                || targetObject == NetworkObject
+                || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
+                || target.serverState == null || target.serverCarrier != null
+                || Vector3.Distance(transform.position, target.transform.position) > 3.75f
+                || !HasInteractionLine(target)) return;
+            var canBeTurned = target.ServerIsDead || target.serverState.Sleeping
+                || target.serverState.Bound
+                || target.serverState.Physiology.LifeState
+                    >= CharacterLifeState.Unconscious;
+            if (!canBeTurned)
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Изменить положение можно у спящего, связанного или потерявшего сознание человека.",
+                    0, target.NetworkObjectId);
+                return;
+            }
+
+            target.serverState.BodyPosture = (BodyPosture)(
+                ((int)target.serverState.BodyPosture + 1)
+                % Enum.GetValues(typeof(BodyPosture)).Length);
+            target.ServerWakeFromDanger();
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.Nursing,
+                4f,
+                0.18f,
+                1f,
+                0f,
+                TraitCatalog.Resolve(serverState.Traits));
+            target.ReplicateState();
+            ReplicateProgression();
+            SetExternalMedicalFeedbackClientRpc(
+                $"Положение тела изменено: {BodyPostureName(target.serverState.BodyPosture)}.",
+                0, target.NetworkObjectId);
+        }
+
+        [ServerRpc]
         private void ToggleCarryServerRpc(NetworkObjectReference targetReference)
         {
             if (!CanPerformServerAction()) return;
@@ -2121,10 +2623,12 @@ namespace Quieter.Survival
         private void BeginExternalTreatmentServerRpc(
             NetworkObjectReference targetReference, uint woundId, MedicalActionType action)
         {
-            if (!CanPerformServerAction() || pendingTreatmentActive
+            if (!CanPerformServerAction() || HasPendingTreatment
                 || !targetReference.TryGet(out var targetObject) || targetObject == NetworkObject
                 || !targetObject.TryGetComponent<PlayerSurvival>(out var target)
                 || target.serverState == null || target.ServerIsDead
+                || (target.activeExternalHealer != null
+                    && target.activeExternalHealer != this)
                 || Vector3.Distance(transform.position, target.transform.position) > 3.75f
                 || !HasInteractionLine(target)
                 || !Enum.IsDefined(typeof(MedicalActionType), action))
@@ -2152,6 +2656,15 @@ namespace Quieter.Survival
                     "Явных травм, требующих обработки, не обнаружено.", 0, target.NetworkObjectId);
                 return;
             }
+            if (wound != null && action != MedicalActionType.Inspect
+                && !LivingWorldSimulation.IsBodyRegionAccessible(
+                    target.serverState.BodyPosture, wound.Region))
+            {
+                SetExternalMedicalFeedbackClientRpc(
+                    "Область закрыта положением тела. Shift+F9 — осторожно повернуть пострадавшего.",
+                    wound.WoundId, target.NetworkObjectId);
+                return;
+            }
             var context = BuildTreatmentContext(action);
             var missing = MissingTreatmentMaterial(action, context);
             if (!string.IsNullOrEmpty(missing))
@@ -2160,20 +2673,11 @@ namespace Quieter.Survival
                     missing, wound?.WoundId ?? 0, target.NetworkObjectId);
                 return;
             }
-            pendingTreatmentActive = true;
-            pendingTreatmentTarget = null;
-            pendingTreatmentTarget = target;
-            target.activeExternalHealer = this;
-            pendingTreatmentWoundId = wound?.WoundId ?? 0;
-            pendingTreatmentAction = action;
-            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
-            treatmentActivity.Value = new TreatmentActivityState
-            {
-                Active = true, WoundId = wound?.WoundId ?? 0, Action = action,
-                CompletesAtServerTime = pendingTreatmentCompletesAt,
-                Message = new FixedString512Bytes("Помощь другому человеку…"),
-                Revision = ++treatmentRevision,
-            };
+            BeginPersistentTreatment(
+                target,
+                wound?.WoundId ?? 0,
+                action,
+                "Помощь другому человеку…");
             ReplicateState();
         }
 
@@ -2271,6 +2775,11 @@ namespace Quieter.Survival
             if (IsOwner) ToggleSleepServerRpc();
         }
 
+        public void RequestReadWeather()
+        {
+            if (IsOwner) ReadWeatherServerRpc();
+        }
+
         public void RequestNewStranger()
         {
             if (IsOwner) NewStrangerServerRpc();
@@ -2314,26 +2823,14 @@ namespace Quieter.Survival
                 return;
             }
 
-            pendingTreatmentActive = true;
-            pendingTreatmentWoundId = woundId;
-            pendingTreatmentAction = action;
-            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
-            treatmentActivity.Value = new TreatmentActivityState
-            {
-                Active = true,
-                WoundId = woundId,
-                Action = action,
-                CompletesAtServerTime = pendingTreatmentCompletesAt,
-                Message = new FixedString512Bytes("Действие выполняется…"),
-                Revision = ++treatmentRevision,
-            };
+            BeginPersistentTreatment(null, woundId, action, "Действие выполняется…");
             ReplicateState();
         }
 
         [ServerRpc]
         private void BeginDentalExtractionServerRpc()
         {
-            if (!CanPerformServerAction() || pendingTreatmentActive)
+            if (!CanPerformServerAction() || HasPendingTreatment)
             {
                 SetTreatmentMessage("Сейчас удалить зуб невозможно.");
                 return;
@@ -2352,26 +2849,14 @@ namespace Quieter.Survival
                 SetTreatmentMessage(missing);
                 return;
             }
-            pendingTreatmentActive = true;
-            pendingTreatmentWoundId = 0;
-            pendingTreatmentAction = action;
-            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
-            treatmentActivity.Value = new TreatmentActivityState
-            {
-                Active = true,
-                WoundId = 0,
-                Action = action,
-                CompletesAtServerTime = pendingTreatmentCompletesAt,
-                Message = new FixedString512Bytes("Готовите зуб к удалению…"),
-                Revision = ++treatmentRevision,
-            };
+            BeginPersistentTreatment(null, 0, action, "Готовите зуб к удалению…");
             ReplicateState();
         }
 
         [ServerRpc]
         private void BeginSupportiveTreatmentServerRpc(MedicalActionType action)
         {
-            if (!CanPerformServerAction() || pendingTreatmentActive
+            if (!CanPerformServerAction() || HasPendingTreatment
                 || !IsSupportiveMedicalAction(action))
             {
                 SetTreatmentMessage("Сейчас этот уход невозможен.");
@@ -2384,19 +2869,7 @@ namespace Quieter.Survival
                 SetTreatmentMessage(missing);
                 return;
             }
-            pendingTreatmentActive = true;
-            pendingTreatmentWoundId = 0;
-            pendingTreatmentAction = action;
-            pendingTreatmentCompletesAt = ServerClock + TreatmentDurationSeconds(action);
-            treatmentActivity.Value = new TreatmentActivityState
-            {
-                Active = true,
-                WoundId = 0,
-                Action = action,
-                CompletesAtServerTime = pendingTreatmentCompletesAt,
-                Message = new FixedString512Bytes("Подготовка общего ухода…"),
-                Revision = ++treatmentRevision,
-            };
+            BeginPersistentTreatment(null, 0, action, "Подготовка общего ухода…");
             ReplicateState();
         }
 
@@ -2475,6 +2948,7 @@ namespace Quieter.Survival
             var target = pendingTreatmentTarget;
             pendingTreatmentActive = false;
             pendingTreatmentTarget = null;
+            ClearPersistentTreatmentState();
             if (target != null)
             {
                 target.activeExternalHealer = null;
@@ -2707,13 +3181,264 @@ namespace Quieter.Survival
                 or MedicalActionType.HerbalPainRelief
                 or MedicalActionType.AntiparasiticCourse;
 
+        [ServerRpc]
+        private void BeginRestraintEscapeServerRpc(ServerRpcParams rpcParams = default)
+        {
+            if (!IsServer || serverState == null
+                || rpcParams.Receive.SenderClientId != OwnerClientId
+                || !serverState.Bound || ServerIsDead
+                || serverState.Sleeping
+                || serverState.Physiology.LifeState > CharacterLifeState.Confused)
+                return;
+            serverState.Restraint ??= new RestraintState();
+            if (serverState.Restraint.EscapeAttemptRemainingSeconds > 0f)
+            {
+                SetTreatmentMessage("Вы уже пытаетесь ослабить путы.");
+                return;
+            }
+            serverState.Restraint.EscapeAttemptRemainingSeconds = 12f;
+            serverState.Physiology.Stress = Mathf.Clamp01(
+                serverState.Physiology.Stress + 0.035f);
+            SetTreatmentMessage("Вы осторожно ищете слабое место в путах…");
+            ReplicateState();
+        }
+
+        private void TickRestraintEscape(float elapsedSeconds)
+        {
+            if (!serverState.Bound || serverState.Restraint == null
+                || serverState.Restraint.EscapeAttemptRemainingSeconds <= 0f)
+                return;
+            if (serverState.Sleeping
+                || serverState.Physiology.LifeState > CharacterLifeState.Confused)
+            {
+                serverState.Restraint.EscapeAttemptRemainingSeconds = 0f;
+                SetTreatmentMessage("Попытка освободиться сорвалась: вы не можете продолжать.");
+                return;
+            }
+            serverState.Restraint.EscapeAttemptRemainingSeconds = Mathf.Max(
+                0f,
+                serverState.Restraint.EscapeAttemptRemainingSeconds - elapsedSeconds);
+            exertion = Mathf.Max(exertion, 0.42f);
+            if (serverState.Restraint.EscapeAttemptRemainingSeconds > 0f) return;
+
+            var escaped = LivingWorldSimulation.CompleteRestraintEscapeAttempt(
+                serverState, out var gained);
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.RestraintEscape,
+                12f,
+                Mathf.Lerp(0.55f, 0.9f, serverState.Restraint.Integrity),
+                Mathf.Clamp01(0.45f + gained * 2.5f),
+                0f,
+                TraitCatalog.Resolve(serverState.Traits));
+            if (escaped)
+            {
+                serverState.Bound = false;
+                serverState.CaptorCharacterId = string.Empty;
+                serverState.Restraint = new RestraintState();
+                CancelCaptureState();
+                SetTreatmentMessage("Путы поддались. Вы свободны.");
+                ReplicateProgression();
+                return;
+            }
+
+            if (serverState.Restraint.CompletedEscapeAttempts % 3 == 0)
+            {
+                PhysiologySimulation.AddInjury(
+                    serverState,
+                    serverState.Restraint.CompletedEscapeAttempts % 2 == 0
+                        ? BodyRegion.LeftHand : BodyRegion.RightHand,
+                    DamageKind.Blunt,
+                    0.045f,
+                    Mathf.Clamp01(1f - serverState.Physiology.BodyCleanliness));
+            }
+            SetTreatmentMessage(serverState.Restraint.EscapeProgress < 0.35f
+                ? "Верёвка пока держит; кисти саднят. Можно попытаться снова."
+                : serverState.Restraint.EscapeProgress < 0.72f
+                    ? "В узле появился небольшой люфт. Можно попытаться снова."
+                    : "Путы заметно ослабли, но ещё держат.");
+            ReplicateProgression();
+        }
+
+        [ServerRpc]
+        private void BeginVoluntaryPassingServerRpc(ServerRpcParams rpcParams = default)
+        {
+            if (!IsServer || serverState == null
+                || rpcParams.Receive.SenderClientId != OwnerClientId
+                || ServerIsDead
+                || serverState.ControlKind != CharacterControlKind.Player
+                || (!serverState.Bound && !serverState.Captive)
+                || serverState.Sleeping || serverState.Offline
+                || serverState.Physiology.LifeState > CharacterLifeState.Confused
+                || HasPendingTreatment
+                || serverState.Restraint?.EscapeAttemptRemainingSeconds > 0f)
+                return;
+            serverState.VoluntaryPassing ??= new VoluntaryPassingState();
+            if (serverState.VoluntaryPassing.AttemptActive)
+            {
+                SetTreatmentMessage("Долгая попытка древней тишины уже продолжается.");
+                return;
+            }
+
+            serverState.VoluntaryPassing.AttemptActive = true;
+            serverState.VoluntaryPassing.AttemptRemainingSeconds =
+                PhysiologySimulation.FictionalSilenceAttemptSeconds;
+            serverState.Physiology.Stress = Mathf.Clamp01(
+                serverState.Physiology.Stress + 0.04f);
+            SetTreatmentMessage(
+                "Вы начинаете долгий вымышленный обряд древней тишины. Новая травма прервёт попытку.");
+            ReplicateState();
+        }
+
+        private void TickVoluntaryPassing(float elapsedSeconds)
+        {
+            var rite = serverState?.VoluntaryPassing;
+            if (rite?.AttemptActive != true) return;
+            if ((!serverState.Bound && !serverState.Captive)
+                || serverState.Sleeping || serverState.Offline
+                || serverState.Physiology.LifeState > CharacterLifeState.Confused)
+            {
+                CancelVoluntaryPassingAttempt(
+                    "Попытка древней тишины прервана: сосредоточение потеряно.");
+                return;
+            }
+
+            rite.AttemptRemainingSeconds = Mathf.Max(
+                0f, rite.AttemptRemainingSeconds - elapsedSeconds);
+            exertion = Mathf.Max(exertion, 0.08f);
+            if (rite.AttemptRemainingSeconds > 0f) return;
+
+            rite.AttemptActive = false;
+            var completed = PhysiologySimulation.CompleteFictionalSilenceAttempt(
+                serverState, out _);
+            if (completed)
+            {
+                SetTreatmentMessage(
+                    "Вымышленный обряд завершён. Жизненные функции необратимо угасают.");
+                ReplicateState();
+                return;
+            }
+
+            serverState.Physiology.Stress = Mathf.Clamp01(
+                serverState.Physiology.Stress + 0.12f);
+            serverState.Physiology.AcuteStamina = Mathf.Clamp01(
+                serverState.Physiology.AcuteStamina - 0.18f);
+            SetTreatmentMessage(rite.PassageProgress < 0.45f
+                ? "Паника разрушила неподвижное сосредоточение. Для освоения обряда нужны новые долгие попытки."
+                : "Обряд снова сорвался, но вымышленная техника стала понятнее.");
+            ReplicateState();
+        }
+
+        private void CancelVoluntaryPassingAttempt(string message)
+        {
+            var rite = serverState?.VoluntaryPassing;
+            if (rite?.AttemptActive != true) return;
+            rite.AttemptActive = false;
+            rite.AttemptRemainingSeconds = 0f;
+            SetTreatmentMessage(message);
+            ReplicateState();
+        }
+
+        private void BeginPersistentTreatment(
+            PlayerSurvival target,
+            uint woundId,
+            MedicalActionType action,
+            string message)
+        {
+            var duration = TreatmentDurationSeconds(action);
+            pendingTreatmentActive = true;
+            pendingTreatmentTarget = target;
+            if (target != null) target.activeExternalHealer = this;
+            pendingTreatmentWoundId = woundId;
+            pendingTreatmentAction = action;
+            pendingTreatmentCompletesAt = ServerClock + duration;
+            serverState.MedicalActivity.Active = true;
+            serverState.MedicalActivity.WoundId = woundId;
+            serverState.MedicalActivity.Action = action;
+            serverState.MedicalActivity.RemainingSeconds = duration;
+            serverState.MedicalActivity.TargetCharacterId =
+                target?.serverState?.CharacterId ?? string.Empty;
+            treatmentActivity.Value = new TreatmentActivityState
+            {
+                Active = true,
+                WoundId = woundId,
+                Action = action,
+                CompletesAtServerTime = pendingTreatmentCompletesAt,
+                Message = new FixedString512Bytes(message ?? string.Empty),
+                Revision = ++treatmentRevision,
+            };
+        }
+
+        private void TryRestorePendingTreatment()
+        {
+            if (serverState?.MedicalActivity?.Active != true || pendingTreatmentActive)
+                return;
+            var saved = serverState.MedicalActivity;
+            PlayerSurvival target = null;
+            if (!string.IsNullOrEmpty(saved.TargetCharacterId)
+                && saved.TargetCharacterId != serverState.CharacterId)
+            {
+                foreach (var candidate in FindObjectsByType<PlayerSurvival>())
+                {
+                    if (candidate == null || candidate.serverState?.CharacterId
+                        != saved.TargetCharacterId) continue;
+                    target = candidate;
+                    break;
+                }
+                // Persistent characters may be spawned in a different order. Keep
+                // the saved timer paused until its patient exists again.
+                if (target == null) return;
+                // A second restored healer must not overwrite the patient lock.
+                // Its persisted timer remains paused until the active pair finish.
+                if (target.activeExternalHealer != null
+                    && target.activeExternalHealer != this)
+                    return;
+            }
+
+            pendingTreatmentActive = true;
+            pendingTreatmentTarget = target;
+            if (target != null) target.activeExternalHealer = this;
+            pendingTreatmentWoundId = saved.WoundId;
+            pendingTreatmentAction = saved.Action;
+            pendingTreatmentCompletesAt = ServerClock
+                + Mathf.Max(0.1f, saved.RemainingSeconds);
+            treatmentActivity.Value = new TreatmentActivityState
+            {
+                Active = true,
+                WoundId = saved.WoundId,
+                Action = saved.Action,
+                CompletesAtServerTime = pendingTreatmentCompletesAt,
+                Message = new FixedString512Bytes(target == null
+                    ? "Незавершённое лечение продолжается…"
+                    : "Помощь другому человеку продолжается…"),
+                Revision = ++treatmentRevision,
+            };
+        }
+
+        private void SynchronizePendingTreatmentState()
+        {
+            if (!pendingTreatmentActive || serverState?.MedicalActivity?.Active != true)
+                return;
+            serverState.MedicalActivity.RemainingSeconds = Mathf.Max(
+                0f, (float)(pendingTreatmentCompletesAt - ServerClock));
+        }
+
+        private void ClearPersistentTreatmentState()
+        {
+            if (serverState?.MedicalActivity == null) return;
+            serverState.MedicalActivity.Active = false;
+            serverState.MedicalActivity.RemainingSeconds = 0f;
+            serverState.MedicalActivity.TargetCharacterId = string.Empty;
+        }
+
         private void CancelPendingTreatment(string message)
         {
-            if (!pendingTreatmentActive) return;
+            if (!HasPendingTreatment) return;
             pendingTreatmentActive = false;
             if (pendingTreatmentTarget != null)
                 pendingTreatmentTarget.activeExternalHealer = null;
             pendingTreatmentTarget = null;
+            ClearPersistentTreatmentState();
             SetTreatmentMessage(message);
             ReplicateState();
         }
@@ -2734,6 +3459,83 @@ namespace Quieter.Survival
         private double ServerClock => NetworkManager != null
             ? NetworkManager.ServerTime.Time
             : Time.unscaledTimeAsDouble;
+
+        [ServerRpc]
+        private void ReadWeatherServerRpc()
+        {
+            if (!CanPerformServerAction()) return;
+            var weather = FindAnyObjectByType<WorldWeatherService>();
+            if (weather == null)
+            {
+                SetTreatmentMessage("Небо не удаётся прочитать.");
+                return;
+            }
+            var skill = CharacterProgression.GetSkillLevel(
+                serverState.Progression, SkillId.WeatherReading);
+            var current = weather.Sample(transform.position, weather.Current.GameSeconds);
+            var horizonHours = skill switch
+            {
+                >= 8 => 12f,
+                >= 5 => 6f,
+                >= 2 => 2f,
+                _ => 0f,
+            };
+            var message = $"Сейчас {WeatherTemperatureName(current.TemperatureC)}, "
+                + $"{WeatherWindName(current.WindMetersPerSecond)}; "
+                + WeatherRainName(current.Precipitation) + ".";
+            if (horizonHours > 0f)
+            {
+                var forecast = weather.Sample(
+                    transform.position,
+                    current.GameSeconds + horizonHours * 3600d);
+                message += $" Примерно через {horizonHours:0} ч.: "
+                    + $"{WeatherTemperatureName(forecast.TemperatureC)}, "
+                    + $"{WeatherWindName(forecast.WindMetersPerSecond)}, "
+                    + WeatherRainName(forecast.Precipitation) + ".";
+            }
+            else
+            {
+                message += " Для прогноза пока не хватает наблюдений и опыта.";
+            }
+            CharacterProgression.RegisterPractice(
+                serverState.Progression,
+                SkillId.WeatherReading,
+                20f,
+                Mathf.Clamp01(0.2f + current.Precipitation * 0.45f
+                    + current.WindMetersPerSecond / 30f),
+                1f,
+                0.45f,
+                TraitCatalog.Resolve(serverState.Traits));
+            SetTreatmentMessage(message);
+            ReplicateProgression();
+        }
+
+        private static string WeatherTemperatureName(float temperatureC) => temperatureC switch
+        {
+            < -10f => "лютый мороз",
+            < 0f => "морозно",
+            < 8f => "холодно",
+            < 17f => "прохладно",
+            < 26f => "тепло",
+            < 34f => "жарко",
+            _ => "изнуряющая жара",
+        };
+
+        private static string WeatherWindName(float metersPerSecond) => metersPerSecond switch
+        {
+            < 1.5f => "почти штиль",
+            < 4f => "лёгкий ветер",
+            < 8f => "сильный ветер",
+            _ => "опасные порывы",
+        };
+
+        private static string WeatherRainName(float precipitation) => precipitation switch
+        {
+            < 0.12f => "осадков не видно",
+            < 0.42f => "возможна морось",
+            < 0.72f => "идёт дождь",
+            _ => "идёт сильный дождь",
+        };
 
         [ServerRpc]
         private void ToggleSleepServerRpc()
@@ -2839,6 +3641,7 @@ namespace Quieter.Survival
                 CorpseStage = serverState.Corpse?.Stage ?? CorpseDecayStage.Fresh,
                 CorpseContamination = (byte)Mathf.RoundToInt(Mathf.Clamp01(
                     serverState.Corpse?.BiologicalContamination ?? 0f) * 255f),
+                BodyPosture = serverState.BodyPosture,
             };
             if (serverState.Npc != null)
             {
@@ -2864,7 +3667,8 @@ namespace Quieter.Survival
                 DeathCause = physiology.DeathCause,
                 ThirstStage = InverseStage(physiology.Hydration),
                 HungerStage = InverseStage(Mathf.Min(physiology.StomachFullness, physiology.EnergyReserve)),
-                FatigueStage = Stage(physiology.SleepDebt),
+                FatigueStage = Stage(Mathf.Max(
+                    physiology.SleepDebt, physiology.CircadianFatigue * 0.75f)),
                 TemperatureStage = TemperatureStage(physiology.CoreTemperatureC),
                 PainStage = Stage(physiology.Pain),
                 BladderStage = Stage(physiology.BladderFill),
@@ -2885,11 +3689,16 @@ namespace Quieter.Survival
                 Bound = serverState.Bound,
                 Captive = serverState.Captive,
                 BeingCarried = serverCarrier != null,
+                VoluntaryPassingAttemptActive =
+                    serverState.VoluntaryPassing?.AttemptActive == true,
+                VoluntaryPassingStage = Stage(
+                    serverState.VoluntaryPassing?.PassageProgress ?? 0f),
+                BodyPosture = serverState.BodyPosture,
                 ControlKind = serverState.ControlKind,
                 TraitSelectionError = traitSelectionError,
                 Revision = ++replicatedRevision,
             };
-            if (serverState.CreationCompleted && !pendingTreatmentActive
+            if (serverState.CreationCompleted && !HasBlockingActivity
                 && !serverState.Bound
                 && serverState.ControlKind is CharacterControlKind.Player
                     or CharacterControlKind.FreeNpc
@@ -2972,7 +3781,7 @@ namespace Quieter.Survival
                         || wound.Type == InjuryType.Burn
                         || wound.Type == InjuryType.Laceration,
                     InternalBleedingSuspected = diagnosisLevel >= 5
-                        && wound.InternalBleeding,
+                        && wound.InternalBleedingSeverity > 0.02f,
                     SeverityStage = Stage(wound.Severity),
                     BleedingStage = Stage(wound.Bleeding),
                     ContaminationStage = diagnosisLevel >= 2
@@ -3138,7 +3947,8 @@ namespace Quieter.Survival
                 Mathf.Clamp01(0.08f + clothingInsulation),
                 environment.ExternalHeat,
                 environment.Sheltered,
-                environment.SmokeConcentration);
+                environment.SmokeConcentration,
+                environment.DayFraction);
         }
 
         private static byte Stage(float value)
@@ -3240,7 +4050,7 @@ namespace Quieter.Survival
             }
         }
 
-        private static float CalculateSleepQuality(CharacterSurvivalState character)
+        private float CalculateSleepQuality(CharacterSurvivalState character)
         {
             var p = character.Physiology;
             var disruption = p.Pain * 0.35f
@@ -3248,7 +4058,15 @@ namespace Quieter.Survival
                 + Mathf.Max(0f, p.BladderFill - 0.75f) * 0.7f
                 + Mathf.Max(0f, 36f - p.CoreTemperatureC) * 0.15f
                 + Mathf.Max(0f, 0.2f - p.EnergyReserve) * 0.6f;
-            return Mathf.Clamp01(0.7f - disruption);
+            var placedObjects = QuieterRuntimeBootstrap.Instance?.Session?.PlacedObjects;
+            if (placedObjects != null && placedObjects.TryGetAssignedBedHygiene(
+                    transform.position, character.CharacterId, out var bedHygiene))
+            {
+                disruption += (1f - bedHygiene) * 0.42f;
+            }
+            var circadianAlignment = Mathf.Lerp(
+                0.46f, 0.86f, p.CircadianFatigue);
+            return Mathf.Clamp01(circadianAlignment - disruption);
         }
     }
 }

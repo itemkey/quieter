@@ -54,9 +54,10 @@ public sealed partial class ProfileStore(ProfileDbContext database)
         var player = await database.Players
             .Include(candidate => candidate.InventorySlots)
             .Include(candidate => candidate.PendingItems)
-            .Include(candidate => candidate.DepositKnowledge)
             .Include(candidate => candidate.CurrentCharacter)
                 .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.DepositKnowledge)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken);
         var now = DateTime.UtcNow;
         if (player is null)
@@ -157,6 +158,8 @@ public sealed partial class ProfileStore(ProfileDbContext database)
         player.PositionY = request.Position.Y;
         player.PositionZ = request.Position.Z;
         ApplyInventory(player, request.Inventory);
+        await ReplaceCharacterProjectionsAsync(
+            character.CharacterId, character.SurvivalJson, cancellationToken);
         // EF commits all rows in one transaction. Revision and account binding
         // are concurrency tokens, so a conflicting save rolls the entire batch back.
         await database.SaveChangesAsync(cancellationToken);
@@ -272,6 +275,10 @@ public sealed partial class ProfileStore(ProfileDbContext database)
         player.CurrentCharacter.Revision = request.Revision;
         player.CurrentCharacter.UpdatedAtUtc = DateTime.UtcNow;
         player.LastSeenAtUtc = DateTime.UtcNow;
+        await ReplaceCharacterProjectionsAsync(
+            player.CurrentCharacter.CharacterId,
+            player.CurrentCharacter.SurvivalJson,
+            cancellationToken);
         await database.SaveChangesAsync(cancellationToken);
         return true;
     }
@@ -588,9 +595,18 @@ public sealed partial class ProfileStore(ProfileDbContext database)
         CancellationToken cancellationToken)
     {
         var steamId = ParseSteamId(steamIdText);
-        var playerExists = await database.Players.AnyAsync(
-            player => player.SteamId == steamId, cancellationToken);
-        if (!playerExists) return false;
+        if (!Guid.TryParse(request.CharacterId, out var requestedCharacterId))
+            throw new ArgumentException("Deposit knowledge character id is invalid.");
+        var characterId = await database.Players
+            .Where(player => player.SteamId == steamId)
+            .Select(player => player.CurrentCharacterId)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (!characterId.HasValue
+            || !await database.Worlds.AnyAsync(world => world.Id == worldId, cancellationToken))
+            return false;
+        if (characterId.Value != requestedCharacterId)
+            throw new DbUpdateConcurrencyException(
+                "Deposit knowledge belongs to a life the account no longer controls.");
 
         var incoming = request.Knowledge ?? [];
         if (incoming.Count > 2048)
@@ -608,16 +624,16 @@ public sealed partial class ProfileStore(ProfileDbContext database)
             throw new ArgumentException("Deposit knowledge is invalid.");
         }
 
-        var existing = await database.PlayerDepositKnowledge
-            .Where(entry => entry.SteamId == steamId && entry.WorldId == worldId)
+        var existing = await database.CharacterDepositKnowledge
+            .Where(entry => entry.CharacterId == characterId.Value && entry.WorldId == worldId)
             .ToListAsync(cancellationToken);
-        database.PlayerDepositKnowledge.RemoveRange(existing);
+        database.CharacterDepositKnowledge.RemoveRange(existing);
         var now = DateTime.UtcNow;
         foreach (var source in parsed)
         {
-            database.PlayerDepositKnowledge.Add(new PlayerDepositKnowledgeEntity
+            database.CharacterDepositKnowledge.Add(new CharacterDepositKnowledgeEntity
             {
-                SteamId = steamId,
+                CharacterId = characterId.Value,
                 WorldId = worldId,
                 InstanceId = source.InstanceId,
                 StudyBasisPoints = source.Entry.StudyBasisPoints,
@@ -681,7 +697,7 @@ public sealed partial class ProfileStore(ProfileDbContext database)
         {
             database.PlayerMapNotes.Add(new PlayerMapNoteEntity
             {
-                SteamId = steamId,
+                LastEditorSteamId = steamId,
                 WorldId = worldId,
                 MapItemInstanceId = source.MapItemInstanceId,
                 NoteId = source.NoteId,
@@ -891,7 +907,7 @@ public sealed partial class ProfileStore(ProfileDbContext database)
                 item.Equipped))
             .ToArray(),
         player.SelectedHotbarIndex,
-        player.DepositKnowledge
+        (player.CurrentCharacter?.DepositKnowledge ?? [])
             .OrderBy(entry => entry.InstanceId)
             .Select(entry => new DepositKnowledgeResponse(
                 decimal.Truncate(entry.InstanceId).ToString(

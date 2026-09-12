@@ -10,18 +10,18 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
-  m_Name: CookingPotRecipe
+  m_Name: DryFiberSheetRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
-  recipeId: 10
-  displayName: "\u0413\u043B\u0438\u043D\u044F\u043D\u044B\u0439 \u043A\u043E\u0442\u0435\u043B\u043E\u043A"
-  category: 0
+  recipeId: 36
+  displayName: "\u041B\u0438\u0441\u0442 \u0438\u0437 \u0432\u043E\u043B\u043E\u043A\u043E\u043D"
+  category: 1
   ingredients:
-  - Item: {fileID: 11400000, guid: 45847805ec117f64f82bc1bea4bc37b5, type: 2}
-    Quantity: 5
-  output: {fileID: 11400000, guid: ef5cc167335ba9047a02cef2a45269a6, type: 2}
+  - Item: {fileID: 11400000, guid: 8780553bb9814a147baa7b26d1317542, type: 2}
+    Quantity: 1
+  output: {fileID: 11400000, guid: f09fabe71f3c183408cdbb82549dd556, type: 2}
   outputQuantity: 1
-  workSeconds: 90
-  requiresBurningHearth: 1
-  practiceSkill: 15
+  workSeconds: 120
+  requiresBurningHearth: 0
+  practiceSkill: 17
   requiredWaterMilliliters: 0
   outputWetness: 0

@@ -9,9 +9,12 @@ namespace Quieter.Survival
     /// </summary>
     public static class PhysiologySimulation
     {
+        public const float MinimumConsolidatingSleepSeconds = 60f;
+        public const float FullConsolidatingSleepSeconds = 300f;
         public const float RealSecondsPerGameDay = 7200f;
         public const float MaximumStepSeconds = 1f;
         public const float ActiveSleepPhysiologyScale = 16f / 3f;
+        public const float FictionalSilenceAttemptSeconds = 90f;
 
         public static void Simulate(
             CharacterSurvivalState character,
@@ -62,9 +65,71 @@ namespace Quieter.Survival
         public static float EndSleep(CharacterSurvivalState character, float quality)
         {
             character.EnsureInitialized();
+            var durationQuality = Mathf.SmoothStep(
+                0f,
+                1f,
+                Mathf.InverseLerp(
+                    MinimumConsolidatingSleepSeconds,
+                    FullConsolidatingSleepSeconds,
+                    character.Physiology.CurrentSleepSeconds));
             character.Sleeping = false;
             character.Physiology.SleepCycleConsolidated = false;
-            return CharacterProgression.ConsolidateSleep(character.Progression, quality);
+            return CharacterProgression.ConsolidateSleep(
+                character.Progression,
+                Mathf.Clamp01(quality) * durationQuality);
+        }
+
+        /// <summary>
+        /// Resolves one completed attempt of the setting's imaginary "ancient
+        /// silence" rite. This deliberately contains no real-world mechanism:
+        /// holding one's breath is not routed here and cannot cause this state.
+        /// </summary>
+        public static bool CompleteFictionalSilenceAttempt(
+            CharacterSurvivalState character,
+            out float gainedProgress)
+        {
+            gainedProgress = 0f;
+            if (character == null) return false;
+            character.EnsureInitialized();
+            var rite = character.VoluntaryPassing;
+            var will = Mathf.Clamp01(character.Progression.Attributes[
+                (int)CharacterAttributeId.Willpower] / 100f);
+            var composure = 1f - Mathf.Clamp01(character.Physiology.Stress);
+            gainedProgress = 0.11f
+                + will * 0.08f
+                + rite.TechniqueFamiliarity * 0.06f
+                + composure * 0.03f;
+            rite.CompletedAttempts++;
+            rite.TechniqueFamiliarity = Mathf.Clamp01(
+                rite.TechniqueFamiliarity + 0.12f + will * 0.08f);
+            rite.PassageProgress = Mathf.Clamp01(
+                rite.PassageProgress + gainedProgress);
+            if (rite.PassageProgress < 1f) return false;
+
+            BeginFictionalVoluntaryPassing(character);
+            return true;
+        }
+
+        public static void BeginFictionalVoluntaryPassing(
+            CharacterSurvivalState character)
+        {
+            if (character == null) return;
+            character.EnsureInitialized();
+            var physiology = character.Physiology;
+            if (physiology.LifeState == CharacterLifeState.Dead) return;
+
+            character.VoluntaryPassing.AttemptActive = false;
+            character.VoluntaryPassing.AttemptRemainingSeconds = 0f;
+            // These are deliberately fictional, compressed organ-state changes,
+            // not a simulation or description of a reproducible real process.
+            character.Anatomy.HeartFunction = Mathf.Min(
+                character.Anatomy.HeartFunction, 0.075f);
+            character.Anatomy.BrainFunction = Mathf.Min(
+                character.Anatomy.BrainFunction, 0.3f);
+            physiology.Oxygenation = Mathf.Min(physiology.Oxygenation, 0.24f);
+            physiology.Consciousness = Mathf.Min(physiology.Consciousness, 0.12f);
+            physiology.CriticalCause = DeathCause.VoluntaryPassing;
+            physiology.LifeState = CharacterLifeState.Agonal;
         }
 
         public static void ConsumeWater(
@@ -112,31 +177,19 @@ namespace Quieter.Survival
                 1f, 0.62f, physiology.MissingTeeth / 32f);
             physiology.StomachFullness = Mathf.Clamp01(
                 physiology.StomachFullness + Mathf.Max(0f, calories) / 2600f);
-            physiology.EnergyReserve = Mathf.Clamp01(
-                physiology.EnergyReserve
-                + Mathf.Max(0f, calories) / 9000f * chewingEfficiency);
-            physiology.ProteinReserve = Mathf.Clamp01(
-                physiology.ProteinReserve
-                + Mathf.Max(0f, protein) / 450f * chewingEfficiency);
-            physiology.FatReserve = Mathf.Clamp01(
-                physiology.FatReserve
-                + Mathf.Max(0f, fat) / 650f * chewingEfficiency);
-            physiology.MicronutrientReserve = Mathf.Clamp01(
-                physiology.MicronutrientReserve + Mathf.Max(0f, micronutrients) * 0.1f);
-            physiology.MineralReserve = Mathf.Clamp01(
-                physiology.MineralReserve + Mathf.Max(0f, minerals) * 0.1f);
+            physiology.DigestingEnergy += Mathf.Max(0f, calories)
+                / 9000f * chewingEfficiency;
+            physiology.DigestingProtein += Mathf.Max(0f, protein)
+                / 450f * chewingEfficiency;
+            physiology.DigestingFat += Mathf.Max(0f, fat)
+                / 650f * chewingEfficiency;
+            physiology.DigestingMicronutrients += Mathf.Max(0f, micronutrients) * 0.1f;
+            physiology.DigestingMinerals += Mathf.Max(0f, minerals) * 0.1f;
             physiology.BowelFill = Mathf.Clamp01(
                 physiology.BowelFill + Mathf.Max(0f, calories) / 4500f);
             var biological = Mathf.Clamp01(biologicalContamination);
-            character.Conditions.FoodborneInfection = Mathf.Clamp01(
-                character.Conditions.FoodborneInfection + biological * 0.18f / digestion);
-            character.Conditions.ParasiteLoad = Mathf.Clamp01(
-                character.Conditions.ParasiteLoad + biological * 0.04f / digestion);
-            physiology.SystemicInfection = Mathf.Clamp01(
-                physiology.SystemicInfection
-                + biological * 0.008f / digestion);
-            physiology.ToxinLoad = Mathf.Clamp01(
-                physiology.ToxinLoad + Mathf.Clamp01(toxinContamination) * 0.08f);
+            physiology.DigestingBiologicalContamination += biological / digestion;
+            physiology.DigestingToxins += Mathf.Clamp01(toxinContamination);
         }
 
         public static void ConsumeHerbalInfusion(
@@ -213,6 +266,20 @@ namespace Quieter.Survival
                 bleeding = Mathf.Clamp01(bleeding * 1.5f);
             }
 
+            var vulnerableCavity = region is BodyRegion.Head or BodyRegion.Neck
+                or BodyRegion.Chest or BodyRegion.Abdomen or BodyRegion.Pelvis;
+            var internalBleeding = internalDamage || (vulnerableCavity
+                && damageKind switch
+                {
+                    DamageKind.Blunt or DamageKind.Fall => severity >= 0.56f,
+                    DamageKind.Puncture => severity >= 0.32f,
+                    DamageKind.Edged => severity >= 0.74f,
+                    _ => false,
+                });
+            var internalBleedingSeverity = internalBleeding
+                ? Mathf.Clamp01(severity * (damageKind == DamageKind.Puncture ? 0.92f : 0.72f))
+                : 0f;
+
             var wound = new WoundState
             {
                 WoundId = character.Anatomy.NextWoundId++,
@@ -222,9 +289,9 @@ namespace Quieter.Survival
                 TissueDamage = severity,
                 Contamination = Mathf.Clamp01(contamination + (type == InjuryType.OpenFracture ? 0.25f : 0f)),
                 Bleeding = bleeding,
+                InternalBleedingSeverity = internalBleedingSeverity,
                 Pain = Mathf.Clamp01(severity * 0.9f),
-                InternalBleeding = internalDamage
-                    || (damageKind == DamageKind.Blunt && severity > 0.68f),
+                InternalBleeding = internalBleeding,
             };
             // C# cannot pattern-match an extension-like category in an object
             // initializer, so fractures get their pain correction here.
@@ -472,8 +539,11 @@ namespace Quieter.Survival
                 symptoms |= SymptomFlags.Weakness;
             if (Mathf.Min(p.MicronutrientReserve, p.MineralReserve) < 0.28f)
                 symptoms |= SymptomFlags.NutritionalDeficiency;
-            if (p.SleepDebt > 0.3f) symptoms |= SymptomFlags.Fatigue;
-            if (p.SleepDebt > 0.75f) symptoms |= SymptomFlags.Microsleep;
+            if (p.SleepDebt > 0.3f || p.CircadianFatigue > 0.58f)
+                symptoms |= SymptomFlags.Fatigue;
+            if (p.SleepDebt > 0.75f
+                || p.SleepDebt > 0.52f && p.CircadianFatigue > 0.78f)
+                symptoms |= SymptomFlags.Microsleep;
             if (p.CoreTemperatureC < 36.2f) symptoms |= SymptomFlags.Cold;
             if (p.CoreTemperatureC < 35.5f) symptoms |= SymptomFlags.Shivering;
             if (p.CoreTemperatureC > 38.2f) symptoms |= SymptomFlags.Overheated;
@@ -529,6 +599,7 @@ namespace Quieter.Survival
                 p.Hydration * 1.3f,
                 Mathf.Min(p.EnergyReserve * 1.4f, p.ElectrolyteBalance * 1.25f)));
             var consciousness = Mathf.Clamp01(p.Consciousness);
+            var fatigue = Mathf.Max(p.SleepDebt, p.CircadianFatigue * 0.5f);
             var painPenalty = Mathf.Lerp(1f, 0.35f, p.Pain);
             var strength = character.Progression.Attributes[(int)CharacterAttributeId.Strength];
             var comfortableMass = 12f + strength * 0.35f;
@@ -537,16 +608,18 @@ namespace Quieter.Survival
                 ? 1f
                 : Mathf.Clamp01(1f - (loadRatio - 1f) * 0.72f);
             var movement = Mathf.Pow(legs * circulation * respiration * energy, 0.25f)
-                * consciousness * painPenalty * loadPenalty;
+                * consciousness * painPenalty * loadPenalty
+                * Mathf.Lerp(1f, 0.72f, fatigue);
             var fineMotor = RegionFunction(character.Anatomy, false, BodyRegion.LeftHand, BodyRegion.RightHand)
                 * Mathf.Lerp(1f, 0.3f, p.Pain)
-                * Mathf.Clamp01(p.Oxygenation * 1.2f);
+                * Mathf.Clamp01(p.Oxygenation * 1.2f)
+                * Mathf.Lerp(1f, 0.68f, fatigue);
 
             return new CharacterCapabilities(
                 movement,
                 Mathf.Sqrt(movement),
                 movement * legs,
-                Mathf.Clamp01(p.Hydration * respiration * (1f - p.SleepDebt * 0.6f)),
+                Mathf.Clamp01(p.Hydration * respiration * (1f - fatigue * 0.6f)),
                 fineMotor,
                 movement > 0.08f && loadRatio < 2.2f,
                 movement > 0.48f && p.AcuteStamina > 0.08f && loadRatio < 1.35f);
@@ -569,6 +642,10 @@ namespace Quieter.Survival
                     ? ActiveSleepPhysiologyScale
                     : 1f;
             var metabolicSeconds = seconds * internalScale;
+            var circadianTarget = CalculateCircadianSleepPressure(environment.DayFraction);
+            p.CircadianFatigue = Mathf.MoveTowards(
+                p.CircadianFatigue, circadianTarget, seconds / 1200f);
+            SimulateDigestion(character, metabolicSeconds, traits);
 
             var metabolism = traits.Metabolism * (1f + exertion * 1.35f);
             p.Hydration -= metabolicSeconds / (9000f / metabolism);
@@ -591,20 +668,21 @@ namespace Quieter.Survival
                 // A personal sleep lasts 5-10 real minutes. Internal metabolism is
                 // accelerated separately, but rest duration stays on real time.
                 p.SleepDebt -= seconds / (420f * traits.SleepNeed)
-                    * (1f - sleepInterruption * 0.85f);
+                    * (1f - sleepInterruption * 0.85f)
+                    * Mathf.Lerp(0.55f, 1f, p.CircadianFatigue);
                 p.AcuteStamina += seconds / 30f;
             }
             else
             {
                 p.SleepDebt += metabolicSeconds / (14400f / traits.SleepNeed)
-                    * (0.7f + exertion * 0.3f);
+                    * (0.62f + p.CircadianFatigue * 0.45f + exertion * 0.3f);
                 p.AcuteStamina += seconds / 42f * (1f - exertion * 1.5f);
                 p.AcuteStamina -= seconds / 22f * exertion;
             }
 
             SimulateTemperature(p, seconds, environment, exertion, traits);
             ApplySupportiveCare(character, seconds);
-            SimulateWounds(character, metabolicSeconds, seconds, traits);
+            SimulateWounds(character, metabolicSeconds, seconds, exertion, traits);
             SimulateRehabilitation(character, metabolicSeconds, exertion);
             SimulateDiseaseAndOrgans(character, metabolicSeconds, traits);
 
@@ -651,11 +729,15 @@ namespace Quieter.Survival
             if (p.BladderFill >= 0.999f)
             {
                 RelieveBladder(character, false);
+                unchecked { p.EliminationAccidentRevision++; }
+                p.LastEliminationAccidentWasBowel = false;
                 p.Stress = Mathf.Max(p.Stress, 0.72f);
             }
             if (p.BowelFill >= 0.999f)
             {
                 RelieveBowel(character, false);
+                unchecked { p.EliminationAccidentRevision++; }
+                p.LastEliminationAccidentWasBowel = true;
                 p.Stress = Mathf.Max(p.Stress, 0.86f);
             }
 
@@ -668,9 +750,19 @@ namespace Quieter.Survival
             p.FatReserve = ClampFinite01(p.FatReserve);
             p.MicronutrientReserve = ClampFinite01(p.MicronutrientReserve);
             p.MineralReserve = ClampFinite01(p.MineralReserve);
+            p.DigestingEnergy = ClampFiniteNonnegative(p.DigestingEnergy);
+            p.DigestingProtein = ClampFiniteNonnegative(p.DigestingProtein);
+            p.DigestingFat = ClampFiniteNonnegative(p.DigestingFat);
+            p.DigestingMicronutrients = ClampFiniteNonnegative(
+                p.DigestingMicronutrients);
+            p.DigestingMinerals = ClampFiniteNonnegative(p.DigestingMinerals);
+            p.DigestingBiologicalContamination = ClampFiniteNonnegative(
+                p.DigestingBiologicalContamination);
+            p.DigestingToxins = ClampFiniteNonnegative(p.DigestingToxins);
             p.DentalHealth = ClampFinite01(p.DentalHealth);
             p.DentalInfection = ClampFinite01(p.DentalInfection);
             p.SleepDebt = ClampFinite01(p.SleepDebt);
+            p.CircadianFatigue = ClampFinite01(p.CircadianFatigue);
             p.BladderFill = ClampFinite01(p.BladderFill);
             p.BowelFill = ClampFinite01(p.BowelFill);
             p.BloodVolume = ClampFinite01(p.BloodVolume);
@@ -695,6 +787,47 @@ namespace Quieter.Survival
                 1f - Mathf.Max(p.SystemicInfection, p.ToxinLoad),
                 sleeping);
             UpdateLifeState(character, seconds);
+        }
+
+        private static void SimulateDigestion(
+            CharacterSurvivalState character,
+            float metabolicSeconds,
+            TraitModifiers traits)
+        {
+            if (metabolicSeconds <= 0f) return;
+            var p = character.Physiology;
+            var gutFunction = Mathf.Max(0.08f, character.Anatomy.GutFunction);
+            var fraction = 1f - Mathf.Exp(
+                -metabolicSeconds * gutFunction * traits.Digestion / 900f);
+            fraction = Mathf.Clamp01(fraction);
+
+            Absorb(ref p.DigestingEnergy, ref p.EnergyReserve, fraction);
+            Absorb(ref p.DigestingProtein, ref p.ProteinReserve, fraction);
+            Absorb(ref p.DigestingFat, ref p.FatReserve, fraction);
+            Absorb(ref p.DigestingMicronutrients,
+                ref p.MicronutrientReserve, fraction);
+            Absorb(ref p.DigestingMinerals, ref p.MineralReserve, fraction);
+
+            var biologicalExposure = p.DigestingBiologicalContamination * fraction;
+            p.DigestingBiologicalContamination = Mathf.Max(
+                0f, p.DigestingBiologicalContamination - biologicalExposure);
+            character.Conditions.FoodborneInfection = Mathf.Clamp01(
+                character.Conditions.FoodborneInfection + biologicalExposure * 0.18f);
+            character.Conditions.ParasiteLoad = Mathf.Clamp01(
+                character.Conditions.ParasiteLoad + biologicalExposure * 0.04f);
+            p.SystemicInfection = Mathf.Clamp01(
+                p.SystemicInfection + biologicalExposure * 0.008f);
+
+            var toxinExposure = p.DigestingToxins * fraction;
+            p.DigestingToxins = Mathf.Max(0f, p.DigestingToxins - toxinExposure);
+            p.ToxinLoad = Mathf.Clamp01(p.ToxinLoad + toxinExposure * 0.08f);
+        }
+
+        private static void Absorb(ref float digestivePool, ref float reserve, float fraction)
+        {
+            var absorbed = Mathf.Max(0f, digestivePool) * Mathf.Clamp01(fraction);
+            digestivePool = Mathf.Max(0f, digestivePool - absorbed);
+            reserve = Mathf.Clamp01(reserve + absorbed);
         }
 
         private static void SimulateTemperature(
@@ -737,6 +870,7 @@ namespace Quieter.Survival
             CharacterSurvivalState character,
             float metabolicSeconds,
             float externalSeconds,
+            float exertion,
             TraitModifiers traits)
         {
             var p = character.Physiology;
@@ -752,6 +886,23 @@ namespace Quieter.Survival
                 wound.Bleeding = Mathf.Max(
                     0f,
                     wound.Bleeding - externalSeconds / 7200f * traits.Coagulation);
+
+                // Surface pressure, sutures and bandages control only blood that
+                // leaves through an open wound. Internal bleeding is hidden,
+                // accelerates with movement and must clot on its own; rest is the
+                // only broadly plausible treatment available in this setting.
+                var internalRate = wound.InternalBleedingSeverity
+                    * Mathf.Lerp(0.72f, 1.7f, exertion);
+                p.BloodVolume -= internalRate * externalSeconds / 1800f;
+                var internalClotting = externalSeconds / 10800f * traits.Coagulation
+                    * Mathf.Lerp(1.35f, 0.32f, exertion);
+                wound.InternalBleedingSeverity = Mathf.Max(
+                    0f, wound.InternalBleedingSeverity - internalClotting);
+                if (wound.InternalBleedingSeverity <= 0.005f)
+                {
+                    wound.InternalBleedingSeverity = 0f;
+                    wound.InternalBleeding = false;
+                }
 
                 var hygieneRisk = (1f - p.BodyCleanliness) * 0.2f
                     + (wound.Bandaged ? 0.02f : 0.1f);
@@ -773,7 +924,9 @@ namespace Quieter.Survival
                     * (1f - wound.Infection);
                 wound.TissueDamage = Mathf.Max(0f, wound.TissueDamage - recovery);
                 wound.Pain = Mathf.Max(0f, wound.Pain - recovery * 0.7f);
-                if (wound.TissueDamage <= 0.005f && wound.Infection <= 0.05f)
+                if (wound.TissueDamage <= 0.005f && wound.Infection <= 0.05f
+                    && wound.Bleeding <= 0.01f
+                    && wound.InternalBleedingSeverity <= 0.005f)
                 {
                     wound.Healed = true;
                     if (wound.Severity > 0.7f)
@@ -945,8 +1098,17 @@ namespace Quieter.Survival
             var consciousnessTarget = Mathf.Clamp01(
                 Mathf.Min(perfusion * 1.7f, organFloor * 1.35f)
                 * (1f - p.ToxinLoad * 0.55f)
-                * (1f - p.SleepDebt * 0.25f));
+                * (1f - Mathf.Max(p.SleepDebt, p.CircadianFatigue * 0.45f) * 0.25f));
             p.Consciousness = Mathf.MoveTowards(p.Consciousness, consciousnessTarget, seconds * 0.18f);
+        }
+
+        public static float CalculateCircadianSleepPressure(float dayFraction)
+        {
+            var phase = Mathf.Repeat(dayFraction - 0.125f, 1f);
+            var nightly = (0.5f + 0.5f * Mathf.Cos(phase * Mathf.PI * 2f)) * 0.9f;
+            var hour = Mathf.Repeat(dayFraction, 1f) * 24f;
+            var afternoonDip = Mathf.Clamp01(1f - Mathf.Abs(hour - 15f) / 2f) * 0.16f;
+            return Mathf.Clamp01(Mathf.Max(nightly, afternoonDip));
         }
 
         private static void ApplySupportiveCare(
@@ -1101,6 +1263,12 @@ namespace Quieter.Survival
                     heartDamage = 0.006f;
                     brainDamage = 0.004f;
                     break;
+                case DeathCause.VoluntaryPassing:
+                    // Imaginary setting rule; intentionally unrelated to any
+                    // real-world method or timing.
+                    heartDamage = 0.006f;
+                    brainDamage = 0.025f;
+                    break;
             }
             a.BrainFunction = Mathf.Max(0f, a.BrainFunction - brainDamage * seconds);
             a.HeartFunction = Mathf.Max(0f, a.HeartFunction - heartDamage * seconds);
@@ -1110,6 +1278,8 @@ namespace Quieter.Survival
         {
             var p = character.Physiology;
             var a = character.Anatomy;
+            if (p.CriticalCause == DeathCause.VoluntaryPassing)
+                return DeathCause.VoluntaryPassing;
             if (p.BloodVolume <= 0.09f) return DeathCause.BloodLoss;
             if (a.HeartFunction <= 0.08f) return DeathCause.CardiacFailure;
             if (a.BrainFunction <= 0.08f) return DeathCause.BrainFailure;
@@ -1220,11 +1390,19 @@ namespace Quieter.Survival
             if (skill < 0.2f) return "Видна травма; её глубина и опасность неясны.";
             var infection = wound.Infection > 0.3f ? " Есть признаки заражения." : string.Empty;
             var bleeding = wound.Bleeding > 0.3f ? " Кровотечение сильное." : wound.Bleeding > 0.03f ? " Рана кровит." : string.Empty;
-            return $"{wound.Type}, область: {wound.Region}.{bleeding}{infection}";
+            var internalBleeding = skill >= 0.5f && wound.InternalBleedingSeverity > 0.02f
+                ? " Болезненность и общие признаки позволяют подозревать внутреннее кровотечение; повязка его не остановит."
+                : string.Empty;
+            return $"{wound.Type}, область: {wound.Region}.{bleeding}{internalBleeding}{infection}";
         }
 
         private static float ClampFinite01(float value)
             => float.IsNaN(value) || float.IsInfinity(value) ? 0f : Mathf.Clamp01(value);
+
+        private static float ClampFiniteNonnegative(float value)
+            => float.IsNaN(value) || float.IsInfinity(value)
+                ? 0f
+                : Mathf.Clamp(value, 0f, 4f);
 
     }
 }

@@ -191,6 +191,46 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public void ShelterCoverage_RequiresDistinctSidesAndAClosedDoor()
+        {
+            var parts = new List<ShelterPartState>
+            {
+                new(SurvivalStructureRules.RoofItemId, Vector3.zero, 0f),
+                new(SurvivalStructureRules.WallItemId, new Vector3(0f, 0f, 2f), 0f),
+                new(SurvivalStructureRules.WallItemId, new Vector3(0f, 0f, -2f), 0f),
+                new(SurvivalStructureRules.WallItemId, new Vector3(2f, 0f, 0f), 90f),
+                new(SurvivalStructureRules.WallItemId, new Vector3(-2f, 0f, 0f), 90f),
+            };
+            var sealedRoom = SurvivalStructureRules.CalculateShelterCoverage(
+                Vector3.zero, parts);
+            Assert.That(sealedRoom.Enclosed, Is.True);
+            Assert.That(sealedRoom.CoveredSides, Is.EqualTo(4));
+            Assert.That(sealedRoom.WindProtection, Is.GreaterThan(0.9f));
+
+            parts[1] = new ShelterPartState(
+                SurvivalStructureRules.DoorwayItemId, new Vector3(0f, 0f, 2f), 0f);
+            var openRoom = SurvivalStructureRules.CalculateShelterCoverage(Vector3.zero, parts);
+            Assert.That(openRoom.Enclosed, Is.False);
+            Assert.That(openRoom.WindProtection, Is.LessThan(sealedRoom.WindProtection));
+            Assert.That(openRoom.SmokeRetention, Is.LessThan(sealedRoom.SmokeRetention));
+
+            parts.Add(new ShelterPartState(
+                SurvivalStructureRules.DoorItemId,
+                new Vector3(0f, 0f, 2f), 0f, true));
+            var closedRoom = SurvivalStructureRules.CalculateShelterCoverage(Vector3.zero, parts);
+            Assert.That(closedRoom.Enclosed, Is.True);
+
+            var clustered = new List<ShelterPartState>
+            {
+                parts[0], parts[2], parts[2], parts[2], parts[2],
+            };
+            var falseRoom = SurvivalStructureRules.CalculateShelterCoverage(
+                Vector3.zero, clustered);
+            Assert.That(falseRoom.Enclosed, Is.False);
+            Assert.That(falseRoom.CoveredSides, Is.EqualTo(1));
+        }
+
+        [Test]
         public void SanitationConnections_RequireNearbyNonRisingDrainOrPit()
         {
             var fixture = new Vector3(0f, 10f, 0f);

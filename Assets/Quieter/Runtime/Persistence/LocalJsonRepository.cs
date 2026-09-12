@@ -40,6 +40,7 @@ namespace Quieter.Persistence
             public List<StoredInventorySlot> InventorySlots = new();
             public List<StoredInventorySlot> PendingItems = new();
             public byte SelectedHotbarIndex;
+            // Legacy v1 field. EnsureLoaded migrates it once to the controlled character.
             public List<StoredDepositKnowledge> DepositKnowledge = new();
             public List<StoredMapNote> MapNotes = new();
             public CharacterSurvivalState Survival = new();
@@ -60,6 +61,7 @@ namespace Quieter.Persistence
             public List<StoredInventorySlot> InventorySlots = new();
             public List<StoredInventorySlot> PendingItems = new();
             public byte SelectedHotbarIndex;
+            public List<StoredDepositKnowledge> DepositKnowledge = new();
             public CharacterSurvivalState Survival = new();
         }
 
@@ -344,6 +346,7 @@ namespace Quieter.Persistence
 
         public Task SaveDepositKnowledgeAsync(
             ulong steamId,
+            string characterId,
             int worldId,
             IReadOnlyList<StoredDepositKnowledge> knowledge,
             CancellationToken cancellationToken = default)
@@ -352,13 +355,17 @@ namespace Quieter.Persistence
             {
                 EnsureLoaded();
                 var player = state.Players.Find(candidate => candidate.SteamId == steamId.ToString());
-                if (player != null)
+                var character = GetCurrentCharacter(player);
+                if (character != null)
                 {
-                    player.DepositKnowledge.RemoveAll(entry => entry == null
+                    if (character.CharacterId != characterId)
+                        throw new InvalidOperationException(
+                            "Deposit knowledge belongs to a life the account no longer controls.");
+                    character.DepositKnowledge.RemoveAll(entry => entry == null
                         || entry.WorldId == worldId);
                     var currentWorld = CloneKnowledge(knowledge);
                     foreach (var entry in currentWorld) entry.WorldId = worldId;
-                    player.DepositKnowledge.AddRange(currentWorld);
+                    character.DepositKnowledge.AddRange(currentWorld);
                     player.LastSeenAtUtc = DateTime.UtcNow.ToString("O");
                     Save();
                 }
@@ -556,7 +563,6 @@ namespace Quieter.Persistence
                 player.CurrentCharacterId = next.CharacterId;
                 player.RegisteredHeirCharacterId = string.Empty;
                 player.EstateRevision++;
-                player.DepositKnowledge.Clear();
                 SyncLegacyPlayer(player, next);
                 state.Replacements.Add(new StoredReplacement
                 {
@@ -690,6 +696,10 @@ namespace Quieter.Persistence
                     || heir.Survival.Physiology.LifeState == CharacterLifeState.Dead
                     || heir.Survival.ControlKind != CharacterControlKind.ContractedNpc)
                     throw new InvalidOperationException("The heir must be a living voluntary worker.");
+                if (state.HeirOffers.Exists(entry => entry != null
+                        && entry.HeirCharacterId == heirCharacterId))
+                    throw new InvalidOperationException(
+                        "The heir is already reserved by an irrevocable offer.");
                 var contract = heir.Survival.WorkerContract;
                 RelationshipState relationship = null;
                 foreach (var candidate in heir.Survival.Relationships)
@@ -774,7 +784,6 @@ namespace Quieter.Persistence
                 player.SelectedHotbarIndex = heir.SelectedHotbarIndex;
                 player.RegisteredHeirCharacterId = string.Empty;
                 player.EstateRevision++;
-                player.DepositKnowledge.Clear();
                 state.Inheritances.Add(new StoredInheritance
                 {
                     OperationId = operationId,
@@ -825,6 +834,13 @@ namespace Quieter.Persistence
                     : ParseDate(deceased.UpdatedAtUtc).ToUniversalTime();
                 if (DateTime.UtcNow - lostAt > TimeSpan.FromHours(2))
                     throw new InvalidOperationException("The 24 game-hour donation window has ended.");
+                var pendingReservation = state.HeirOffers.Find(entry => entry != null
+                    && entry.HeirCharacterId == donor.RegisteredHeirCharacterId
+                    && entry.Status == 0
+                    && ParseDate(entry.HardExpiresAtUtc).ToUniversalTime() > DateTime.UtcNow);
+                if (pendingReservation != null)
+                    throw new InvalidOperationException(
+                        "The heir is already reserved by another offer.");
                 var heir = state.Characters.Find(entry =>
                     entry.CharacterId == donor.RegisteredHeirCharacterId)
                     ?? throw new InvalidOperationException("The registered heir no longer exists.");
@@ -928,7 +944,6 @@ namespace Quieter.Persistence
                 player.SelectedHotbarIndex = heir.SelectedHotbarIndex;
                 player.RegisteredHeirCharacterId = string.Empty;
                 player.EstateRevision++;
-                player.DepositKnowledge.Clear();
                 offer.Status = 1;
                 offer.AcceptedAtUtc = DateTime.UtcNow.ToString("O");
                 foreach (var other in state.HeirOffers)
@@ -1017,6 +1032,7 @@ namespace Quieter.Persistence
                         InventorySlots = CloneSlots(player.InventorySlots),
                         PendingItems = CloneSlots(player.PendingItems),
                         SelectedHotbarIndex = player.SelectedHotbarIndex,
+                        DepositKnowledge = CloneKnowledge(player.DepositKnowledge),
                         Survival = CloneSurvival(player.Survival),
                     };
                     state.Characters.Add(character);
@@ -1026,10 +1042,14 @@ namespace Quieter.Persistence
                     character.ControllingSteamId = player.SteamId;
                     character.InventorySlots ??= new List<StoredInventorySlot>();
                     character.PendingItems ??= new List<StoredInventorySlot>();
+                    character.DepositKnowledge ??= new List<StoredDepositKnowledge>();
                     character.Survival ??= new CharacterSurvivalState();
                     character.Survival.EnsureInitialized();
                 }
-                foreach (var entry in player.DepositKnowledge)
+                if (character.DepositKnowledge.Count == 0 && player.DepositKnowledge.Count > 0)
+                    character.DepositKnowledge.AddRange(CloneKnowledge(player.DepositKnowledge));
+                player.DepositKnowledge.Clear();
+                foreach (var entry in character.DepositKnowledge)
                 {
                     if (entry != null && entry.WorldId == 0) entry.WorldId = defaultWorldId;
                 }
@@ -1084,8 +1104,7 @@ namespace Quieter.Persistence
                 InventorySlots = CloneSlots(character.InventorySlots),
                 PendingItems = CloneSlots(character.PendingItems),
                 SelectedHotbarIndex = character.SelectedHotbarIndex,
-                DepositKnowledge = player == null
-                    ? new List<StoredDepositKnowledge>() : CloneKnowledge(player.DepositKnowledge),
+                DepositKnowledge = CloneKnowledge(character.DepositKnowledge),
                 MapNotes = CloneMapNotes(state.MapNotes.FindAll(note => note != null
                     && carriedMapIds.Contains(note.MapItemInstanceId))),
                 Survival = CloneSurvival(character.Survival),

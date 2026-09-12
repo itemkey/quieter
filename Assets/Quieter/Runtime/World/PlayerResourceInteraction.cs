@@ -116,6 +116,7 @@ namespace Quieter.World
         private string localResearchResult = string.Empty;
         private ResearchResultTone localResearchResultTone;
         private ulong steamId;
+        private string characterId;
         private int worldId;
         private double nextMineAt;
         private double nextWaterGatherAt;
@@ -130,6 +131,9 @@ namespace Quieter.World
         private ItemStackState serverCookContents;
         private ushort serverCookedItemId;
         private double serverCookCompletesAt;
+        private ulong serverSterilizeHearthId;
+        private ItemStackState serverSterilizeItem;
+        private double serverSterilizeCompletesAt;
         private ulong serverRinseSourceId;
         private ItemStackState serverRinseItem;
         private double serverRinseCompletesAt;
@@ -141,6 +145,18 @@ namespace Quieter.World
         private uint noteRevision;
         private bool notesDirty;
         private float nextNoteMutationAt;
+        private byte serverMapWritingMode;
+        private ulong serverMapWritingMapId;
+        private ulong serverMapWritingNoteId;
+        private Vector2 serverMapWritingPosition;
+        private string serverMapWritingText = string.Empty;
+        private Vector3 serverMapWritingOrigin;
+        private double serverMapWritingCompletesAt;
+        private ulong serverCartographyTableId;
+        private ulong serverCartographyFirstMapId;
+        private ulong serverCartographySecondMapId;
+        private Vector3 serverCartographyOrigin;
+        private double serverCartographyCompletesAt;
         private GameObject placementPreview;
         private ushort placementItemId;
         private Vector3 placementPosition;
@@ -157,7 +173,9 @@ namespace Quieter.World
         public ResearchTableView FocusedTable => focusedTable;
         public SurvivalStructureView FocusedStructure => focusedStructure;
         public bool HasServerManualWork => serverBoilHearthId != 0
-            || serverCookHearthId != 0 || serverRinseSourceId != 0;
+            || serverCookHearthId != 0 || serverSterilizeHearthId != 0
+            || serverRinseSourceId != 0 || serverMapWritingMode != 0
+            || serverCartographyTableId != 0;
         public ulong CurrentResearchTableId => localOpenTableId;
         public bool IsPlacementMode => placementPreview != null;
         public bool ConsumesPrimaryAction => IsPlacementMode
@@ -302,11 +320,13 @@ namespace Quieter.World
             IEnumerable<StoredDepositKnowledge> stored,
             IEnumerable<StoredMapNote> storedNotes,
             ulong playerSteamId,
+            string playerCharacterId,
             int playerWorldId,
             IPlayerProfileRepository profileRepository)
         {
             if (!IsServer) return;
             steamId = playerSteamId;
+            characterId = playerCharacterId;
             worldId = playerWorldId;
             repository = profileRepository;
             serverKnowledge.Clear();
@@ -588,7 +608,7 @@ namespace Quieter.World
                 if (saveKnowledge)
                 {
                     await repository.SaveDepositKnowledgeAsync(
-                        steamId, worldId, snapshot, cancellationToken);
+                        steamId, characterId, worldId, snapshot, cancellationToken);
                 }
                 if (saveNotes)
                 {
@@ -624,17 +644,14 @@ namespace Quieter.World
                 SendMapNoteFeedbackClientRpc("Введите текст заметки.");
                 return;
             }
-            var noteId = CreateMapNoteId();
-            var now = DateTime.UtcNow;
-            var state = new MapNoteNetworkState(
-                mapItemInstanceId, noteId, ClampNotePosition(position), text);
-            serverMapNotes[noteId] = state;
-            noteCreatedAt[noteId] = now;
-            noteUpdatedAt[noteId] = now;
-            replicatedMapNotes.Add(state);
-            survival?.ServerRegisterPractice(
-                SkillId.Cartography, 8f, 0.2f, 1f, 0f);
-            MarkNotesDirty();
+            if (!inventory.HasServerItem(37))
+            {
+                SendMapNoteFeedbackClientRpc(
+                    "Для нанесения записи нужен древесный уголь.");
+                return;
+            }
+            BeginMapWriting(
+                1, mapItemInstanceId, 0, ClampNotePosition(position), text);
         }
 
         [ServerRpc]
@@ -656,17 +673,14 @@ namespace Quieter.World
                 SendMapNoteFeedbackClientRpc("Введите текст заметки.");
                 return;
             }
-            var state = new MapNoteNetworkState(
-                mapItemInstanceId, noteId, ClampNotePosition(position), text);
-            serverMapNotes[noteId] = state;
-            noteUpdatedAt[noteId] = DateTime.UtcNow;
-            for (var index = 0; index < replicatedMapNotes.Count; index++)
+            if (!inventory.HasServerItem(37))
             {
-                if (replicatedMapNotes[index].NoteId != noteId) continue;
-                replicatedMapNotes[index] = state;
-                break;
+                SendMapNoteFeedbackClientRpc(
+                    "Для исправления записи нужен древесный уголь.");
+                return;
             }
-            MarkNotesDirty();
+            BeginMapWriting(
+                2, mapItemInstanceId, noteId, ClampNotePosition(position), text);
         }
 
         [ServerRpc]
@@ -694,11 +708,122 @@ namespace Quieter.World
 
         private bool CanMutateMapNotes(ulong mapItemInstanceId)
         {
-            if (!IsServer || resourceWorld == null) return false;
+            if (!IsServer || resourceWorld == null || inventory == null
+                || survival?.CanPerformServerAction() != true
+                || inventory.IsCrafting || HasServerManualWork) return false;
             if (!inventory.ContainsServerItemInstance(36, mapItemInstanceId)) return false;
             if (Time.unscaledTime < nextNoteMutationAt) return false;
             nextNoteMutationAt = Time.unscaledTime + MapNoteRules.MutationCooldownSeconds;
             return true;
+        }
+
+        private void BeginMapWriting(
+            byte mode,
+            ulong mapItemInstanceId,
+            ulong noteId,
+            Vector2 position,
+            string text)
+        {
+            serverMapWritingMode = mode;
+            serverMapWritingMapId = mapItemInstanceId;
+            serverMapWritingNoteId = noteId;
+            serverMapWritingPosition = position;
+            serverMapWritingText = text ?? string.Empty;
+            serverMapWritingOrigin = transform.position;
+            serverMapWritingCompletesAt = NetworkManager.ServerTime.Time + 8d;
+            SendMapNoteFeedbackClientRpc(mode == 1
+                ? "Наносите запись углём. Не двигайтесь восемь секунд."
+                : "Исправляете запись углём. Не двигайтесь восемь секунд.");
+        }
+
+        private void UpdateServerMapWriting()
+        {
+            if (serverMapWritingMode == 0) return;
+            if (inventory == null || survival?.CanPerformServerAction() != true
+                || inventory.IsCrafting
+                || !inventory.ContainsServerItemInstance(36, serverMapWritingMapId)
+                || Vector3.Distance(transform.position, serverMapWritingOrigin) > 0.75f)
+            {
+                CancelMapWriting("Запись на карте прервана.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverMapWritingCompletesAt) return;
+            if (!inventory.TryConsumeAnyItemServer(37))
+            {
+                CancelMapWriting("Запись не завершена: древесный уголь закончился.");
+                return;
+            }
+
+            var mode = serverMapWritingMode;
+            var mapId = serverMapWritingMapId;
+            var noteId = serverMapWritingNoteId;
+            var position = serverMapWritingPosition;
+            var text = serverMapWritingText;
+            ClearMapWriting();
+            var now = DateTime.UtcNow;
+            if (mode == 1)
+            {
+                if (CountServerMapNotes(mapId) >= MapNoteRules.MaximumNotesPerMap)
+                {
+                    SendMapNoteFeedbackClientRpc(
+                        "Место на карте закончилось; потраченный уголь уже истёрся.");
+                    return;
+                }
+                noteId = CreateMapNoteId();
+                var created = new MapNoteNetworkState(mapId, noteId, position, text);
+                serverMapNotes[noteId] = created;
+                noteCreatedAt[noteId] = now;
+                noteUpdatedAt[noteId] = now;
+                replicatedMapNotes.Add(created);
+            }
+            else
+            {
+                if (!serverMapNotes.TryGetValue(noteId, out var existing)
+                    || existing.MapItemInstanceId != mapId)
+                {
+                    SendMapNoteFeedbackClientRpc(
+                        "Исходная запись исчезла; потраченный уголь уже истёрся.");
+                    return;
+                }
+                var updated = new MapNoteNetworkState(mapId, noteId, position, text);
+                serverMapNotes[noteId] = updated;
+                noteUpdatedAt[noteId] = now;
+                for (var index = 0; index < replicatedMapNotes.Count; index++)
+                {
+                    if (replicatedMapNotes[index].NoteId != noteId) continue;
+                    replicatedMapNotes[index] = updated;
+                    break;
+                }
+            }
+
+            var noteCount = CountServerMapNotes(mapId);
+            survival.ServerRegisterPractice(
+                SkillId.Cartography,
+                8f,
+                Mathf.Clamp01(0.2f + noteCount / 96f),
+                1f,
+                Mathf.Clamp01(noteCount / 64f));
+            MarkNotesDirty();
+            SendMapNoteFeedbackClientRpc(mode == 1
+                ? "Запись нанесена на физическую карту."
+                : "Запись на физической карте исправлена.");
+        }
+
+        private void CancelMapWriting(string message)
+        {
+            ClearMapWriting();
+            SendMapNoteFeedbackClientRpc(message);
+        }
+
+        private void ClearMapWriting()
+        {
+            serverMapWritingMode = 0;
+            serverMapWritingMapId = 0;
+            serverMapWritingNoteId = 0;
+            serverMapWritingPosition = Vector2.zero;
+            serverMapWritingText = string.Empty;
+            serverMapWritingOrigin = Vector3.zero;
+            serverMapWritingCompletesAt = 0d;
         }
 
         private int CountServerMapNotes(ulong mapItemInstanceId)
@@ -765,7 +890,10 @@ namespace Quieter.World
                 UpdateServerResearch();
                 UpdateServerBoiling();
                 UpdateServerCooking();
+                UpdateServerSterilizing();
                 UpdateServerRinsing();
+                UpdateServerMapWriting();
+                UpdateServerCartography();
                 if ((knowledgeDirty || notesDirty) && !saveRunning
                     && Time.unscaledTime >= nextKnowledgeSaveAt)
                 {
@@ -911,6 +1039,10 @@ namespace Quieter.World
                              active.ItemId, out var cookedItemId))
                 {
                     BeginCookingServerRpc(focusedStructure.ObjectId, cookedItemId);
+                }
+                else if (active.ItemId == 33)
+                {
+                    BeginSterilizingServerRpc(focusedStructure.ObjectId);
                 }
                 else
                 {
@@ -1414,7 +1546,10 @@ namespace Quieter.World
         {
             if (placedObjects == null || inventory == null || survival == null
                 || !survival.CanPerformServerAction()
-                || !placedObjects.CanInteract(objectId, transform, 3.5f))
+                || inventory.IsCrafting || HasServerManualWork
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetStructureView(objectId, out var table)
+                || table.ItemId != SurvivalStructureRules.CartographyTableItemId)
             {
                 SendHoldingCellFeedbackClientRpc("Картографический стол недоступен.");
                 return;
@@ -1427,29 +1562,87 @@ namespace Quieter.World
                     "Нужны карта, чистый лист и древесный уголь. Две карты будут объединены.");
                 return;
             }
-            if (!inventory.TryConsumeAnyItemServer(35)
-                || !inventory.TryConsumeAnyItemServer(37)) return;
+            serverCartographyTableId = objectId;
+            serverCartographyFirstMapId = maps[0];
+            serverCartographySecondMapId = maps.Count > 1 ? maps[1] : 0;
+            serverCartographyOrigin = transform.position;
+            serverCartographyCompletesAt = NetworkManager.ServerTime.Time + 30d;
+            SendHoldingCellFeedbackClientRpc(maps.Count > 1
+                ? "Сводите две карты на чистый лист. Работа займёт тридцать секунд."
+                : "Копируете карту на чистый лист. Работа займёт тридцать секунд.");
+        }
+
+        private void UpdateServerCartography()
+        {
+            if (serverCartographyTableId == 0) return;
+            var hasSources = inventory != null
+                && inventory.ContainsServerItemInstance(36, serverCartographyFirstMapId)
+                && (serverCartographySecondMapId == 0
+                    || inventory.ContainsServerItemInstance(36, serverCartographySecondMapId));
+            if (placedObjects == null || survival?.CanPerformServerAction() != true
+                || inventory == null || inventory.IsCrafting || !hasSources
+                || !inventory.HasServerItem(35) || !inventory.HasServerItem(37)
+                || Vector3.Distance(transform.position, serverCartographyOrigin) > 0.75f
+                || !placedObjects.CanInteract(serverCartographyTableId, transform, 3.5f)
+                || !placedObjects.TryGetStructureView(
+                    serverCartographyTableId, out var table)
+                || table.ItemId != SurvivalStructureRules.CartographyTableItemId)
+            {
+                CancelServerCartography("Картографическая работа прервана; материалы сохранены.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverCartographyCompletesAt) return;
+
+            var firstMapId = serverCartographyFirstMapId;
+            var secondMapId = serverCartographySecondMapId;
+            var consumedSheet = inventory.TryConsumeAnyItemServer(35);
+            var consumedCharcoal = consumedSheet && inventory.TryConsumeAnyItemServer(37);
+            if (!consumedSheet || !consumedCharcoal)
+            {
+                // The continuous checks make this branch possible only when two
+                // inventory mutations race in the same server frame.
+                if (consumedSheet) inventory.TryGiveServerItem(35);
+                CancelServerCartography("Материалы изменились; работа не завершена.");
+                return;
+            }
             var mapId = CreatePhysicalMapId();
             if (!inventory.TryGiveServerStack(new ItemStackState(
                     36, 1, itemInstanceId: mapId)))
             {
                 inventory.TryGiveServerItem(35);
                 inventory.TryGiveServerItem(37);
-                SendHoldingCellFeedbackClientRpc("Для новой карты нет места.");
+                CancelServerCartography("Для новой карты нет места; материалы возвращены.");
                 return;
             }
             var copied = new List<MapNoteNetworkState>();
             foreach (var note in serverMapNotes.Values)
             {
-                if (note.MapItemInstanceId == maps[0]
-                    || maps.Count > 1 && note.MapItemInstanceId == maps[1]) copied.Add(note);
+                if (note.MapItemInstanceId == firstMapId
+                    || secondMapId != 0 && note.MapItemInstanceId == secondMapId)
+                    copied.Add(note);
             }
+            ClearServerCartography();
             ServerReceiveMapDocument(mapId, copied);
             survival.ServerRegisterPractice(
-                SkillId.Cartography, 30f, maps.Count > 1 ? 0.5f : 0.3f, 1f, 0f);
-            SendHoldingCellFeedbackClientRpc(maps.Count > 1
+                SkillId.Cartography, 30f, secondMapId != 0 ? 0.5f : 0.3f, 1f, 0f);
+            SendHoldingCellFeedbackClientRpc(secondMapId != 0
                 ? "Карты объединены в новый физический документ."
                 : "Карта скопирована в новый физический документ.");
+        }
+
+        private void CancelServerCartography(string message)
+        {
+            ClearServerCartography();
+            SendHoldingCellFeedbackClientRpc(message);
+        }
+
+        private void ClearServerCartography()
+        {
+            serverCartographyTableId = 0;
+            serverCartographyFirstMapId = 0;
+            serverCartographySecondMapId = 0;
+            serverCartographyOrigin = Vector3.zero;
+            serverCartographyCompletesAt = 0d;
         }
 
         private ulong CreatePhysicalMapId()
@@ -1744,6 +1937,84 @@ namespace Quieter.World
         }
 
         [ServerRpc]
+        private void BeginSterilizingServerRpc(ulong objectId)
+        {
+            var active = inventory?.ServerActiveStack ?? default;
+            if (HasServerManualWork || inventory == null || inventory.IsCrafting
+                || survival == null || !survival.CanPerformServerAction()
+                || placedObjects == null
+                || !placedObjects.CanInteract(objectId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(objectId, out _))
+            {
+                SendHearthFeedbackClientRpc(
+                    "Для обработки инструмента нужен горящий очаг и свободные руки.");
+                return;
+            }
+            if (active.ItemId != 33)
+            {
+                SendHearthFeedbackClientRpc("Держите иглу и нить в активной руке.");
+                return;
+            }
+            if (active.Cleanliness < 6000)
+            {
+                SendHearthFeedbackClientRpc(
+                    "Сначала отмойте видимую грязь: жар не очистит покрытый ею инструмент.");
+                return;
+            }
+            if (active.BiologicalContamination == 0)
+            {
+                SendHearthFeedbackClientRpc("Игла уже не имеет признаков биологического загрязнения.");
+                return;
+            }
+            serverSterilizeHearthId = objectId;
+            serverSterilizeItem = active;
+            serverSterilizeCompletesAt = NetworkManager.ServerTime.Time + 18d;
+            SendHearthFeedbackClientRpc(
+                "Игла прогревается. Оставайтесь у очага и не убирайте её.");
+        }
+
+        private void UpdateServerSterilizing()
+        {
+            if (serverSterilizeHearthId == 0) return;
+            var active = inventory?.ServerActiveStack ?? default;
+            if (inventory == null || placedObjects == null || survival == null
+                || !survival.CanPerformServerAction() || inventory.IsCrafting
+                || !placedObjects.CanInteract(serverSterilizeHearthId, transform, 3.5f)
+                || !placedObjects.TryGetBurningHearth(
+                    serverSterilizeHearthId, out var hearthPosition)
+                || Vector3.Distance(transform.position, hearthPosition)
+                    > ResourceBalance.InteractionDistance + 0.5f
+                || !active.Equals(serverSterilizeItem))
+            {
+                CancelServerSterilizing("Обработка инструмента прервана.");
+                return;
+            }
+            if (NetworkManager.ServerTime.Time < serverSterilizeCompletesAt) return;
+            var succeeded = inventory.TryHeatSterilizeActiveItemServer(
+                serverSterilizeItem);
+            serverSterilizeHearthId = 0;
+            serverSterilizeItem = default;
+            serverSterilizeCompletesAt = 0d;
+            if (!succeeded)
+            {
+                SendHearthFeedbackClientRpc("Обработать иглу не удалось.");
+                return;
+            }
+            survival.ServerRegisterPractice(
+                SkillId.Sanitation, 18f, 0.32f, 1f, 0f);
+            SendHearthFeedbackClientRpc(
+                "Игла прогрета. Биологическое загрязнение уничтожено, но химические остатки могли сохраниться.");
+        }
+
+        private void CancelServerSterilizing(string message)
+        {
+            serverSterilizeHearthId = 0;
+            serverSterilizeItem = default;
+            serverSterilizeCompletesAt = 0d;
+            SendHearthFeedbackClientRpc(message);
+        }
+
+        [ServerRpc]
         private void OpenDepositInfoServerRpc(ulong instanceId)
         {
             if (resourceWorld == null || !resourceWorld.TryGetNode(instanceId, out var node)
@@ -1751,7 +2022,7 @@ namespace Quieter.World
             {
                 return;
             }
-            EnsureKnowledge(instanceId);
+            if (EnsureKnowledge(instanceId)) RegisterDiscoveryPractice(node);
             OpenDepositInfoClientRpc(instanceId);
         }
 
@@ -2100,6 +2371,12 @@ namespace Quieter.World
                         - ResourceBalance.ResearchMinimumBasisPoints + 1))
                 : 0;
             if (success) AddStudyProgress(sample.SourceNodeId, added);
+            survival?.ServerRegisterPractice(
+                SkillId.Geology,
+                ResourceBalance.ResearchDurationSeconds,
+                0.42f,
+                success ? 1f : 0.35f,
+                0f);
             var current = serverKnowledge.TryGetValue(sample.SourceNodeId, out var progress)
                 ? progress
                 : (ushort)0;
@@ -2355,7 +2632,8 @@ namespace Quieter.World
             {
                 return;
             }
-            if (node.Descriptor.IsResearchable) EnsureKnowledge(instanceId);
+            if (node.Descriptor.IsResearchable && EnsureKnowledge(instanceId))
+                RegisterDiscoveryPractice(node);
             var workSkill = node.Descriptor.IsTree
                 ? SkillId.Woodcutting
                 : node.Descriptor.RequiredTool == ToolKind.Shovel
@@ -2567,13 +2845,24 @@ namespace Quieter.World
             return false;
         }
 
-        private void EnsureKnowledge(ulong instanceId)
+        private bool EnsureKnowledge(ulong instanceId)
         {
-            if (serverKnowledge.ContainsKey(instanceId)) return;
+            if (serverKnowledge.ContainsKey(instanceId)) return false;
             serverKnowledge[instanceId] = 0;
             discoveredAt[instanceId] = DateTime.UtcNow;
             replicatedKnowledge.Add(new DepositKnowledgeNetworkState(instanceId, 0));
             MarkKnowledgeDirty();
+            return true;
+        }
+
+        private void RegisterDiscoveryPractice(ResourceNodeView node)
+        {
+            if (node == null || survival == null) return;
+            survival.ServerRegisterPractice(
+                SkillId.Navigation, 12f, 0.28f, 1f, 0f);
+            survival.ServerRegisterPractice(
+                SkillId.Geology, 8f,
+                Mathf.Clamp01(node.Descriptor.Hardness / 5f), 0.65f, 0f);
         }
 
         private void AddStudyProgress(ulong instanceId, int amount)

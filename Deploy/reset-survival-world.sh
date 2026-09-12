@@ -25,13 +25,21 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_path="${backup_directory}/pre-survival-reset-${timestamp}.dump"
 temporary_path="${backup_path}.partial"
 
+writers_stopped=1
+cleanup_on_failure() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    rm -f -- "${temporary_path}"
+    if [ "${writers_stopped}" -eq 1 ]; then
+        echo "Reset failed; restarting writers against the current database state..." >&2
+        docker compose up -d --wait profile-service game-server || true
+    fi
+    exit "${status}"
+}
+trap cleanup_on_failure EXIT HUP INT TERM
+
 echo "Stopping writers before the release backup..."
 docker compose stop game-server profile-service
-
-cleanup_partial() {
-    rm -f -- "${temporary_path}"
-}
-trap cleanup_partial EXIT HUP INT TERM
 
 echo "Creating PostgreSQL backup: ${backup_path}"
 docker compose exec -T postgres sh -eu -c '
@@ -48,7 +56,9 @@ fi
 docker compose exec -T postgres pg_restore --list \
     <"${temporary_path}" >/dev/null
 mv -- "${temporary_path}" "${backup_path}"
-trap - EXIT HUP INT TERM
+
+echo "Backup verified. Applying the release schema while writers are stopped..."
+docker compose run --rm profile-service --migrate
 
 echo "Backup verified. Resetting world, accounts, characters, and possessions..."
 docker compose exec -T postgres sh -eu -c '
@@ -57,10 +67,13 @@ docker compose exec -T postgres sh -eu -c '
         --dbname="$POSTGRES_DB" --username="$POSTGRES_USER"
 ' <<'SQL'
 BEGIN;
-TRUNCATE TABLE worlds, players, characters RESTART IDENTITY CASCADE;
+TRUNCATE TABLE worlds, players, characters, character_transfers, heir_offers
+    RESTART IDENTITY CASCADE;
 COMMIT;
 SQL
 
 echo "Starting profile service and game server..."
 docker compose up -d --wait profile-service game-server
+writers_stopped=0
+trap - EXIT HUP INT TERM
 echo "Survival world reset completed. Verified backup: ${backup_path}"

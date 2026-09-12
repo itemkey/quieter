@@ -514,6 +514,11 @@ namespace Quieter.Editor
                 ItemKind.Food, calories: 180f, proteinGrams: 5.2f, micronutrients: 0.1f,
                 waterLiters: 0.002f, shelfLifeGameHours: 200f, massKg: 0.055f,
                 volumeLiters: 0.075f, fatGrams: 15.4f, minerals: 0.21f);
+            var wetFiberSheet = CreateItemDefinition(
+                "WetFiberSheet", 72, "Мокрый лист из волокон",
+                "Сформованный из волокон лист. Перед письмом его нужно полностью высушить.",
+                8, PickupPlacementPriority.InventoryFirst, new Color(0.55f, 0.52f, 0.39f),
+                ItemKind.Resource, massKg: 0.16f, volumeLiters: 0.35f);
 
             const string recipePath = ResourceFolder + "/AxeRecipe.asset";
             var recipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(recipePath);
@@ -788,6 +793,24 @@ namespace Quieter.Editor
                 new CraftingRecipe.Ingredient { Item = cloth, Quantity = 2 },
                 new CraftingRecipe.Ingredient { Item = rope, Quantity = 1 },
             }, 55f, false, SkillId.CordageAndTextiles);
+            var wetSheetRecipe = CreateSurvivalRecipe("WetFiberSheetRecipe", 35,
+                wetFiberSheet, new[]
+                {
+                    new CraftingRecipe.Ingredient { Item = plantFiber, Quantity = 6 },
+                }, 30f, false, SkillId.CordageAndTextiles,
+                CraftingCategory.Materials, 500, 10000);
+            var drySheetRecipe = CreateSurvivalRecipe("DryFiberSheetRecipe", 36,
+                sheet, new[]
+                {
+                    new CraftingRecipe.Ingredient { Item = wetFiberSheet, Quantity = 1 },
+                }, 120f, false, SkillId.CordageAndTextiles, CraftingCategory.Materials);
+            var physicalMapRecipe = CreateSurvivalRecipe("PhysicalMapRecipe", 37,
+                physicalMap, new[]
+                {
+                    new CraftingRecipe.Ingredient { Item = sheet, Quantity = 2 },
+                    new CraftingRecipe.Ingredient { Item = charcoal, Quantity = 1 },
+                    new CraftingRecipe.Ingredient { Item = rope, Quantity = 1 },
+                }, 60f, false, SkillId.Cartography, CraftingCategory.Materials);
 
             var catalog = AssetDatabase.LoadAssetAtPath<ItemCatalog>(ItemCatalogPath);
             if (catalog == null)
@@ -812,7 +835,7 @@ namespace Quieter.Editor
                     floor, wall, roof, doorway, door, chest, cartographyTable, latrine,
                     washBasin, barrel, well, drain, linedPit,
                     undertunic, cloak, hood, gloves, boots, nuts,
-                    cookedRoots, cookedMushrooms, roastedNuts,
+                    cookedRoots, cookedMushrooms, roastedNuts, wetFiberSheet,
                 },
                 new[] { recipe, pickaxeRecipe, shovelRecipe, ropeRecipe, researchTableRecipe,
                     leanToRecipe, hearthRecipe, bucketRecipe, wastePitRecipe,
@@ -821,7 +844,8 @@ namespace Quieter.Editor
                     roofRecipe, doorwayRecipe, doorRecipe, chestRecipe,
                     cartographyTableRecipe, latrineRecipe, washBasinRecipe, barrelRecipe,
                     wellRecipe, drainRecipe, linedPitRecipe, undertunicRecipe, cloakRecipe,
-                    hoodRecipe, glovesRecipe, bootsRecipe });
+                    hoodRecipe, glovesRecipe, bootsRecipe, wetSheetRecipe,
+                    drySheetRecipe, physicalMapRecipe });
 
             EditorUtility.SetDirty(catalog);
         }
@@ -829,7 +853,9 @@ namespace Quieter.Editor
         private static CraftingRecipe CreateSurvivalRecipe(
             string name, ushort id, ItemDefinition output,
             CraftingRecipe.Ingredient[] ingredients, float seconds, bool needsHearth, SkillId skill,
-            CraftingCategory category = CraftingCategory.Tools)
+            CraftingCategory category = CraftingCategory.Tools,
+            ushort waterMilliliters = 0,
+            ushort outputWetness = 0)
         {
             var path = $"{ResourceFolder}/{name}.asset";
             var recipe = AssetDatabase.LoadAssetAtPath<CraftingRecipe>(path);
@@ -839,7 +865,8 @@ namespace Quieter.Editor
                 AssetDatabase.CreateAsset(recipe, path);
             }
             recipe.Configure(id, output.DisplayName, ingredients, output, 1,
-                category, seconds, needsHearth, skill);
+                category, seconds, needsHearth, skill,
+                waterMilliliters, outputWetness);
             EditorUtility.SetDirty(recipe);
             return recipe;
         }

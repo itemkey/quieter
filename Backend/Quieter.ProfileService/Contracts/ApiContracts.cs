@@ -139,7 +139,8 @@ public sealed record DepositKnowledgeResponse(
     int WorldId = 1);
 
 public sealed record DepositKnowledgeListResponse(
-    IReadOnlyList<DepositKnowledgeResponse> Knowledge);
+    IReadOnlyList<DepositKnowledgeResponse> Knowledge,
+    string CharacterId = "");
 
 public sealed record MapNoteResponse(
     string NoteId,

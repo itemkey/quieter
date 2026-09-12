@@ -19,6 +19,7 @@ public sealed partial class ProfileStore
             throw new ArgumentException("A new NPC must be alive and NPC-controlled.");
 
         var existing = await database.Characters.Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .Include(character => character.ControllingPlayer)
             .SingleOrDefaultAsync(character => character.CharacterId == characterId,
                 cancellationToken);
@@ -41,6 +42,8 @@ public sealed partial class ProfileStore
         };
         database.Characters.Add(character);
         ApplyPairState(character, request.Snapshot, life);
+        await ReplaceCharacterProjectionsAsync(
+            character.CharacterId, character.SurvivalJson, cancellationToken);
         await database.SaveChangesAsync(cancellationToken);
         return ToCharacterProfile(character, []);
     }
@@ -51,8 +54,8 @@ public sealed partial class ProfileStore
     {
         var characters = await database.Characters.AsNoTracking()
             .Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .Include(character => character.ControllingPlayer)
-                .ThenInclude(player => player!.DepositKnowledge)
             .Where(character => character.Revision > 0)
             .OrderBy(character => character.CharacterId).ToArrayAsync(cancellationToken);
         var mapIds = characters.SelectMany(character => character.Items)
@@ -96,6 +99,8 @@ public sealed partial class ProfileStore
         if (life.LifeState == 4) character.DiedAtUtc ??= DateTime.UtcNow;
         character.UpdatedAtUtc = DateTime.UtcNow;
         ApplyCharacterInventory(character, request.Inventory);
+        await ReplaceCharacterProjectionsAsync(
+            character.CharacterId, character.SurvivalJson, cancellationToken);
         await database.SaveChangesAsync(cancellationToken);
         return true;
     }
@@ -111,7 +116,8 @@ public sealed partial class ProfileStore
             || !float.IsFinite(request.Position.Z)) throw new ArgumentException("Invalid new-life request.");
         var player = await database.Players.Include(entry => entry.CurrentCharacter)
                 .ThenInclude(character => character!.Items)
-            .Include(entry => entry.DepositKnowledge)
+            .Include(entry => entry.CurrentCharacter)
+                .ThenInclude(character => character!.DepositKnowledge)
             .SingleOrDefaultAsync(entry => entry.SteamId == steamId, cancellationToken)
             ?? throw new ArgumentException("Account not found.");
         var receipt = await database.CharacterReplacements.FindAsync([operationId], cancellationToken);
@@ -153,8 +159,6 @@ public sealed partial class ProfileStore
         player.RegisteredHeirCharacterId = null;
         player.HeirRegisteredAtUtc = null;
         player.EstateRevision++;
-        database.PlayerDepositKnowledge.RemoveRange(player.DepositKnowledge);
-        player.DepositKnowledge.Clear();
         database.CharacterReplacements.Add(new CharacterReplacementEntity
         {
             OperationId = operationId, SteamId = steamId, PreviousCharacterId = previousId,
@@ -218,6 +222,10 @@ public sealed partial class ProfileStore
 
         ApplyPairState(source, request.Source, sourceLife);
         ApplyPairState(destination, request.Destination, destinationLife);
+        await ReplaceCharacterProjectionsAsync(
+            source.CharacterId, source.SurvivalJson, cancellationToken);
+        await ReplaceCharacterProjectionsAsync(
+            destination.CharacterId, destination.SurvivalJson, cancellationToken);
         player.PositionX = request.Destination.Position.X;
         player.PositionY = request.Destination.Position.Y;
         player.PositionZ = request.Destination.Position.Z;
@@ -277,7 +285,6 @@ public sealed partial class ProfileStore
             CreatedAtUtc = character.CreatedAtUtc, LastSeenAtUtc = character.UpdatedAtUtc,
             CurrentCharacter = character, CurrentCharacterId = character.CharacterId,
             SelectedHotbarIndex = character.SelectedHotbarIndex,
-            DepositKnowledge = owner?.DepositKnowledge ?? [],
         }, notes);
     }
 }

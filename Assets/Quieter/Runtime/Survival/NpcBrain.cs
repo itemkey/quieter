@@ -64,18 +64,17 @@ namespace Quieter.Survival
             ResolveWorldServices();
             var closestPlayer = FindClosestLivingPlayer(out var playerDistance);
             var detailed = closestPlayer != null && playerDistance <= DetailedDistance;
-            var interval = detailed ? 0.35f : 6f;
+            var interval = ThinkInterval(detailed);
             var elapsed = lastThinkAt <= 0f ? interval : Mathf.Clamp(now - lastThinkAt, 0.05f, 10f);
             lastThinkAt = now;
             nextThinkAt = now + interval;
-            TickBrain(state, closestPlayer, playerDistance, detailed, elapsed);
+            TickBrain(state, closestPlayer, playerDistance, elapsed);
         }
 
         private void TickBrain(
             CharacterSurvivalState state,
             PlayerSurvival closestPlayer,
             float playerDistance,
-            bool detailed,
             float elapsed)
         {
             state.EnsureInitialized();
@@ -103,6 +102,21 @@ namespace Quieter.Survival
 
             ConsumeStoredNeeds(state);
             if (HandleUrgentSanitation(state)) return;
+            if (npc.PendingSabotageActions > 0 && TickSabotage(state)) return;
+            if (npc.FleeUntilUtcTicks > DateTime.UtcNow.Ticks)
+            {
+                npc.Activity = NpcActivityKind.Flee;
+                if (closestPlayer != null)
+                {
+                    var away = transform.position - closestPlayer.transform.position;
+                    away.y = 0f;
+                    if (away.sqrMagnitude < 0.01f) away = transform.forward;
+                    SetDestination(state, transform.position + away.normalized * 24f);
+                    MoveToward(npc.Destination, sprint: true);
+                }
+                else TickWander(state);
+                return;
+            }
             var lowCondition = state.Physiology.BloodVolume < 0.5f
                 || state.Physiology.Pain > 0.78f
                 || state.Physiology.Consciousness < 0.55f;
@@ -137,11 +151,10 @@ namespace Quieter.Survival
                 networkPlayer.ServerClearAutonomousInput();
                 return;
             }
-            if (!detailed)
-            {
-                networkPlayer.ServerClearAutonomousInput();
-                return;
-            }
+            // Distance changes only how often decisions are made. Distant NPCs
+            // still walk to actual sources, consume their own food/tools and
+            // commit through the same atomic resource operations as nearby NPCs.
+            // Freezing this branch would turn leaving an area into free stasis.
             if (npc.Activity == NpcActivityKind.Flee && closestPlayer != null)
             {
                 var away = transform.position - closestPlayer.transform.position;
@@ -162,6 +175,8 @@ namespace Quieter.Survival
             }
             TickWander(state);
         }
+
+        public static float ThinkInterval(bool detailed) => detailed ? 0.35f : 10f;
 
         private void ConsumeStoredNeeds(CharacterSurvivalState state)
         {
@@ -185,7 +200,8 @@ namespace Quieter.Survival
                     hydrationEfficiency);
                 state.Npc.LastNeedsActionUtcTicks = DateTime.UtcNow.Ticks;
             }
-            if ((physiology.StomachFullness < 0.58f || physiology.EnergyReserve < 0.65f)
+            if (physiology.StomachFullness < 0.88f
+                && (physiology.StomachFullness < 0.58f || physiology.EnergyReserve < 0.65f)
                 && inventory.TryConsumeServerFood(out var food, out var stack))
             {
                 var spoilage = 1f - stack.Freshness / 10000f;
@@ -361,6 +377,8 @@ namespace Quieter.Survival
 
         private void TickHauling(CharacterSurvivalState state)
         {
+            if (inventory.HasServerHaulableCargo()
+                && TryStoreHaulableCargo(state)) return;
             NetworkWorldItem closest = null;
             var radius = Mathf.Max(5f, state.WorkerContract.WorkZoneRadius);
             var closestSquared = radius * radius;
@@ -392,6 +410,87 @@ namespace Quieter.Survival
                 SkillId.LoadCarrying, 5f, 0.25f);
             survival.ServerRegisterPhysicalLoad(
                 CharacterAttributeId.Strength, 5f, 0.3f);
+        }
+
+        private bool TryStoreHaulableCargo(CharacterSurvivalState state)
+        {
+            if (placedObjects == null || string.IsNullOrWhiteSpace(
+                    state.Npc.EmployerAccountId)) return false;
+            var storageCenter = state.WorkerContract.StoragePosition == Vector3.zero
+                ? ResolveWorkCenter(state)
+                : state.WorkerContract.StoragePosition;
+            if (!placedObjects.TryFindClosestOwnedStructure(
+                    SurvivalStructureRules.ChestItemId,
+                    storageCenter,
+                    8f,
+                    state.Npc.EmployerAccountId,
+                    out var chestId,
+                    out var chestPosition)) return false;
+            if (PlanarDistance(transform.position, chestPosition) > InteractionDistance)
+            {
+                SetDestination(state, chestPosition);
+                MoveToward(chestPosition, sprint: false);
+                return true;
+            }
+            FaceAndStop(chestPosition);
+            if (!inventory.TryExtractFirstHaulableCargoServer(out var cargo)) return true;
+            if (!placedObjects.TryInsertChestItem(
+                    chestId, state.Npc.EmployerAccountId, cargo, out _))
+            {
+                var remainder = inventory.InsertStackServer(cargo);
+                if (remainder > 0)
+                    inventory.SpawnOverflowServer(
+                        cargo.WithQuantity(remainder), transform.position);
+                return true;
+            }
+            RegisterCompletedTask(state, WorkerJobKind.Hauling,
+                SkillId.LoadCarrying, 5f, 0.3f);
+            survival.ServerRegisterPhysicalLoad(
+                CharacterAttributeId.Strength, 5f, 0.35f);
+            return true;
+        }
+
+        private bool TickSabotage(CharacterSurvivalState state)
+        {
+            if (placedObjects == null || state.WorkerContract == null
+                || string.IsNullOrWhiteSpace(state.Npc.EmployerAccountId))
+            {
+                state.Npc.PendingSabotageActions = 0;
+                return false;
+            }
+            var storageCenter = state.WorkerContract.StoragePosition == Vector3.zero
+                ? ResolveWorkCenter(state)
+                : state.WorkerContract.StoragePosition;
+            if (!placedObjects.TryFindClosestOwnedStructure(
+                    SurvivalStructureRules.ChestItemId,
+                    storageCenter,
+                    Mathf.Max(8f, state.WorkerContract.WorkZoneRadius),
+                    state.Npc.EmployerAccountId,
+                    out var chestId,
+                    out var chestPosition))
+            {
+                state.Npc.PendingSabotageActions = 0;
+                return false;
+            }
+            state.Npc.Activity = NpcActivityKind.Sabotage;
+            if (PlanarDistance(transform.position, chestPosition) > InteractionDistance)
+            {
+                SetDestination(state, chestPosition);
+                MoveToward(chestPosition, sprint: false);
+                return true;
+            }
+            FaceAndStop(chestPosition);
+            if (placedObjects.TrySabotageChestItem(
+                    chestId, state.Npc.EmployerAccountId, out _))
+            {
+                state.Npc.PendingSabotageActions--;
+                state.Npc.LastWorkCompletedUtcTicks = DateTime.UtcNow.Ticks;
+            }
+            else
+            {
+                state.Npc.PendingSabotageActions = 0;
+            }
+            return true;
         }
 
         private void TickConstruction(CharacterSurvivalState state, float elapsed)
@@ -714,27 +813,10 @@ namespace Quieter.Survival
             }
             if (contract.Voluntary && state.ControlKind == CharacterControlKind.ForcedNpc)
                 state.ControlKind = CharacterControlKind.ContractedNpc;
-            switch (response)
-            {
-                case WorkerResponseKind.Leave:
-                case WorkerResponseKind.Escape:
-                    contract.Active = false;
-                    state.ControlKind = CharacterControlKind.FreeNpc;
-                    state.Npc.EmployerAccountId = string.Empty;
-                    state.Npc.EmployerCharacterId = string.Empty;
-                    state.Npc.Activity = response == WorkerResponseKind.Escape
-                        ? NpcActivityKind.Flee : NpcActivityKind.Wander;
-                    state.Npc.HomePosition = transform.position;
-                    break;
-                case WorkerResponseKind.Sabotage:
-                    state.Npc.Activity = NpcActivityKind.Sabotage;
-                    break;
-                case WorkerResponseKind.Rebel:
-                    contract.Active = false;
-                    state.Npc.Disposition = NpcDisposition.Aggressive;
-                    state.Npc.Activity = NpcActivityKind.Flee;
-                    break;
-            }
+            LivingWorldSimulation.ApplyWorkerResponse(
+                state, response, DateTime.UtcNow.Ticks);
+            if (response is WorkerResponseKind.Leave or WorkerResponseKind.Escape)
+                state.Npc.HomePosition = transform.position;
         }
 
         private bool TryCollectContractPayment(CharacterSurvivalState state)

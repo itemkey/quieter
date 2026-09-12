@@ -728,17 +728,43 @@ namespace Quieter.Inventory
             return true;
         }
 
+        public bool HasRecipeWater(CraftingRecipe recipe)
+        {
+            if (recipe == null || recipe.RequiredWaterMilliliters == 0) return true;
+            var available = 0;
+            foreach (var stack in inventory)
+            {
+                if (stack.IsEmpty || stack.LiquidKind != LiquidKind.Water) continue;
+                available += stack.LiquidMilliliters;
+                if (available >= recipe.RequiredWaterMilliliters) return true;
+            }
+            return false;
+        }
+
         public bool TryCraft(CraftingRecipe recipe)
         {
             if (!cursor.IsEmpty || !MatchesExactly(recipe)) return false;
             var copy = (ItemStackState[])inventory.Clone();
+            if (!TryDrainRecipeWater(
+                    copy,
+                    recipe.RequiredWaterMilliliters,
+                    out var waterBiological,
+                    out var waterToxins,
+                    out var waterCleanliness))
+                return false;
             var outputCondition = recipe.Output.IsDurable
                 ? recipe.Output.MaximumDurability
                 : (ushort)0;
             var output = new ItemStackState(
                 recipe.Output.ItemId,
                 recipe.OutputQuantity,
-                outputCondition);
+                outputCondition,
+                itemInstanceId: recipe.Output.RequiresInstanceId
+                    ? ItemInstanceIdFactory.Create() : 0,
+                biologicalContamination: waterBiological,
+                toxinContamination: waterToxins,
+                wetness: recipe.OutputWetness,
+                cleanliness: waterCleanliness);
             var remainder = InsertIntoRangeByPriority(
                 copy,
                 output,
@@ -747,6 +773,52 @@ namespace Quieter.Inventory
             if (remainder > 0) return false;
             Array.Copy(copy, inventory, inventory.Length);
             Array.Clear(workbench, 0, workbench.Length);
+            return true;
+        }
+
+        private static bool TryDrainRecipeWater(
+            ItemStackState[] slots,
+            ushort requiredMilliliters,
+            out ushort biologicalContamination,
+            out ushort toxinContamination,
+            out ushort cleanliness)
+        {
+            biologicalContamination = 0;
+            toxinContamination = 0;
+            cleanliness = 10000;
+            if (requiredMilliliters == 0) return true;
+            var available = 0;
+            foreach (var stack in slots)
+            {
+                if (!stack.IsEmpty && stack.LiquidKind == LiquidKind.Water)
+                    available += stack.LiquidMilliliters;
+            }
+            if (available < requiredMilliliters) return false;
+
+            var remaining = (int)requiredMilliliters;
+            long biologicalTotal = 0;
+            long toxinTotal = 0;
+            long cleanlinessTotal = 0;
+            for (var index = 0; index < slots.Length && remaining > 0; index++)
+            {
+                var stack = slots[index];
+                if (stack.IsEmpty || stack.LiquidKind != LiquidKind.Water
+                    || stack.LiquidMilliliters == 0) continue;
+                var drained = Math.Min(remaining, stack.LiquidMilliliters);
+                biologicalTotal += (long)stack.BiologicalContamination * drained;
+                toxinTotal += (long)stack.ToxinContamination * drained;
+                cleanlinessTotal += (long)stack.Cleanliness * drained;
+                stack.LiquidMilliliters -= (ushort)drained;
+                if (stack.LiquidMilliliters == 0) stack.LiquidKind = LiquidKind.None;
+                slots[index] = stack;
+                remaining -= drained;
+            }
+            biologicalContamination = (ushort)Math.Clamp(
+                biologicalTotal / requiredMilliliters, 0, 10000);
+            toxinContamination = (ushort)Math.Clamp(
+                toxinTotal / requiredMilliliters, 0, 10000);
+            cleanliness = (ushort)Math.Clamp(
+                cleanlinessTotal / requiredMilliliters, 0, 10000);
             return true;
         }
 

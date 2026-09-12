@@ -96,6 +96,7 @@ namespace Quieter.Persistence
 
         Task SaveDepositKnowledgeAsync(
             ulong steamId,
+            string characterId,
             int worldId,
             IReadOnlyList<StoredDepositKnowledge> knowledge,
             CancellationToken cancellationToken = default);

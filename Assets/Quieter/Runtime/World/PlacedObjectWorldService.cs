@@ -275,6 +275,59 @@ namespace Quieter.World
             return false;
         }
 
+        public bool TryGetAssignedBedHygiene(
+            Vector3 position, string characterId, out float hygiene)
+        {
+            hygiene = 1f;
+            if (string.IsNullOrWhiteSpace(characterId)) return false;
+            RuntimeObject closest = null;
+            var closestSquared = 3f * 3f;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.BedItemId
+                    || !string.Equals(state.AssignedCharacterId, characterId,
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                closest = state;
+            }
+            if (closest == null) return false;
+            hygiene = closest.Input.IsEmpty
+                ? 1f
+                : Mathf.Min(closest.Input.Cleanliness / 10000f,
+                    1f - closest.Input.BiologicalContamination / 10000f);
+            return true;
+        }
+
+        public bool TrySoilAssignedBed(
+            Vector3 position, string characterId, bool bowelAccident)
+        {
+            if (networkManager == null || !networkManager.IsServer
+                || string.IsNullOrWhiteSpace(characterId)) return false;
+            RuntimeObject closest = null;
+            var closestSquared = 3f * 3f;
+            foreach (var state in objects.Values)
+            {
+                if (state.ItemId != SurvivalStructureRules.BedItemId
+                    || !string.Equals(state.AssignedCharacterId, characterId,
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                var squared = (position - state.Position).sqrMagnitude;
+                if (squared > closestSquared) continue;
+                closestSquared = squared;
+                closest = state;
+            }
+            if (closest == null) return false;
+            var bedding = closest.Input.IsEmpty
+                ? new ItemStackState(
+                    SurvivalStructureRules.BedItemId, 1, cleanliness: 10000)
+                : closest.Input;
+            closest.Input = ItemHygieneRules.ApplyEliminationSoiling(
+                bedding, bowelAccident);
+            Touch(closest);
+            return true;
+        }
+
         public bool TrySetHoldingCellLocked(
             ulong objectId, string actorAccountId, bool locked, out string error)
         {
@@ -373,6 +426,26 @@ namespace Quieter.World
             }
             stack = state.Input;
             state.Input = default;
+            Touch(state);
+            return true;
+        }
+
+        public bool TrySabotageChestItem(
+            ulong objectId, string employerAccountId, out ushort damagedItemId)
+        {
+            damagedItemId = 0;
+            if (networkManager == null || !networkManager.IsServer
+                || !objects.TryGetValue(objectId, out var state)
+                || state.ItemId != SurvivalStructureRules.ChestItemId
+                || !string.Equals(state.OwnerAccountId,
+                    employerAccountId ?? string.Empty, StringComparison.Ordinal)
+                || state.Input.IsEmpty)
+                return false;
+            damagedItemId = state.Input.ItemId;
+            if (state.Input.Quantity <= 1)
+                state.Input = default;
+            else
+                state.Input.Quantity--;
             Touch(state);
             return true;
         }
@@ -825,8 +898,7 @@ namespace Quieter.World
             var windProtection = 0f;
             var externalHeat = environment.ExternalHeat;
             var smokeConcentration = environment.SmokeConcentration;
-            var modularRoof = false;
-            var surroundingWalls = 0;
+            var shelterParts = new List<ShelterPartState>();
             foreach (var state in objects.Values)
             {
                 if (state.ItemId == SurvivalStructureRules.LeanToItemId)
@@ -840,29 +912,14 @@ namespace Quieter.World
                         windProtection = Mathf.Max(windProtection, 0.48f);
                     }
                 }
-                else if (state.ItemId == SurvivalStructureRules.RoofItemId)
-                {
-                    var local = Quaternion.Euler(0f, -state.Yaw, 0f)
-                        * (position - state.Position);
-                    if (Mathf.Abs(local.x) <= 2.05f && Mathf.Abs(local.z) <= 2.05f
-                        && local.y >= -0.4f && local.y <= 3.2f) modularRoof = true;
-                }
-                else if (state.ItemId is SurvivalStructureRules.WallItemId
-                    or SurvivalStructureRules.DoorwayItemId)
-                {
-                    var delta = state.Position - position;
-                    delta.y = 0f;
-                    if (delta.sqrMagnitude <= 2.8f * 2.8f
-                        && Mathf.Abs(state.Position.y - position.y) <= 1.2f)
-                        surroundingWalls++;
-                }
+                if (SurvivalStructureRules.IsModularBuildingPart(state.ItemId))
+                    shelterParts.Add(new ShelterPartState(
+                        state.ItemId, state.Position, state.Yaw, state.Locked));
             }
-            if (modularRoof)
-            {
-                rainProtection = Mathf.Max(rainProtection, 0.98f);
-                windProtection = Mathf.Max(windProtection,
-                    surroundingWalls >= 4 ? 0.92f : surroundingWalls >= 2 ? 0.62f : 0.25f);
-            }
+            var shelter = SurvivalStructureRules.CalculateShelterCoverage(
+                position, shelterParts);
+            rainProtection = Mathf.Max(rainProtection, shelter.RainProtection);
+            windProtection = Mathf.Max(windProtection, shelter.WindProtection);
             // Resolve shelter first so smoke does not depend on placement/load order.
             foreach (var state in objects.Values)
             {
@@ -878,8 +935,9 @@ namespace Quieter.World
                             1.15f * proximity);
                         smokeConcentration = Mathf.Max(
                             smokeConcentration,
-                            proximity * (modularRoof && surroundingWalls >= 4
-                                ? 0.34f : rainProtection > 0f ? 0.13f : 0.045f)
+                            proximity * (shelter.HasRoof
+                                ? Mathf.Lerp(0.045f, 0.355f, shelter.SmokeRetention)
+                                : rainProtection > 0f ? 0.13f : 0.045f)
                                 * Mathf.Lerp(1f, 0.45f,
                                     Mathf.InverseLerp(
                                         0f, 8f, environment.WindMetersPerSecond)));
@@ -893,8 +951,9 @@ namespace Quieter.World
                 environment.Precipitation * (1f - rainProtection),
                 environment.Insulation,
                 externalHeat,
-                environment.Sheltered || rainProtection >= 0.95f,
-                smokeConcentration);
+                environment.Sheltered || shelter.Enclosed || rainProtection >= 0.95f,
+                smokeConcentration,
+                environment.DayFraction);
         }
 
         public bool TryDismantle(ulong objectId, out Vector3 position)

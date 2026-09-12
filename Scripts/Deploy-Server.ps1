@@ -7,7 +7,9 @@ param(
     [string]$RemoteRoot = "/opt/quieter",
     [string]$UnityPath = $env:QUIETER_UNITY_PATH,
     [string]$Version = "",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$ResetSurvivalWorld,
+    [string]$ResetConfirmation = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +28,10 @@ if ($Version -notmatch '^[0-9A-Za-z._-]+$') {
 
 if ($RemoteRoot -notmatch '^/[0-9A-Za-z._/-]+$') {
     throw "RemoteRoot должен быть абсолютным Linux-путём без пробелов."
+}
+
+if ($ResetSurvivalWorld -and $ResetConfirmation -ne "RESET-QUIETER-WORLD-V7") {
+    throw "Для survival-reset передайте -ResetConfirmation RESET-QUIETER-WORLD-V7."
 }
 
 if (-not $SkipBuild) {
@@ -59,7 +65,13 @@ Get-ChildItem $backendSource -Recurse -File |
         Copy-Item -Force $_.FullName $destinationFile
     }
 Copy-Item -Recurse -Force (Join-Path $buildRoot "LinuxServer") (Join-Path $releaseRoot "Builds")
-foreach ($file in @("docker-compose.yml", "GameServer.Dockerfile", "backup-postgres.sh", "README.md", ".env.example")) {
+foreach ($file in @(
+    "docker-compose.yml",
+    "GameServer.Dockerfile",
+    "backup-postgres.sh",
+    "reset-survival-world.sh",
+    "README.md",
+    ".env.example")) {
     Copy-Item -Force (Join-Path $projectRoot "Deploy\$file") (Join-Path $releaseRoot "Deploy\$file")
 }
 Copy-Item -Force (Join-Path $projectRoot "Deploy\secrets\README.md") (Join-Path $releaseRoot "Deploy\secrets\README.md")
@@ -77,6 +89,7 @@ $remoteScript = @'
 set -eu
 root='__ROOT__'
 version='__VERSION__'
+reset_mode='__RESET_MODE__'
 release="$root/releases/$version"
 previous="$(readlink -f "$root/current" 2>/dev/null || true)"
 
@@ -95,7 +108,11 @@ cd "$release/Deploy"
 export QUIETER_RELEASE="$version"
 docker compose build profile-service game-server
 docker compose up -d --wait postgres
-docker compose run --rm profile-service --migrate
+if [ "$reset_mode" = 1 ]; then
+    sh ./reset-survival-world.sh RESET-QUIETER-WORLD-V7
+else
+    docker compose run --rm profile-service --migrate
+fi
 
 ln -sfn "$release" "$root/current.next"
 mv -Tf "$root/current.next" "$root/current"
@@ -107,7 +124,7 @@ else
 fi
 
 if ! docker compose up -d --remove-orphans --wait; then
-    if [ -n "$previous" ] && [ -d "$previous/Deploy" ]; then
+    if [ "$reset_mode" = 0 ] && [ -n "$previous" ] && [ -d "$previous/Deploy" ]; then
         previous_version="$(basename "$previous")"
         ln -sfn "$previous" "$root/current.next"
         mv -Tf "$root/current.next" "$root/current"
@@ -121,8 +138,16 @@ fi
 
 docker compose ps
 '@
-$remoteScript = $remoteScript.Replace("__ROOT__", $RemoteRoot).Replace("__VERSION__", $Version)
+$resetMode = if ($ResetSurvivalWorld) { "1" } else { "0" }
+$remoteScript = $remoteScript.Replace("__ROOT__", $RemoteRoot).
+    Replace("__VERSION__", $Version).
+    Replace("__RESET_MODE__", $resetMode)
 $remoteScript | & ssh $destination "sh -s"
-if ($LASTEXITCODE -ne 0) { throw "Выкладка не прошла проверку здоровья; выполнен доступный откат." }
+if ($LASTEXITCODE -ne 0) {
+    if ($ResetSurvivalWorld) {
+        throw "Survival-reset не завершён; автоматический откат после очистки запрещён. Восстановите проверенный pre-survival-reset dump."
+    }
+    throw "Выкладка не прошла проверку здоровья; выполнен доступный откат."
+}
 
 Write-Host "Quieter $Version развёрнут на $RemoteHost и прошёл health checks."

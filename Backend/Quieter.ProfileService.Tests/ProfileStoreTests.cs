@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage;
 using Quieter.ProfileService.Contracts;
 using Quieter.ProfileService.Data;
@@ -279,7 +281,7 @@ public sealed class ProfileStoreTests
             new DepositKnowledgeListResponse(new[]
             {
                 new DepositKnowledgeResponse(nodeId, 7500, DateTime.UtcNow, world.WorldId),
-            }),
+            }, first.CharacterId),
             default));
 
         var nodes = await store.LoadResourceNodeStatesAsync(world.WorldId, default);
@@ -490,6 +492,143 @@ public sealed class ProfileStoreTests
         Assert.Contains("202609080002_AddBedAssignments", migrations);
         Assert.Contains("202609080003_AddInheritance", migrations);
         Assert.Contains("202609090001_AddHeirOffers", migrations);
+        Assert.Contains("202609100001_MoveDepositKnowledgeToCharacters", migrations);
+        Assert.Contains("202609100002_NormalizeCharacterState", migrations);
+    }
+
+    [Fact]
+    public void DatabaseMigrations_GenerateCompletePostgresUpgradeScript()
+    {
+        var options = new DbContextOptionsBuilder<ProfileDbContext>()
+            .UseNpgsql("Host=127.0.0.1;Database=quieter_test;Username=test;Password=test")
+            .Options;
+        using var database = new ProfileDbContext(options);
+
+        var script = database.GetService<IMigrator>().GenerateScript();
+
+        Assert.Contains("CREATE TABLE character_deposit_knowledge", script);
+        Assert.Contains("CREATE TABLE character_physiology", script);
+        Assert.Contains("CREATE TABLE character_npc_runtime", script);
+        Assert.Contains("CREATE TABLE character_worker_jobs", script);
+        Assert.Contains("CREATE TABLE character_npc_lessons", script);
+        Assert.Contains("INSERT INTO \"__EFMigrationsHistory\"", script);
+    }
+
+    [Fact]
+    public async Task SurvivalSnapshot_ReplacesNormalizedPhysiologyProgressionAndSocialRows()
+    {
+        await using var database = CreateDatabase();
+        var store = new ProfileStore(database);
+        var player = await store.LoginAsync(
+            new PlayerLoginRequest("76561198000000249", "Projected", 0f, 8f, 0f), default);
+        var targetId = Guid.NewGuid();
+        var firstJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            CharacterId = player.CharacterId,
+            Traits = new[] { 0, 64 },
+            Physiology = new
+            {
+                LifeState = 0, DeathCause = 0, Hydration = 0.71f,
+                BloodVolume = 0.82f, CoreTemperatureC = 38.4f, Pain = 0.34f,
+            },
+            Conditions = new { FoodborneInfection = 0.23f, ParasiteLoad = 0.12f },
+            Anatomy = new
+            {
+                BrainFunction = 0.91f, HeartFunction = 0.88f,
+                Wounds = new[]
+                {
+                    new
+                    {
+                        WoundId = 7, Region = 3, Type = 1, Severity = 0.6f,
+                        Bleeding = 0.25f, Infection = 0.18f, Bandaged = true,
+                    },
+                },
+            },
+            Progression = new
+            {
+                Attributes = Enumerable.Repeat(55f, 12).ToArray(),
+                AttributeTrainingLoad = Enumerable.Repeat(0.1f, 12).ToArray(),
+                SkillPracticeHours = new[] { 1f, 2f, 3f },
+                RelevantPracticeHours = new[] { 0.8f, 1.7f, 2.4f },
+                PendingConsolidationHours = new[] { 0.2f, 0.3f, 0.6f },
+            },
+            Relationships = new[]
+            {
+                new
+                {
+                    TargetCharacterId = targetId.ToString("D"), Trust = 0.7f,
+                    Loyalty = 0.5f, PersonalRequestsCompleted = 2,
+                },
+            },
+            WorkerContract = new
+            {
+                ContractId = Guid.NewGuid().ToString("D"),
+                EmployerAccountId = player.SteamId,
+                AssignedBedObjectId = "991",
+                Active = true, Voluntary = true, DailyRationCalories = 1900f,
+                WorkZoneCenter = new { x = 4f, y = 8f, z = 6f },
+                WorkZoneRadius = 70f,
+                StoragePosition = new { x = 7f, y = 8f, z = 9f },
+                AllowedJobs = new[] { 0, 2, 7 },
+                JobPriorities = new[] { 3, 0, 2, 0, 0, 0, 0, 1 },
+            },
+            Npc = new
+            {
+                Disposition = 1, Activity = 6, ActiveJob = 2, WorkbookSelectedJob = 7,
+                HomePosition = new { x = 10f, y = 8f, z = 12f },
+                Destination = new { x = 14f, y = 8f, z = 15f },
+                EmployerAccountId = player.SteamId,
+                EmployerCharacterId = targetId.ToString("D"),
+                Motivation = 0.78f, CompletedTasks = new[] { 4, 0, 7, 0, 0, 0, 0, 2 },
+                PersonalRequest = 3, PersonalRequestPending = true,
+                PendingSabotageActions = 1, LeadershipInstructions = 5,
+                LessonsReceived = new[] { 0, 2, 0, 4 },
+            },
+        });
+        Assert.True(await store.SaveSnapshotAsync(player.SteamId,
+            new PlayerSnapshotRequest(player.CharacterId, new PositionRequest(1f, 8f, 2f),
+                new InventoryRequest(0, []), new SurvivalRequest(firstJson, 1)), default));
+
+        Assert.Equal(0.71f, (await database.CharacterPhysiology.SingleAsync()).Hydration);
+        Assert.Equal(2, await database.CharacterTraits.CountAsync());
+        Assert.Equal(12, await database.CharacterAttributes.CountAsync());
+        Assert.Equal(3, await database.CharacterSkills.CountAsync());
+        Assert.True((await database.CharacterWounds.SingleAsync()).Bandaged);
+        Assert.Equal(targetId, (await database.CharacterRelationships.SingleAsync()).TargetCharacterId);
+        Assert.True((await database.CharacterWorkerContracts.SingleAsync()).Voluntary);
+        Assert.Equal(0.78f, (await database.CharacterNpcRuntime.SingleAsync()).Motivation);
+        var workerJobs = await database.CharacterWorkerJobs.OrderBy(entry => entry.JobId).ToArrayAsync();
+        Assert.Equal(8, workerJobs.Length);
+        Assert.True(workerJobs[2].Allowed);
+        Assert.Equal((byte)2, workerJobs[2].Priority);
+        Assert.Equal(7, workerJobs[2].CompletedTasks);
+        Assert.False(workerJobs[3].Allowed);
+        Assert.Equal(new byte[] { 1, 3 }, (await database.CharacterNpcLessons
+            .OrderBy(entry => entry.SkillId).ToArrayAsync()).Select(entry => entry.SkillId));
+
+        var secondJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            CharacterId = player.CharacterId,
+            Traits = Array.Empty<int>(),
+            Physiology = new { LifeState = 0, DeathCause = 0, Hydration = 0.44f },
+            Anatomy = new { Wounds = Array.Empty<object>() },
+            Progression = new { Attributes = Enumerable.Repeat(50f, 12).ToArray() },
+            Relationships = Array.Empty<object>(),
+            WorkerContract = (object?)null,
+        });
+        Assert.True(await store.SaveSnapshotAsync(player.SteamId,
+            new PlayerSnapshotRequest(player.CharacterId, new PositionRequest(1f, 8f, 2f),
+                new InventoryRequest(0, []), new SurvivalRequest(secondJson, 2)), default));
+
+        Assert.Equal(0.44f, (await database.CharacterPhysiology.SingleAsync()).Hydration);
+        Assert.Empty(await database.CharacterTraits.ToArrayAsync());
+        Assert.Empty(await database.CharacterSkills.ToArrayAsync());
+        Assert.Empty(await database.CharacterWounds.ToArrayAsync());
+        Assert.Empty(await database.CharacterRelationships.ToArrayAsync());
+        Assert.Empty(await database.CharacterWorkerContracts.ToArrayAsync());
+        Assert.Empty(await database.CharacterNpcRuntime.ToArrayAsync());
+        Assert.Empty(await database.CharacterWorkerJobs.ToArrayAsync());
+        Assert.Empty(await database.CharacterNpcLessons.ToArrayAsync());
     }
 
     [Fact]
@@ -609,13 +748,14 @@ public sealed class ProfileStoreTests
     {
         await using var database = CreateDatabase();
         var store = new ProfileStore(database);
+        var world = await store.GetOrCreateWorldAsync(default);
         var profile = await store.LoginAsync(
             new PlayerLoginRequest("76561198000000255", "Mortal", 0f, 8f, 0f), default);
         Assert.True(await store.SaveSnapshotAsync(
             profile.SteamId, Snapshot(profile.CharacterId, 6, 22f, 30, dead: true), default));
-        database.PlayerDepositKnowledge.Add(new PlayerDepositKnowledgeEntity
+        database.CharacterDepositKnowledge.Add(new CharacterDepositKnowledgeEntity
         {
-            SteamId = decimal.Parse(profile.SteamId), WorldId = 1, InstanceId = 99,
+            CharacterId = Guid.Parse(profile.CharacterId), WorldId = 1, InstanceId = 99,
             StudyBasisPoints = 5000, DiscoveredAtUtc = DateTime.UtcNow, UpdatedAtUtc = DateTime.UtcNow,
         });
         await database.SaveChangesAsync();
@@ -632,11 +772,16 @@ public sealed class ProfileStoreTests
         Assert.Empty(next.DepositKnowledge);
         var oldId = Guid.Parse(profile.CharacterId);
         var oldBody = await database.Characters.Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .SingleAsync(character => character.CharacterId == oldId);
         Assert.Null(oldBody.ControllingPlayer);
         Assert.Equal((byte)4, oldBody.LifeState);
         Assert.Equal(22f, oldBody.PositionX);
         Assert.Equal((ushort)30, Assert.Single(oldBody.Items).ItemId);
+        Assert.Equal((ushort)5000, Assert.Single(oldBody.DepositKnowledge).StudyBasisPoints);
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() =>
+            store.SaveDepositKnowledgeAsync(profile.SteamId, world.WorldId,
+                new DepositKnowledgeListResponse([], profile.CharacterId), default));
         Assert.Single(await database.CharacterReplacements.ToArrayAsync());
     }
 
@@ -763,6 +908,11 @@ public sealed class ProfileStoreTests
         var world = await store.GetOrCreateWorldAsync(default);
         var owner = await store.LoginAsync(
             new PlayerLoginRequest("76561198000000281", "Owner", 0f, 8f, 0f), default);
+        Assert.True(await store.SaveDepositKnowledgeAsync(owner.SteamId, world.WorldId,
+            new DepositKnowledgeListResponse(new[]
+            {
+                new DepositKnowledgeResponse("181", 4500, DateTime.UtcNow, world.WorldId),
+            }, owner.CharacterId), default));
         Assert.True(await store.SaveSnapshotAsync(owner.SteamId,
             Snapshot(owner.CharacterId, 1, 2f, 49), default));
         var heirId = Guid.NewGuid().ToString("D");
@@ -795,6 +945,16 @@ public sealed class ProfileStoreTests
             new PlayerSnapshotRequest(heirId, new PositionRequest(77f, 8f, -4f),
                 new InventoryRequest(0, new[] { new InventorySlotResponse(0, 25, 2) }),
                 new SurvivalRequest(heirJson, 1))), default);
+        database.CharacterDepositKnowledge.Add(new CharacterDepositKnowledgeEntity
+        {
+            CharacterId = Guid.Parse(heirId),
+            WorldId = world.WorldId,
+            InstanceId = 282,
+            StudyBasisPoints = 8200,
+            DiscoveredAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow,
+        });
+        await database.SaveChangesAsync();
         Assert.True(await store.SavePlacedObjectsAsync(world.WorldId,
             new PlacedObjectListResponse(new[]
             {
@@ -818,12 +978,16 @@ public sealed class ProfileStoreTests
         Assert.Equal(heirId, retry.CharacterId);
         Assert.Equal(77f, assumed.PositionX);
         Assert.Equal((ushort)25, Assert.Single(assumed.InventorySlots).ItemId);
+        Assert.Equal("282", Assert.Single(assumed.DepositKnowledge).InstanceId);
         Assert.Null(assumed.RegisteredHeirCharacterId);
         Assert.Equal(2, assumed.EstateRevision);
         var oldBody = await database.Characters.Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .SingleAsync(character => character.CharacterId == Guid.Parse(owner.CharacterId));
         Assert.Null(oldBody.ControllingPlayer);
         Assert.Equal((ushort)49, Assert.Single(oldBody.Items).ItemId);
+        Assert.Equal("181", decimal.Truncate(Assert.Single(oldBody.DepositKnowledge).InstanceId)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture));
         Assert.Single(await database.InheritanceTransitions.ToArrayAsync());
     }
 
@@ -894,6 +1058,25 @@ public sealed class ProfileStoreTests
             entry.SteamId == decimal.Parse(donor.SteamId));
         Assert.Null(donorEntity.RegisteredHeirCharacterId);
         Assert.Equal(2, donorEntity.EstateRevision);
+        var duplicateReservation = await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.RegisterHeirAsync(donor.SteamId,
+                new RegisterHeirRequest(heirId, donorEntity.EstateRevision), default));
+        Assert.Contains("reserved", duplicateReservation.Message,
+            StringComparison.OrdinalIgnoreCase);
+
+        var offeredEntity = await database.HeirOffers.SingleAsync(entry =>
+            entry.OfferId == Guid.Parse(offered.OfferId));
+        offeredEntity.Status = 2;
+        offeredEntity.HardExpiresAtUtc = DateTime.UtcNow.AddMinutes(-1);
+        await database.SaveChangesAsync();
+        var expiredOfferReservation = await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.RegisterHeirAsync(donor.SteamId,
+                new RegisterHeirRequest(heirId, donorEntity.EstateRevision), default));
+        Assert.Contains("irrevocable", expiredOfferReservation.Message,
+            StringComparison.OrdinalIgnoreCase);
+        offeredEntity.Status = 0;
+        offeredEntity.HardExpiresAtUtc = DateTime.UtcNow.AddDays(7);
+        await database.SaveChangesAsync();
 
         var pending = await store.GetPendingHeirOfferAsync(recipient.SteamId, default);
         Assert.NotNull(pending);

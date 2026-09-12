@@ -349,6 +349,7 @@ namespace Quieter.Tests.EditMode
             var interaction = interactionObject.AddComponent<PlayerResourceInteraction>();
             SetField(interaction, "repository", repository);
             SetField(interaction, "steamId", steamId);
+            SetField(interaction, "characterId", Guid.NewGuid().ToString("D"));
             SetField(interaction, "worldId", 1);
             var knowledge = GetField<Dictionary<ulong, ushort>>(
                 interaction, "serverKnowledge");
@@ -619,6 +620,7 @@ namespace Quieter.Tests.EditMode
 
             public async Task SaveDepositKnowledgeAsync(
                 ulong steamId,
+                string characterId,
                 int worldId,
                 IReadOnlyList<StoredDepositKnowledge> knowledge,
                 CancellationToken cancellationToken = default)

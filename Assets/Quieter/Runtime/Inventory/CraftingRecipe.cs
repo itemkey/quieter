@@ -42,6 +42,8 @@ namespace Quieter.Inventory
         [SerializeField, Min(0f)] private float workSeconds;
         [SerializeField] private bool requiresBurningHearth;
         [SerializeField] private SkillId practiceSkill = SkillId.Toolmaking;
+        [SerializeField, Min(0)] private ushort requiredWaterMilliliters;
+        [SerializeField, Range(0, 10000)] private ushort outputWetness;
 
         public ushort RecipeId => recipeId;
         public string DisplayName => displayName;
@@ -52,13 +54,17 @@ namespace Quieter.Inventory
         public float WorkSeconds => Mathf.Max(0f, workSeconds);
         public bool RequiresBurningHearth => requiresBurningHearth;
         public SkillId PracticeSkill => practiceSkill;
+        public ushort RequiredWaterMilliliters => requiredWaterMilliliters;
+        public ushort OutputWetness => (ushort)Mathf.Min(10000, outputWetness);
 
 #if UNITY_EDITOR
         public void Configure(ushort id, string recipeName,
             IReadOnlyList<Ingredient> required, ItemDefinition result, ushort resultQuantity,
             CraftingCategory recipeCategory = CraftingCategory.Tools,
             float durationSeconds = 0f, bool needsHearth = false,
-            SkillId skill = SkillId.Toolmaking)
+            SkillId skill = SkillId.Toolmaking,
+            ushort waterMilliliters = 0,
+            ushort resultWetness = 0)
         {
             recipeId = id;
             displayName = recipeName;
@@ -69,6 +75,8 @@ namespace Quieter.Inventory
             workSeconds = Mathf.Max(0f, durationSeconds);
             requiresBurningHearth = needsHearth;
             practiceSkill = skill;
+            requiredWaterMilliliters = waterMilliliters;
+            outputWetness = (ushort)Mathf.Min(10000, resultWetness);
         }
 #endif
     }

@@ -10,19 +10,22 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
-  m_Name: LinenUndertunicRecipe
+  m_Name: PhysicalMapRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
-  recipeId: 30
-  displayName: "\u041B\u044C\u043D\u044F\u043D\u0430\u044F \u043D\u0438\u0436\u043D\u044F\u044F
-    \u0440\u0443\u0431\u0430\u0445\u0430"
-  category: 0
+  recipeId: 37
+  displayName: "\u041A\u0430\u0440\u0442\u0430"
+  category: 1
   ingredients:
-  - Item: {fileID: 11400000, guid: e7076783273e3b54fb739ee406d1c40d, type: 2}
+  - Item: {fileID: 11400000, guid: f09fabe71f3c183408cdbb82549dd556, type: 2}
     Quantity: 2
-  output: {fileID: 11400000, guid: ff215d876171751498a189cabe374ef3, type: 2}
+  - Item: {fileID: 11400000, guid: 6a87228b31c57354db2aa9ada1cdad41, type: 2}
+    Quantity: 1
+  - Item: {fileID: 11400000, guid: 1603718286d6b3645969766e24a57a3f, type: 2}
+    Quantity: 1
+  output: {fileID: 11400000, guid: e93cae6654cd93e4487a1d70c8010341, type: 2}
   outputQuantity: 1
-  workSeconds: 45
+  workSeconds: 60
   requiresBurningHearth: 0
-  practiceSkill: 17
+  practiceSkill: 24
   requiredWaterMilliliters: 0
   outputWetness: 0

@@ -42,6 +42,7 @@ namespace Quieter.Survival
         IncreaseRation,
         DecreaseRation,
         CyclePayment,
+        BeginLesson,
     }
 
     public enum NpcDisposition : byte
@@ -104,11 +105,21 @@ namespace Quieter.Survival
         public bool PersonalRequestPending;
         public long PersonalRequestGameDay = long.MinValue;
         public long LastPersonalRequestCompletedGameDay = long.MinValue;
+        [Min(0)] public int PendingSabotageActions;
+        public long FleeUntilUtcTicks;
+        public byte LastLeadershipAction = byte.MaxValue;
+        public long LastLeadershipPracticeUtcTicks;
+        [Min(0)] public int LeadershipInstructions;
+        public int[] LessonsReceived = new int[(int)SkillId.Count];
 
         public void EnsureInitialized()
         {
             if (CompletedTasks == null || CompletedTasks.Length != 8)
                 CompletedTasks = new int[8];
+            PendingSabotageActions = Mathf.Max(0, PendingSabotageActions);
+            LeadershipInstructions = Mathf.Max(0, LeadershipInstructions);
+            if (LessonsReceived == null || LessonsReceived.Length != (int)SkillId.Count)
+                LessonsReceived = new int[(int)SkillId.Count];
         }
     }
 
@@ -154,6 +165,9 @@ namespace Quieter.Survival
         [Range(0f, 1f)] public float Loyalty;
         public bool VoluntaryLoyalty;
         public int PersonalRequestsCompleted;
+        [Min(0)] public int PersuasionAttempts;
+        [Min(0)] public int IntimidationAttempts;
+        public long NextSocialAttemptUtcTicks;
     }
 
     [Serializable]

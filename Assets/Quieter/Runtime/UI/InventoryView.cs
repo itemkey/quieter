@@ -678,6 +678,8 @@ namespace Quieter.UI
                 if (ingredient.Item == null) continue;
                 value += $"{ingredient.Quantity} × {ingredient.Item.DisplayName}\n";
             }
+            if (recipe.RequiredWaterMilliliters > 0)
+                value += $"{recipe.RequiredWaterMilliliters} мл воды в сосудах\n";
             if (recipe.WorkSeconds > 0f) value += $"\nВремя работы: {recipe.WorkSeconds:0} с";
             if (recipe.RequiresBurningHearth) value += "\nТребуется горящий очаг рядом";
             return value + "\nТочный набор без лишних предметов";
@@ -1565,7 +1567,8 @@ namespace Quieter.UI
             var biological = stack.BiologicalContamination / 10000f;
 
             string identity;
-            if (stack.ItemId == ResourceBalance.WildMushroomsItemId)
+            if (stack.ItemId is ResourceBalance.WildMushroomsItemId
+                or ResourceBalance.CookedMushroomsItemId)
             {
                 identity = botany switch
                 {
@@ -1839,6 +1842,19 @@ namespace Quieter.UI
             if (!requestedOpen && pickup == null && inventory?.HasFocusedCorpse == true)
             {
                 pickupPrompt.gameObject.SetActive(true);
+                var body = inventory.FocusedBodySymptoms;
+                if (!inventory.FocusedBodyIsDead)
+                {
+                    var condition = body.Sleeping
+                        ? "спящий человек"
+                        : body.Bound
+                            ? "связанный человек"
+                            : body.LifeState == CharacterLifeState.Agonal
+                                ? "человек в агонии"
+                                : "человек без сознания";
+                    pickupPrompt.text = $"{condition}    [E] Обыскать или снять предмет";
+                    return;
+                }
                 var stage = inventory.FocusedCorpseStage switch
                 {
                     CorpseDecayStage.EarlyDecay => "начавшее разлагаться тело",

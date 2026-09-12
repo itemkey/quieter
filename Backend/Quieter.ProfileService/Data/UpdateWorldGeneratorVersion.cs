@@ -9,21 +9,15 @@ public sealed class UpdateWorldGeneratorVersion : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.UpdateData(
-            table: "worlds",
-            keyColumn: "Id",
-            keyValue: 1,
-            column: "GeneratorVersion",
-            value: (int)ProfileStore.CurrentGeneratorVersion);
+        // Keep historical migrations deterministic. Later generator bumps have
+        // their own migrations or an explicit, backed-up world reset.
+        migrationBuilder.Sql(
+            "UPDATE worlds SET \"GeneratorVersion\" = 2 WHERE \"Id\" = 1;");
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
-        migrationBuilder.UpdateData(
-            table: "worlds",
-            keyColumn: "Id",
-            keyValue: 1,
-            column: "GeneratorVersion",
-            value: 1);
+        migrationBuilder.Sql(
+            "UPDATE worlds SET \"GeneratorVersion\" = 1 WHERE \"Id\" = 1;");
     }
 }

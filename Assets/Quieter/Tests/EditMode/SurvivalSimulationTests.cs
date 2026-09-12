@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using NUnit.Framework;
 using Quieter.Survival;
+using UnityEngine;
 
 namespace Quieter.Tests.EditMode
 {
@@ -49,6 +50,33 @@ namespace Quieter.Tests.EditMode
 
             CharacterProgression.ConsolidateSleep(state, 1f);
             Assert.That(CharacterProgression.GetSkillLevel(state, SkillId.Carpentry), Is.EqualTo(10));
+        }
+
+        [Test]
+        public void BriefLogoutCannotConsolidatePendingPracticeAsAFullSleep()
+        {
+            var brief = NewCharacter();
+            var full = NewCharacter();
+            CharacterProgression.RegisterPractice(
+                brief.Progression, SkillId.Carpentry, 3600f, 1f, 1f, 0f,
+                TraitModifiers.Default);
+            CharacterProgression.RegisterPractice(
+                full.Progression, SkillId.Carpentry, 3600f, 1f, 1f, 0f,
+                TraitModifiers.Default);
+            brief.Sleeping = true;
+            full.Sleeping = true;
+            brief.Physiology.CurrentSleepSeconds = 30f;
+            full.Physiology.CurrentSleepSeconds = 300f;
+
+            var briefGain = PhysiologySimulation.EndSleep(brief, 1f);
+            var fullGain = PhysiologySimulation.EndSleep(full, 1f);
+
+            Assert.That(briefGain, Is.Zero);
+            Assert.That(brief.Progression.PendingConsolidationHours[(int)SkillId.Carpentry],
+                Is.EqualTo(0.3f).Within(0.0001f));
+            Assert.That(fullGain, Is.EqualTo(0.3f).Within(0.0001f));
+            Assert.That(full.Progression.PendingConsolidationHours[(int)SkillId.Carpentry],
+                Is.Zero.Within(0.0001f));
         }
 
         [Test]
@@ -192,6 +220,54 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public void InternalBleeding_IsHiddenFromSurfacePressureAndWorsenedByExertion()
+        {
+            var resting = NewCharacter();
+            var moving = NewCharacter();
+            var restingWound = PhysiologySimulation.AddInjury(
+                resting, BodyRegion.Abdomen, DamageKind.Blunt, 0.78f);
+            var movingWound = PhysiologySimulation.AddInjury(
+                moving, BodyRegion.Abdomen, DamageKind.Blunt, 0.78f);
+            var context = new TreatmentContext(
+                1f, 1f, hasWater: true, hasDisinfectant: true,
+                hasNeedleAndThread: true, hasBandage: true);
+
+            var pressure = PhysiologySimulation.Treat(
+                resting, restingWound.WoundId, MedicalActionType.ApplyPressure, context);
+            Assert.That(pressure.Success, Is.False,
+                "A closed internal injury has no surface wound to compress.");
+            Assert.That(restingWound.InternalBleedingSeverity, Is.GreaterThan(0f));
+
+            PhysiologySimulation.Simulate(
+                resting, 600f, SurvivalEnvironment.Temperate, 0f);
+            PhysiologySimulation.Simulate(
+                moving, 600f, SurvivalEnvironment.Temperate, 0.9f);
+
+            Assert.That(moving.Physiology.BloodVolume,
+                Is.LessThan(resting.Physiology.BloodVolume));
+            Assert.That(movingWound.InternalBleedingSeverity,
+                Is.GreaterThan(restingWound.InternalBleedingSeverity));
+        }
+
+        [Test]
+        public void SevereInternalBleeding_CanCauseBloodLossDeathWithoutVisibleBleeding()
+        {
+            var character = NewCharacter();
+            var wound = PhysiologySimulation.AddInjury(
+                character, BodyRegion.Abdomen, DamageKind.Blunt, 1f);
+
+            Assert.That(wound.Bleeding, Is.Zero,
+                "A closed abdominal impact must not create visible blood loss.");
+            Assert.That(wound.InternalBleedingSeverity, Is.GreaterThan(0f));
+
+            PhysiologySimulation.Simulate(
+                character, 3600f, SurvivalEnvironment.Temperate, 0.85f);
+
+            Assert.That(character.Physiology.LifeState, Is.EqualTo(CharacterLifeState.Dead));
+            Assert.That(character.Physiology.DeathCause, Is.EqualTo(DeathCause.BloodLoss));
+        }
+
+        [Test]
         public void ActiveSleep_AdvancesPhysiologyButNotOfflineSafeMetabolism()
         {
             var awake = NewCharacter();
@@ -220,6 +296,57 @@ namespace Quieter.Tests.EditMode
             Assert.That(offline.Physiology.Hydration,
                 Is.GreaterThan(awake.Physiology.Hydration),
                 "Stable offline sleep keeps its fourfold metabolism slowdown.");
+        }
+
+        [Test]
+        public void CircadianClock_MakesNightSleepMoreRestorativeThanMiddaySleep()
+        {
+            var night = NewCharacter();
+            var midday = NewCharacter();
+            night.Physiology.SleepDebt = 0.9f;
+            midday.Physiology.SleepDebt = 0.9f;
+            PhysiologySimulation.BeginSleep(night);
+            PhysiologySimulation.BeginSleep(midday);
+            var nightEnvironment = new SurvivalEnvironment(
+                18f, 1f, 0.5f, 0f, 0.25f, 0f, true,
+                dayFraction: 0.125f);
+            var middayEnvironment = new SurvivalEnvironment(
+                18f, 1f, 0.5f, 0f, 0.25f, 0f, true,
+                dayFraction: 0.5f);
+
+            PhysiologySimulation.Simulate(night, 600f, nightEnvironment, 0f);
+            PhysiologySimulation.Simulate(midday, 600f, middayEnvironment, 0f);
+
+            Assert.That(night.Physiology.CircadianFatigue,
+                Is.GreaterThan(midday.Physiology.CircadianFatigue));
+            Assert.That(night.Physiology.SleepDebt,
+                Is.LessThan(midday.Physiology.SleepDebt));
+            Assert.That(PhysiologySimulation.CalculateCircadianSleepPressure(0.125f),
+                Is.GreaterThan(PhysiologySimulation.CalculateCircadianSleepPressure(0.5f)));
+        }
+
+        [Test]
+        public void SeededWeather_ContinuesAcrossRestartAndDrivesDayNightLight()
+        {
+            const long seed = 981723451L;
+            const double gameSeconds = 17.25d * 86400d;
+            var beforeRestart = WorldWeatherService.Sample(
+                seed, new Vector3(140f, 18f, -90f), gameSeconds);
+            var afterRestart = WorldWeatherService.Sample(
+                seed, new Vector3(140f, 18f, -90f), gameSeconds);
+
+            Assert.That(afterRestart.TemperatureC,
+                Is.EqualTo(beforeRestart.TemperatureC).Within(0.00001f));
+            Assert.That(afterRestart.Precipitation,
+                Is.EqualTo(beforeRestart.Precipitation).Within(0.00001f));
+            Assert.That(afterRestart.WindDirection,
+                Is.EqualTo(beforeRestart.WindDirection));
+            Assert.That(WorldWeatherService.CalculateDaylight(0f, 0f),
+                Is.LessThan(0.05f));
+            Assert.That(WorldWeatherService.CalculateDaylight(0.5f, 0f),
+                Is.GreaterThan(0.95f));
+            Assert.That(WorldWeatherService.CalculateDaylight(0.5f, 1f),
+                Is.LessThan(WorldWeatherService.CalculateDaylight(0.5f, 0f)));
         }
 
         [Test]
@@ -341,9 +468,34 @@ namespace Quieter.Tests.EditMode
                 fat: 30f,
                 minerals: 0.7f);
 
+            Assert.That(character.Physiology.FatReserve, Is.EqualTo(0.1f));
+            Assert.That(character.Physiology.DigestingFat, Is.GreaterThan(0f));
+            Assert.That(character.Physiology.DigestingMicronutrients, Is.GreaterThan(0f));
+            PhysiologySimulation.Simulate(
+                character, 600f, SurvivalEnvironment.Temperate, 0f);
             Assert.That(character.Physiology.FatReserve, Is.GreaterThan(0.1f));
             Assert.That(character.Physiology.MicronutrientReserve, Is.GreaterThan(0.1f));
             Assert.That(character.Physiology.MineralReserve, Is.GreaterThan(0.1f));
+        }
+
+        [Test]
+        public void FoodborneRisk_IsAbsorbedGraduallyThroughTheGut()
+        {
+            var character = NewCharacter();
+            PhysiologySimulation.ConsumeFood(
+                character, 300f, 5f, 0.2f, 0.8f, 0.65f);
+
+            Assert.That(character.Conditions.FoodborneInfection, Is.Zero);
+            Assert.That(character.Physiology.ToxinLoad, Is.Zero);
+            Assert.That(character.Physiology.DigestingBiologicalContamination,
+                Is.GreaterThan(0f));
+            PhysiologySimulation.Simulate(
+                character, 300f, SurvivalEnvironment.Temperate, 0f);
+
+            Assert.That(character.Conditions.FoodborneInfection, Is.GreaterThan(0f));
+            Assert.That(character.Physiology.ToxinLoad, Is.GreaterThan(0f));
+            Assert.That(character.Physiology.DigestingBiologicalContamination,
+                Is.GreaterThan(0f), "One short step must not absorb the whole meal.");
         }
 
         [Test]
@@ -525,6 +677,8 @@ namespace Quieter.Tests.EditMode
             Assert.That(character.Physiology.BladderFill, Is.Zero);
             Assert.That(character.Physiology.BodyCleanliness, Is.LessThan(1f));
             Assert.That(character.Physiology.Stress, Is.GreaterThanOrEqualTo(0.72f));
+            Assert.That(character.Physiology.EliminationAccidentRevision, Is.EqualTo(1));
+            Assert.That(character.Physiology.LastEliminationAccidentWasBowel, Is.False);
         }
 
         [Test]
@@ -614,6 +768,67 @@ namespace Quieter.Tests.EditMode
             };
             character.EnsureInitialized();
             return character;
+        }
+
+        [Test]
+        public void PendingMedicalActivity_PreservesRemainingWorkAndStablePatientAcrossRestart()
+        {
+            var character = NewCharacter();
+            character.MedicalActivity.Active = true;
+            character.MedicalActivity.WoundId = 42;
+            character.MedicalActivity.Action = MedicalActionType.Suture;
+            character.MedicalActivity.RemainingSeconds = 17.25f;
+            character.MedicalActivity.TargetCharacterId = "patient-after-restart";
+
+            var restored = JsonUtility.FromJson<CharacterSurvivalState>(
+                JsonUtility.ToJson(character));
+            restored.EnsureInitialized();
+
+            Assert.That(restored.MedicalActivity.Active, Is.True);
+            Assert.That(restored.MedicalActivity.WoundId, Is.EqualTo(42));
+            Assert.That(restored.MedicalActivity.Action,
+                Is.EqualTo(MedicalActionType.Suture));
+            Assert.That(restored.MedicalActivity.RemainingSeconds,
+                Is.EqualTo(17.25f).Within(0.001f));
+            Assert.That(restored.MedicalActivity.TargetCharacterId,
+                Is.EqualTo("patient-after-restart"));
+        }
+
+        [Test]
+        public void FictionalSilenceRite_RequiresRepeatedAttemptsAndEndsInPhysiologicalAgony()
+        {
+            var novice = NewCharacter();
+            novice.Progression.Attributes[(int)CharacterAttributeId.Willpower] = 0f;
+            novice.Physiology.Stress = 1f;
+            var practiced = NewCharacter();
+            practiced.Progression.Attributes[(int)CharacterAttributeId.Willpower] = 100f;
+            practiced.Physiology.Stress = 0f;
+            practiced.VoluntaryPassing.TechniqueFamiliarity = 0.8f;
+
+            Assert.That(PhysiologySimulation.CompleteFictionalSilenceAttempt(
+                novice, out var noviceGain), Is.False);
+            Assert.That(PhysiologySimulation.CompleteFictionalSilenceAttempt(
+                practiced, out var practicedGain), Is.False);
+            Assert.That(practicedGain, Is.GreaterThan(noviceGain));
+            Assert.That(novice.VoluntaryPassing.PassageProgress, Is.LessThan(1f));
+
+            var attempts = 1;
+            while (novice.Physiology.LifeState != CharacterLifeState.Agonal
+                && attempts++ < 12)
+            {
+                PhysiologySimulation.CompleteFictionalSilenceAttempt(novice, out _);
+            }
+            Assert.That(attempts, Is.GreaterThan(2));
+            Assert.That(novice.Physiology.LifeState, Is.EqualTo(CharacterLifeState.Agonal));
+            Assert.That(novice.Physiology.CriticalCause,
+                Is.EqualTo(DeathCause.VoluntaryPassing));
+
+            PhysiologySimulation.Simulate(
+                novice, 60f, SurvivalEnvironment.Temperate, 0f);
+            Assert.That(novice.Physiology.LifeState, Is.EqualTo(CharacterLifeState.Dead));
+            Assert.That(novice.Physiology.DeathCause,
+                Is.EqualTo(DeathCause.VoluntaryPassing));
+            Assert.That(novice.Anatomy.HeartFunction, Is.LessThanOrEqualTo(0.02f));
         }
 
         [Test]

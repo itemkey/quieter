@@ -26,3 +26,5 @@ MonoBehaviour:
   workSeconds: 0
   requiresBurningHearth: 0
   practiceSkill: 16
+  requiredWaterMilliliters: 0
+  outputWetness: 0

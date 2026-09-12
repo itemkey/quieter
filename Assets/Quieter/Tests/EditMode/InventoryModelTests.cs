@@ -158,6 +158,61 @@ namespace Quieter.Tests
         }
 
         [Test]
+        public void EliminationAccident_SoilsClothingWithoutReplacingItsIdentity()
+        {
+            var clothing = new ItemStackState(
+                63, 1, condition: 7700, itemInstanceId: 771, cleanliness: 9200,
+                equipped: true);
+
+            var urineSoiled = ItemHygieneRules.ApplyEliminationSoiling(
+                clothing, bowelAccident: false);
+            var bowelSoiled = ItemHygieneRules.ApplyEliminationSoiling(
+                clothing, bowelAccident: true);
+
+            Assert.That(urineSoiled.ItemInstanceId, Is.EqualTo(771));
+            Assert.That(urineSoiled.Condition, Is.EqualTo(7700));
+            Assert.That(urineSoiled.Wetness, Is.GreaterThan(bowelSoiled.Wetness));
+            Assert.That(bowelSoiled.BiologicalContamination,
+                Is.GreaterThan(urineSoiled.BiologicalContamination));
+            Assert.That(bowelSoiled.Cleanliness, Is.LessThan(urineSoiled.Cleanliness));
+        }
+
+        [Test]
+        public void HeatSterilizingNeedle_RequiresCleaningAndPreservesChemicalResidue()
+        {
+            var cleanedNeedle = new ItemStackState(
+                33, 1, itemInstanceId: 903, biologicalContamination: 8400,
+                toxinContamination: 2300, cleanliness: 7200);
+            var visiblyDirtyNeedle = cleanedNeedle;
+            visiblyDirtyNeedle.Cleanliness = 4200;
+
+            var sterilized = ItemHygieneRules.HeatSterilize(cleanedNeedle);
+
+            Assert.That(sterilized.ItemInstanceId, Is.EqualTo(903));
+            Assert.That(sterilized.BiologicalContamination, Is.Zero);
+            Assert.That(sterilized.ToxinContamination, Is.EqualTo(2300));
+            Assert.That(sterilized.Cleanliness, Is.EqualTo(7200));
+            Assert.That(ItemHygieneRules.HeatSterilize(visiblyDirtyNeedle),
+                Is.EqualTo(visiblyDirtyNeedle));
+        }
+
+        [Test]
+        public void BloodiedWeapon_CarriesBiologicalContaminationIntoNextContact()
+        {
+            var axe = new ItemStackState(
+                4, 1, condition: 80, itemInstanceId: 404, cleanliness: 10000);
+
+            var bloodied = ItemHygieneRules.SoilWithBlood(
+                axe, sourceBiologicalLoad: 0.8f);
+
+            Assert.That(bloodied.ItemInstanceId, Is.EqualTo(404));
+            Assert.That(bloodied.Condition, Is.EqualTo(80));
+            Assert.That(bloodied.BiologicalContamination, Is.GreaterThan(5000));
+            Assert.That(ItemHygieneRules.ContactContamination(bloodied),
+                Is.GreaterThan(0.5f));
+        }
+
+        [Test]
         public void ToolRecipeCategory_ContainsConfiguredAxePickaxeAndShovelRecipes()
         {
             var projectCatalog = Resources.Load<ItemCatalog>("Quieter/ItemCatalog");
@@ -563,6 +618,52 @@ namespace Quieter.Tests
             AssertStack(model.Workbench[0], wood, 3);
             AssertStack(model.Workbench[1], stone, 2);
             AssertStack(model.Workbench[2], rope, 1);
+        }
+
+        [Test]
+        public void WaterRecipe_IsAtomicAndCarriesWaterConditionIntoWetOutput()
+        {
+            var vessel = ScriptableObject.CreateInstance<ItemDefinition>();
+            vessel.Configure(90, "Сосуд", 1, PickupPlacementPriority.InventoryFirst,
+                Color.white, kind: ItemKind.LiquidContainer,
+                configuredLiquidCapacityMilliliters: 1000);
+            assets.Add(vessel);
+            var wetSheet = CreateItem(
+                91, "Мокрый лист", 8, PickupPlacementPriority.InventoryFirst);
+            var recipe = ScriptableObject.CreateInstance<CraftingRecipe>();
+            recipe.Configure(90, "Мокрый лист", new[]
+            {
+                new CraftingRecipe.Ingredient { Item = wood, Quantity = 6 },
+            }, wetSheet, 1, CraftingCategory.Materials, 30f, false,
+                Quieter.Survival.SkillId.CordageAndTextiles, 500, 10000);
+            assets.Add(recipe);
+            var waterCatalog = ScriptableObject.CreateInstance<ItemCatalog>();
+            waterCatalog.Configure(
+                new[] { wood, vessel, wetSheet }, new[] { recipe });
+            assets.Add(waterCatalog);
+            var model = new InventoryModel(waterCatalog);
+            model.SetSlot(Workbench(0), new ItemStackState(wood.ItemId, 6));
+            model.SetSlot(Inventory(0), new ItemStackState(
+                vessel.ItemId, 1, itemInstanceId: 123,
+                biologicalContamination: 2000, toxinContamination: 1000,
+                cleanliness: 8000, liquidMilliliters: 400,
+                liquidKind: LiquidKind.Water));
+
+            Assert.That(model.TryCraft(recipe), Is.False);
+            AssertStack(model.Workbench[0], wood, 6);
+            Assert.That(model.Inventory[0].LiquidMilliliters, Is.EqualTo(400));
+
+            var filled = model.Inventory[0];
+            filled.LiquidMilliliters = 600;
+            model.SetSlot(Inventory(0), filled);
+            Assert.That(model.TryCraft(recipe), Is.True);
+            Assert.That(model.Inventory[0].LiquidMilliliters, Is.EqualTo(100));
+            var output = model.Inventory[1];
+            AssertStack(output, wetSheet, 1);
+            Assert.That(output.Wetness, Is.EqualTo(10000));
+            Assert.That(output.BiologicalContamination, Is.EqualTo(2000));
+            Assert.That(output.ToxinContamination, Is.EqualTo(1000));
+            Assert.That(output.Cleanliness, Is.EqualTo(8000));
         }
 
         [Test]

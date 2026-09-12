@@ -478,6 +478,8 @@ namespace Quieter.UI
                 InventoryLayout.FirstHotbarSlot + inventory.SelectedHotbarIndex));
             if (active.ItemId == 30 && active.LiquidMilliliters > 0)
                 return "[E] Кипятить    [Shift+E] Настой с травами    [Ctrl+E] Отвар из кореньев";
+            if (active.ItemId == 33)
+                return "[E] Прогреть очищенную иглу";
             return ResourceBalance.TryGetCookedFoodItemId(active.ItemId, out _)
                 ? "[E] Приготовить пищу на очаге"
                 : "[E] Добавить древесину или уголь в очаг";

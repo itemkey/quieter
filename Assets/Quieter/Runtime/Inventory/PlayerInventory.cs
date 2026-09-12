@@ -503,6 +503,29 @@ namespace Quieter.Inventory
             return Mathf.Clamp01(burden);
         }
 
+        public void ServerSoilEquippedClothing(bool bowelAccident)
+        {
+            if (!IsServer || model == null || catalog == null) return;
+            var changed = false;
+            for (var index = 0; index < model.Inventory.Count; index++)
+            {
+                var stack = model.Inventory[index];
+                if (stack.IsEmpty || !stack.Equipped
+                    || !catalog.TryGetItem(stack.ItemId, out var item)
+                    || item.Kind != ItemKind.Clothing) continue;
+                var soiled = ItemHygieneRules.ApplyEliminationSoiling(
+                    stack, bowelAccident);
+                if (soiled.Equals(stack)) continue;
+                model.SetSlot(
+                    new InventorySlotReference(InventorySlotArea.Inventory, index),
+                    soiled);
+                changed = true;
+            }
+            if (!changed) return;
+            SynchronizeAll();
+            ServerInventoryChanged?.Invoke();
+        }
+
         public void ServerUpdateEquippedClothingWetness(
             float seconds,
             float precipitation,
@@ -914,6 +937,38 @@ namespace Quieter.Inventory
             return true;
         }
 
+        public bool TryHeatSterilizeActiveItemServer(ItemStackState expected)
+        {
+            if (!CanUseInventory || model == null || !model.ActiveStack.Equals(expected)
+                || !ItemHygieneRules.CanHeatSterilize(expected)) return false;
+            var sterilized = ItemHygieneRules.HeatSterilize(expected);
+            if (sterilized.Equals(expected)) return false;
+            var slot = new InventorySlotReference(
+                InventorySlotArea.Inventory,
+                InventoryLayout.FirstHotbarSlot + model.SelectedHotbarIndex);
+            if (!model.SetSlot(slot, sterilized)) return false;
+            SynchronizeAll();
+            ServerInventoryChanged?.Invoke();
+            return true;
+        }
+
+        public bool ServerSoilActiveItemWithBlood(
+            ItemStackState expected, float sourceBiologicalLoad)
+        {
+            if (!IsServer || serverPersistenceLocked || model == null || expected.IsEmpty
+                || !model.ActiveStack.Equals(expected)) return false;
+            var soiled = ItemHygieneRules.SoilWithBlood(
+                expected, sourceBiologicalLoad);
+            if (soiled.Equals(expected)) return false;
+            var slot = new InventorySlotReference(
+                InventorySlotArea.Inventory,
+                InventoryLayout.FirstHotbarSlot + model.SelectedHotbarIndex);
+            if (!model.SetSlot(slot, soiled)) return false;
+            SynchronizeAll();
+            ServerInventoryChanged?.Invoke();
+            return true;
+        }
+
         public bool TryConsumeAnyItemServer(ushort itemId)
         {
             if (!IsServer || model == null || itemId == 0) return false;
@@ -949,6 +1004,43 @@ namespace Quieter.Inventory
             foreach (var stack in model.Inventory)
                 if (!stack.IsEmpty && stack.ItemId == itemId) total += stack.Quantity;
             return total;
+        }
+
+        public bool HasServerHaulableCargo()
+        {
+            if (!IsServer || model == null || catalog == null) return false;
+            foreach (var stack in model.Inventory)
+            {
+                if (IsHaulableCargo(stack)) return true;
+            }
+            return false;
+        }
+
+        public bool TryExtractFirstHaulableCargoServer(out ItemStackState extracted)
+        {
+            extracted = default;
+            if (!IsServer || model == null || catalog == null) return false;
+            for (var index = 0; index < model.Inventory.Count; index++)
+            {
+                var stack = model.Inventory[index];
+                if (!IsHaulableCargo(stack)) continue;
+                var slot = new InventorySlotReference(InventorySlotArea.Inventory, index);
+                if (!model.RemoveStack(slot, stack.ItemId, stack.Quantity, out extracted))
+                    continue;
+                extracted.Equipped = false;
+                SynchronizeAll();
+                ServerInventoryChanged?.Invoke();
+                return true;
+            }
+            return false;
+        }
+
+        private bool IsHaulableCargo(ItemStackState stack)
+        {
+            if (stack.IsEmpty || stack.Equipped
+                || !catalog.TryGetItem(stack.ItemId, out var item)) return false;
+            return item.Kind is ItemKind.Resource or ItemKind.HiddenSample
+                or ItemKind.Placeable or ItemKind.Food;
         }
 
         public bool TryTransferAnyItemServer(PlayerInventory destination, ushort itemId)
@@ -1523,6 +1615,17 @@ namespace Quieter.Inventory
                 }
             }
 
+            if (recipe.RequiredWaterMilliliters > 0)
+            {
+                var availableWater = 0;
+                foreach (var stack in inventory)
+                {
+                    if (!stack.IsEmpty && stack.LiquidKind == LiquidKind.Water)
+                        availableWater += stack.LiquidMilliliters;
+                }
+                if (availableWater < recipe.RequiredWaterMilliliters) return false;
+            }
+
             var capacity = 0;
             foreach (var stack in inventory)
             {
@@ -1777,7 +1880,8 @@ namespace Quieter.Inventory
         private static bool IsOrganicForCremation(ushort itemId) => itemId is
             2 or 3 or 23 or 25 or 26 or 27 or 28 or 29 or 31 or 32 or 34
                 or 35 or 36 or 37 or 38 or 39 or 42 or 43 or 44 or 47 or 48
-                or 49 or 50 or 51 or 52 or 53 or 54 or 55 or 56 or 57 or 58 or 59;
+                or 49 or 50 or 51 or 52 or 53 or 54 or 55 or 56 or 57 or 58 or 59
+                or 63 or 64 or 65 or 66 or 67 or 68 or 69 or 70 or 71;
 
         [ServerRpc]
         private void LootCorpseServerRpc(NetworkObjectReference corpseReference)
@@ -1800,10 +1904,7 @@ namespace Quieter.Inventory
             if (session == null)
                 SendUseFeedbackClientRpc("Сервер не может подтвердить перенос вещи.");
             else
-            {
-                corpseSurvival.ServerWakeFromDanger();
                 session.BeginCorpseLoot(corpseInventory, this);
-            }
         }
 
         [ServerRpc]
@@ -1993,6 +2094,12 @@ namespace Quieter.Inventory
                 || catalog == null
                 || !catalog.TryGetRecipe(recipeId, out var recipe)
                 || !model.Cursor.IsEmpty || !model.MatchesExactly(recipe)) return;
+            if (!model.HasRecipeWater(recipe))
+            {
+                SendUseFeedbackClientRpc(
+                    $"Для этой работы нужно {recipe.RequiredWaterMilliliters} мл воды в сосудах.");
+                return;
+            }
             placedObjects ??= FindAnyObjectByType<PlacedObjectWorldService>();
             serverCraftHearthId = 0;
             if (recipe.RequiresBurningHearth && (placedObjects == null
@@ -2019,6 +2126,7 @@ namespace Quieter.Inventory
             if (serverCraftRecipe == null) return;
             if (!CanUseInventory || Vector3.Distance(transform.position, serverCraftPosition) > 1.25f
                 || !model.Cursor.IsEmpty || !model.MatchesExactly(serverCraftRecipe)
+                || !model.HasRecipeWater(serverCraftRecipe)
                 || serverCraftRecipe.RequiresBurningHearth
                     && (placedObjects == null
                         || !placedObjects.TryGetBurningHearth(serverCraftHearthId, out var hearthPosition)

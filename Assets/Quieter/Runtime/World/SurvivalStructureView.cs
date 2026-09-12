@@ -1,8 +1,47 @@
+using System.Collections.Generic;
 using Quieter.Inventory;
 using UnityEngine;
 
 namespace Quieter.World
 {
+    public readonly struct ShelterPartState
+    {
+        public readonly ushort ItemId;
+        public readonly Vector3 Position;
+        public readonly float Yaw;
+        public readonly bool Closed;
+
+        public ShelterPartState(ushort itemId, Vector3 position, float yaw, bool closed = false)
+        {
+            ItemId = itemId;
+            Position = position;
+            Yaw = yaw;
+            Closed = closed;
+        }
+    }
+
+    public readonly struct ShelterCoverage
+    {
+        public readonly bool HasRoof;
+        public readonly bool Enclosed;
+        public readonly int CoveredSides;
+        public readonly float RainProtection;
+        public readonly float WindProtection;
+        public readonly float SmokeRetention;
+
+        public ShelterCoverage(
+            bool hasRoof, bool enclosed, int coveredSides,
+            float rainProtection, float windProtection, float smokeRetention)
+        {
+            HasRoof = hasRoof;
+            Enclosed = enclosed;
+            CoveredSides = coveredSides;
+            RainProtection = rainProtection;
+            WindProtection = windProtection;
+            SmokeRetention = smokeRetention;
+        }
+    }
+
     public static class SurvivalStructureRules
     {
         public const ushort LeanToItemId = 44;
@@ -95,6 +134,87 @@ namespace Quieter.World
             IsModularBuildingPart(itemId) || itemId == DrainItemId
                 ? Mathf.Repeat(Mathf.Round(yaw / 90f) * 90f, 360f)
                 : Mathf.Repeat(yaw, 360f);
+
+        public static ShelterCoverage CalculateShelterCoverage(
+            Vector3 subjectPosition,
+            IReadOnlyList<ShelterPartState> parts)
+        {
+            if (parts == null || parts.Count == 0) return default;
+            var hasRoof = false;
+            var sides = new float[4]; // +X, -X, +Z, -Z relative to the subject.
+            for (var index = 0; index < parts.Count; index++)
+            {
+                var part = parts[index];
+                if (part.ItemId == RoofItemId)
+                {
+                    var local = Quaternion.Euler(0f, -part.Yaw, 0f)
+                        * (subjectPosition - part.Position);
+                    if (Mathf.Abs(local.x) <= 2.05f && Mathf.Abs(local.z) <= 2.05f
+                        && local.y >= -0.4f && local.y <= 3.2f) hasRoof = true;
+                    continue;
+                }
+                if (part.ItemId is not (WallItemId or DoorwayItemId)) continue;
+                if (Mathf.Abs(part.Position.y - subjectPosition.y) > 1.2f) continue;
+
+                var rotation = Quaternion.Euler(0f, part.Yaw, 0f);
+                var normal = rotation * Vector3.forward;
+                var tangent = rotation * Vector3.right;
+                var fromSubject = part.Position - subjectPosition;
+                var normalDistance = Vector3.Dot(fromSubject, normal);
+                if (Mathf.Abs(normalDistance) > 3f
+                    || Mathf.Abs(Vector3.Dot(fromSubject, tangent)) > 2.08f) continue;
+
+                var strength = part.ItemId == WallItemId
+                    ? 1f : HasClosedDoor(parts, part) ? 1f : 0.18f;
+                var towardBoundary = normal
+                    * Mathf.Sign(normalDistance == 0f ? 1f : normalDistance);
+                var side = Mathf.Abs(towardBoundary.x) >= Mathf.Abs(towardBoundary.z)
+                    ? towardBoundary.x >= 0f ? 0 : 1
+                    : towardBoundary.z >= 0f ? 2 : 3;
+                sides[side] = Mathf.Max(sides[side], strength);
+            }
+
+            var coveredSides = 0;
+            var sum = 0f;
+            var weakest = 1f;
+            for (var index = 0; index < sides.Length; index++)
+            {
+                if (sides[index] > 0f) coveredSides++;
+                sum += sides[index];
+                weakest = Mathf.Min(weakest, sides[index]);
+            }
+            var average = sum / sides.Length;
+            var enclosed = hasRoof && weakest >= 0.75f;
+            var windProtection = hasRoof
+                ? Mathf.Clamp01(0.2f + average * 0.64f + weakest * 0.08f)
+                : average * 0.2f;
+            var smokeRetention = hasRoof
+                ? Mathf.Clamp01(weakest * 0.7f + average * 0.3f)
+                : 0f;
+            return new ShelterCoverage(
+                hasRoof,
+                enclosed,
+                coveredSides,
+                hasRoof ? 0.98f : 0f,
+                windProtection,
+                smokeRetention);
+        }
+
+        private static bool HasClosedDoor(
+            IReadOnlyList<ShelterPartState> parts,
+            ShelterPartState doorway)
+        {
+            for (var index = 0; index < parts.Count; index++)
+            {
+                var door = parts[index];
+                if (door.ItemId != DoorItemId || !door.Closed
+                    || Vector3.Distance(door.Position, doorway.Position) > 0.85f) continue;
+                var yawDifference = Mathf.Abs(Mathf.DeltaAngle(door.Yaw, doorway.Yaw));
+                if (yawDifference <= 12f || Mathf.Abs(yawDifference - 180f) <= 12f)
+                    return true;
+            }
+            return false;
+        }
 
         public static bool AllowsModularOverlap(ushort placedItemId, ushort existingItemId) =>
             IsModularBuildingPart(placedItemId)

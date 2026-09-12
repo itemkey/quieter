@@ -38,6 +38,26 @@ namespace Quieter.Combat
         public SkillId Skill { get; }
     }
 
+    public readonly struct CombatPerformance
+    {
+        public CombatPerformance(
+            float impact, float staminaCost, float actionSpeed,
+            float blockQuality, float dodgeSpeed)
+        {
+            Impact = Mathf.Clamp(impact, 0.25f, 1.35f);
+            StaminaCost = Mathf.Clamp(staminaCost, 0.65f, 2.5f);
+            ActionSpeed = Mathf.Clamp(actionSpeed, 0.2f, 1.3f);
+            BlockQuality = Mathf.Clamp01(blockQuality);
+            DodgeSpeed = Mathf.Clamp(dodgeSpeed, 0.25f, 1.15f);
+        }
+
+        public float Impact { get; }
+        public float StaminaCost { get; }
+        public float ActionSpeed { get; }
+        public float BlockQuality { get; }
+        public float DodgeSpeed { get; }
+    }
+
     public static class MeleeCombatRules
     {
         public static MeleeWeaponProfile ResolveWeapon(ushort itemId) => itemId switch
@@ -70,14 +90,75 @@ namespace Quieter.Combat
             MeleeWeaponProfile weapon,
             MeleeAttackKind attack,
             float heavyCharge,
-            bool blocked)
+            bool blocked,
+            float attackerEfficiency = 1f,
+            float blockQuality = 1f)
         {
             var multiplier = attack == MeleeAttackKind.Heavy
                 ? Mathf.Lerp(1.2f, 1.85f, Mathf.Clamp01(heavyCharge))
                 : 0.78f;
-            if (blocked) multiplier *= 0.27f;
-            return Mathf.Clamp01(weapon.BaseImpact * multiplier);
+            if (blocked)
+            {
+                multiplier *= Mathf.Lerp(
+                    0.68f, 0.2f, Mathf.Clamp01(blockQuality));
+            }
+            return Mathf.Clamp01(weapon.BaseImpact * multiplier
+                * Mathf.Clamp(attackerEfficiency, 0.25f, 1.35f));
         }
+
+        public static CombatPerformance ResolvePerformance(
+            CharacterSurvivalState character, SkillId weaponSkill)
+        {
+            if (character == null)
+                return new CombatPerformance(0.25f, 2.5f, 0.2f, 0f, 0.25f);
+            character.EnsureInitialized();
+            var p = character.Physiology;
+            var progression = character.Progression;
+            var technique = CharacterProgression.GetSkillLevel(
+                progression, weaponSkill) / 10f;
+            var defence = CharacterProgression.GetSkillLevel(
+                progression, SkillId.Defence) / 10f;
+            var strength = Attribute(progression, CharacterAttributeId.Strength);
+            var endurance = Attribute(
+                progression, CharacterAttributeId.MuscularEndurance);
+            var aerobic = Attribute(progression, CharacterAttributeId.AerobicCapacity);
+            var balance = Attribute(progression, CharacterAttributeId.Balance);
+            var coordination = Attribute(progression, CharacterAttributeId.Coordination);
+            var capabilities = PhysiologySimulation.CalculateCapabilities(character);
+            var circulation = Mathf.Min(
+                Mathf.Clamp01(p.Oxygenation * 1.15f),
+                Mathf.Clamp01(p.BloodVolume * 1.3f));
+            var painControl = Mathf.Lerp(1f, 0.42f, p.Pain);
+            var alertness = Mathf.Lerp(0.5f, 1f, p.Consciousness)
+                * Mathf.Lerp(1f, 0.55f, p.CircadianFatigue);
+            var physiological = circulation * painControl * alertness;
+            var impact = (0.56f + strength * 0.34f + technique * 0.22f)
+                * Mathf.Lerp(0.62f, 1f, capabilities.FineMotor)
+                * Mathf.Lerp(0.48f, 1f, physiological);
+            var staminaCost = Mathf.Lerp(1.5f, 0.78f, endurance)
+                * Mathf.Lerp(1.25f, 0.86f, technique)
+                * Mathf.Lerp(1.55f, 1f, circulation)
+                * Mathf.Lerp(1.25f, 1f, aerobic);
+            var actionSpeed = Mathf.Lerp(0.48f, 1.12f,
+                    (coordination + technique) * 0.5f)
+                * Mathf.Lerp(0.45f, 1f, capabilities.FineMotor)
+                * Mathf.Lerp(0.55f, 1f, p.AcuteStamina)
+                * Mathf.Lerp(0.55f, 1f, physiological);
+            var block = Mathf.Lerp(0.18f, 0.92f,
+                    defence * 0.7f + coordination * 0.3f)
+                * physiological * Mathf.Lerp(0.6f, 1f, p.AcuteStamina);
+            var dodge = Mathf.Lerp(0.48f, 1.08f,
+                    (balance + coordination) * 0.5f)
+                * capabilities.MovementSpeed
+                * Mathf.Lerp(0.45f, 1f, p.AcuteStamina)
+                * Mathf.Lerp(0.55f, 1f, physiological);
+            return new CombatPerformance(
+                impact, staminaCost, actionSpeed, block, dodge);
+        }
+
+        private static float Attribute(
+            CharacterProgressionState progression, CharacterAttributeId id)
+            => Mathf.Clamp01(progression.Attributes[(int)id] / 100f);
 
         public static BodyRegion ResolveRegion(uint attackId)
         {

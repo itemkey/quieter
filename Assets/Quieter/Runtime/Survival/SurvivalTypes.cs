@@ -148,6 +148,14 @@ namespace Quieter.Survival
         Dead,
     }
 
+    public enum BodyPosture : byte
+    {
+        FaceUp,
+        RightSide,
+        FaceDown,
+        LeftSide,
+    }
+
     public enum DeathCause : byte
     {
         None,
@@ -222,6 +230,27 @@ namespace Quieter.Survival
     }
 
     [Serializable]
+    public sealed class PersistentMedicalActivityState
+    {
+        public bool Active;
+        public uint WoundId;
+        public MedicalActionType Action;
+        [Min(0f)] public float RemainingSeconds;
+        // Empty means that the character is treating themselves. Character ids,
+        // unlike network object ids, remain stable across a server restart.
+        public string TargetCharacterId = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class RestraintState
+    {
+        [Range(0f, 1f)] public float Integrity = 1f;
+        [Range(0f, 1f)] public float EscapeProgress;
+        [Min(0f)] public float EscapeAttemptRemainingSeconds;
+        [Min(0)] public int CompletedEscapeAttempts;
+    }
+
+    [Serializable]
     public sealed class WoundState
     {
         public uint WoundId;
@@ -232,8 +261,12 @@ namespace Quieter.Survival
         [Range(0f, 1f)] public float Contamination;
         [Range(0f, 1f)] public float Infection;
         [Range(0f, 1f)] public float Bleeding;
+        [Range(0f, 1f)] public float InternalBleedingSeverity;
         [Range(0f, 1f)] public float Pain;
         [Range(0f, 1f)] public float PermanentImpairment;
+        // Kept explicitly for saved-state readability. The severity value is
+        // the authoritative rate and lets an internal haemorrhage clot without
+        // pretending that a surface dressing can reach it.
         public bool InternalBleeding;
         public bool PressureApplied;
         public bool Washed;
@@ -277,14 +310,24 @@ namespace Quieter.Survival
         [Range(0f, 1f)] public float Hydration = 1f;
         [Range(0f, 1f)] public float ElectrolyteBalance = 1f;
         [Range(0f, 1f)] public float StomachFullness = 0.65f;
+        [Min(0f)] public float DigestingEnergy;
+        [Min(0f)] public float DigestingProtein;
+        [Min(0f)] public float DigestingFat;
+        [Min(0f)] public float DigestingMicronutrients;
+        [Min(0f)] public float DigestingMinerals;
+        [Min(0f)] public float DigestingBiologicalContamination;
+        [Min(0f)] public float DigestingToxins;
         [Range(0f, 1f)] public float EnergyReserve = 0.85f;
         [Range(0f, 1f)] public float ProteinReserve = 0.8f;
         [Range(0f, 1f)] public float FatReserve = 0.8f;
         [Range(0f, 1f)] public float MicronutrientReserve = 0.8f;
         [Range(0f, 1f)] public float MineralReserve = 0.8f;
         [Range(0f, 1f)] public float SleepDebt;
+        [Range(0f, 1f)] public float CircadianFatigue;
         [Range(0f, 1f)] public float BladderFill = 0.15f;
         [Range(0f, 1f)] public float BowelFill = 0.2f;
+        public uint EliminationAccidentRevision;
+        public bool LastEliminationAccidentWasBowel;
         [Range(0f, 1f)] public float HandCleanliness = 0.75f;
         [Range(0f, 1f)] public float BodyCleanliness = 0.8f;
         [Range(0f, 1f)] public float DentalHealth = 0.85f;
@@ -325,6 +368,31 @@ namespace Quieter.Survival
 
         public float GastrointestinalInfection
             => Mathf.Max(FoodborneInfection, WaterborneInfection);
+    }
+
+    /// <summary>
+    /// Progress for the setting's explicitly fictional ancient rite. It is not a
+    /// model of breath-holding, poison, or any real-world technique.
+    /// </summary>
+    [Serializable]
+    public sealed class VoluntaryPassingState
+    {
+        public bool AttemptActive;
+        [Min(0f)] public float AttemptRemainingSeconds;
+        [Range(0f, 1f)] public float TechniqueFamiliarity;
+        [Range(0f, 1f)] public float PassageProgress;
+        [Min(0)] public int CompletedAttempts;
+    }
+
+    [Serializable]
+    public sealed class PersistentLessonActivityState
+    {
+        public bool Active;
+        public bool Instructor;
+        public string CounterpartCharacterId = string.Empty;
+        public SkillId Skill;
+        [Min(0f)] public float RemainingSeconds;
+        [Min(0)] public int CompletedLessons;
     }
 
     [Serializable]
@@ -388,10 +456,15 @@ namespace Quieter.Survival
         public AnatomyState Anatomy = new();
         public ConditionState Conditions = new();
         public CharacterProgressionState Progression = new();
+        public PersistentMedicalActivityState MedicalActivity = new();
+        public VoluntaryPassingState VoluntaryPassing = new();
+        public PersistentLessonActivityState LessonActivity = new();
+        public RestraintState Restraint = new();
         public List<RelationshipState> Relationships = new();
         public WorkerContractState WorkerContract;
         public NpcRuntimeState Npc;
         public CorpseState Corpse;
+        public BodyPosture BodyPosture;
         public bool Sleeping;
         public bool Offline;
         public bool Bound;
@@ -412,9 +485,48 @@ namespace Quieter.Survival
             Physiology ??= new PhysiologyState();
             Anatomy ??= new AnatomyState();
             Anatomy.Wounds ??= new List<WoundState>();
+            foreach (var wound in Anatomy.Wounds)
+            {
+                if (wound != null && wound.InternalBleeding
+                    && wound.InternalBleedingSeverity <= 0f)
+                {
+                    // Compatibility for development saves written before the
+                    // rate was separated from the old yes/no marker.
+                    wound.InternalBleedingSeverity = Mathf.Clamp01(
+                        Mathf.Max(0.1f, wound.Severity * 0.72f));
+                }
+            }
             Conditions ??= new ConditionState();
             Progression ??= new CharacterProgressionState();
             Progression.EnsureInitialized();
+            MedicalActivity ??= new PersistentMedicalActivityState();
+            MedicalActivity.RemainingSeconds = Mathf.Max(
+                0f, MedicalActivity.RemainingSeconds);
+            MedicalActivity.TargetCharacterId ??= string.Empty;
+            VoluntaryPassing ??= new VoluntaryPassingState();
+            VoluntaryPassing.AttemptRemainingSeconds = Mathf.Max(
+                0f, VoluntaryPassing.AttemptRemainingSeconds);
+            VoluntaryPassing.TechniqueFamiliarity = Mathf.Clamp01(
+                VoluntaryPassing.TechniqueFamiliarity);
+            VoluntaryPassing.PassageProgress = Mathf.Clamp01(
+                VoluntaryPassing.PassageProgress);
+            VoluntaryPassing.CompletedAttempts = Mathf.Max(
+                0, VoluntaryPassing.CompletedAttempts);
+            LessonActivity ??= new PersistentLessonActivityState();
+            LessonActivity.CounterpartCharacterId ??= string.Empty;
+            LessonActivity.RemainingSeconds = Mathf.Max(
+                0f, LessonActivity.RemainingSeconds);
+            LessonActivity.CompletedLessons = Mathf.Max(
+                0, LessonActivity.CompletedLessons);
+            if (LessonActivity.Skill >= SkillId.Count)
+                LessonActivity.Skill = SkillId.Foraging;
+            Restraint ??= new RestraintState();
+            Restraint.Integrity = Mathf.Clamp01(Restraint.Integrity);
+            Restraint.EscapeProgress = Mathf.Clamp01(Restraint.EscapeProgress);
+            Restraint.EscapeAttemptRemainingSeconds = Mathf.Max(
+                0f, Restraint.EscapeAttemptRemainingSeconds);
+            Restraint.CompletedEscapeAttempts = Mathf.Max(
+                0, Restraint.CompletedEscapeAttempts);
             Relationships ??= new List<RelationshipState>();
             WorkerContract?.EnsureInitialized();
             if (ControlKind is CharacterControlKind.FreeNpc
@@ -438,7 +550,8 @@ namespace Quieter.Survival
             float insulation,
             float externalHeat,
             bool sheltered,
-            float smokeConcentration = 0f)
+            float smokeConcentration = 0f,
+            float dayFraction = 0.5f)
         {
             AmbientTemperatureC = ambientTemperatureC;
             WindMetersPerSecond = Mathf.Max(0f, windMetersPerSecond);
@@ -448,6 +561,7 @@ namespace Quieter.Survival
             ExternalHeat = Mathf.Clamp(externalHeat, 0f, 2f);
             Sheltered = sheltered;
             SmokeConcentration = Mathf.Clamp01(smokeConcentration);
+            DayFraction = Mathf.Repeat(dayFraction, 1f);
         }
 
         public float AmbientTemperatureC { get; }
@@ -458,6 +572,7 @@ namespace Quieter.Survival
         public float ExternalHeat { get; }
         public bool Sheltered { get; }
         public float SmokeConcentration { get; }
+        public float DayFraction { get; }
 
         public static SurvivalEnvironment Temperate => new(
             18f, 1f, 0.5f, 0f, 0.25f, 0f, false);

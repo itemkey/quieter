@@ -37,7 +37,7 @@ namespace Quieter.Tests
         }
 
         [Test]
-        public void IncompatibleProtocolOrGenerator_IsRejectedBeforeAuthentication()
+        public void IncompatibleProtocolGeneratorOrFeatureCohort_IsRejectedBeforeAuthentication()
         {
             var wrongProtocol = ConnectionCompatibility.CreatePayload(
                 (ushort)(QuieterConstants.ProtocolVersion + 1),
@@ -45,6 +45,11 @@ namespace Quieter.Tests
             var wrongGenerator = ConnectionCompatibility.CreatePayload(
                 QuieterConstants.ProtocolVersion,
                 (ushort)(QuieterConstants.GeneratorVersion + 1));
+            var wrongFeatures = ConnectionCompatibility.CreatePayload(
+                QuieterConstants.ProtocolVersion,
+                QuieterConstants.GeneratorVersion,
+                QuieterConstants.EnabledFeatureStages
+                    & ~QuieterFeatureStages.LivingNpcsContractsAndInheritance);
 
             Assert.That(ConnectionCompatibility.Validate(
                 wrongProtocol,
@@ -54,6 +59,16 @@ namespace Quieter.Tests
                 wrongGenerator,
                 QuieterConstants.ProtocolVersion,
                 QuieterConstants.GeneratorVersion).Accepted, Is.False);
+            Assert.That(ConnectionCompatibility.Validate(
+                wrongFeatures,
+                QuieterConstants.ProtocolVersion,
+                QuieterConstants.GeneratorVersion).Accepted, Is.False);
+            Assert.That(ConnectionCompatibility.Validate(
+                ConnectionCompatibility.CreatePayload(
+                    QuieterConstants.ProtocolVersion,
+                    QuieterConstants.GeneratorVersion),
+                QuieterConstants.ProtocolVersion,
+                QuieterConstants.GeneratorVersion).Accepted, Is.True);
         }
 
         [Test]

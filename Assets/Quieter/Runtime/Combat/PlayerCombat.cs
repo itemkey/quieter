@@ -63,9 +63,15 @@ namespace Quieter.Combat
         {
             if (!IsServer || NetworkManager == null || survival == null) return;
             var now = NetworkManager.ServerTime.Time;
+            var held = inventory.ServerActiveStack;
+            var heldWeapon = MeleeCombatRules.ResolveWeapon(
+                held.IsEmpty ? (ushort)0 : held.ItemId);
+            var performance = MeleeCombatRules.ResolvePerformance(
+                survival.ServerState, heldWeapon.Skill);
             blocking.Value = input.BlockHeld
                 && CanAct(autonomous)
-                && survival.ServerState.Physiology.AcuteStamina > 0.05f;
+                && survival.ServerState.Physiology.AcuteStamina > 0.05f
+                && performance.BlockQuality > 0.08f;
 
             if (input.AttackPressId != observedAttackPressId)
             {
@@ -91,10 +97,15 @@ namespace Quieter.Combat
             {
                 observedDodgePressId = input.DodgePressId;
                 if (now >= nextDodgeAt && input.DodgeDirection.sqrMagnitude > 0.01f
-                    && TrySpendStamina(0.2f, autonomous))
+                    && performance.DodgeSpeed > 0.3f
+                    && TrySpendStamina(
+                        0.2f * performance.StaminaCost, autonomous))
                 {
-                    player.ServerApplyDodge(input.DodgeDirection, 9.5f);
-                    nextDodgeAt = now + 0.75d;
+                    player.ServerApplyDodge(
+                        input.DodgeDirection, 9.5f * performance.DodgeSpeed);
+                    nextDodgeAt = now + 0.75d / performance.ActionSpeed;
+                    survival.ServerRegisterPractice(
+                        SkillId.Landing, 0.8f, 0.42f, 1f, 0f);
                 }
             }
         }
@@ -106,11 +117,15 @@ namespace Quieter.Combat
             var charge = Mathf.InverseLerp(0.28f, 1.2f, (float)heldSeconds);
             var active = inventory.ServerActiveStack;
             var weapon = MeleeCombatRules.ResolveWeapon(active.IsEmpty ? (ushort)0 : active.ItemId);
+            var performance = MeleeCombatRules.ResolvePerformance(
+                survival.ServerState, weapon.Skill);
+            if (performance.ActionSpeed <= 0.22f) return;
             var stamina = weapon.StaminaCost * (kind == MeleeAttackKind.Heavy
                 ? Mathf.Lerp(1.25f, 1.8f, charge)
-                : 0.75f);
+                : 0.75f) * performance.StaminaCost;
             if (!TrySpendStamina(stamina, autonomous)) return;
-            nextAttackAt = now + (kind == MeleeAttackKind.Heavy ? 0.9d : 0.42d);
+            nextAttackAt = now + (kind == MeleeAttackKind.Heavy ? 0.9d : 0.42d)
+                / performance.ActionSpeed;
 
             var requestedTime = Math.Clamp(
                 input.SampledServerTime,
@@ -144,19 +159,36 @@ namespace Quieter.Combat
 
             best.SamplePose(requestedTime, out var bestPosition, out var bestForward);
             var incoming = (attackerPosition - bestPosition).normalized;
+            var defenderPerformance = MeleeCombatRules.ResolvePerformance(
+                best.survival.ServerState, SkillId.Defence);
             var guarded = best.blocking.Value
                 && Vector3.Dot(bestForward.normalized, incoming) > 0.35f
                 && (best.survival.CanPerformServerAction()
-                    ? best.survival.ServerTrySpendStamina(0.14f + weapon.BaseImpact * 0.08f)
-                    : best.survival.ServerNpcTrySpendStamina(0.14f + weapon.BaseImpact * 0.08f));
-            var impact = MeleeCombatRules.ResolveImpact(weapon, kind, charge, guarded);
-            var contamination = active.IsEmpty ? 0.18f : 1f - active.Cleanliness / 10000f;
+                    ? best.survival.ServerTrySpendStamina(
+                        (0.14f + weapon.BaseImpact * 0.08f)
+                        * defenderPerformance.StaminaCost)
+                    : best.survival.ServerNpcTrySpendStamina(
+                        (0.14f + weapon.BaseImpact * 0.08f)
+                        * defenderPerformance.StaminaCost));
+            var impact = MeleeCombatRules.ResolveImpact(
+                weapon, kind, charge, guarded,
+                performance.Impact,
+                defenderPerformance.BlockQuality);
+            var contamination = active.IsEmpty
+                ? 1f - survival.ServerState.Physiology.HandCleanliness
+                : ItemHygieneRules.ContactContamination(active);
             best.survival.ServerApplyDamage(
                 MeleeCombatRules.ResolveRegion(observedAttackReleaseId),
                 weapon.DamageKind,
                 impact,
                 contamination,
                 weapon.DamageKind == DamageKind.Blunt && impact > 0.72f);
+            var sourceBiologicalLoad = Mathf.Clamp01(
+                0.35f + best.survival.ServerState.Physiology.SystemicInfection * 0.65f);
+            if (active.IsEmpty)
+                survival.ServerSoilHandsFromBlood(sourceBiologicalLoad);
+            else
+                inventory.ServerSoilActiveItemWithBlood(active, sourceBiologicalLoad);
             survival.ServerRegisterPractice(weapon.Skill, 2f, impact, 1f, 0f);
             best.survival.ServerRegisterPractice(SkillId.Defence, 1f, impact, guarded ? 1f : 0.2f, 0f);
         }

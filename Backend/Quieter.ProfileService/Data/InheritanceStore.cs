@@ -18,9 +18,10 @@ public sealed partial class ProfileStore
         if (!Guid.TryParse(request.HeirCharacterId, out var heirId))
             throw new ArgumentException("Invalid heir character id.");
         var player = await database.Players
-            .Include(candidate => candidate.DepositKnowledge)
             .Include(candidate => candidate.CurrentCharacter)
                 .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.DepositKnowledge)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken)
             ?? throw new ArgumentException("Player does not exist.");
         if (player.CurrentCharacter is null)
@@ -31,6 +32,10 @@ public sealed partial class ProfileStore
             .SingleOrDefaultAsync(character => character.CharacterId == heirId, cancellationToken)
             ?? throw new ArgumentException("Heir does not exist.");
         ValidateHeir(player, heir);
+        var irrevocablyOffered = await database.HeirOffers.AnyAsync(entry =>
+            entry.HeirCharacterId == heirId, cancellationToken);
+        if (irrevocablyOffered)
+            throw new ArgumentException("The heir is already reserved by an irrevocable offer.");
         var hasAssignedBed = await database.WorldPlacedObjects.AnyAsync(entry =>
             entry.ItemId == 48 && entry.OwnerAccountId == steamId
             && entry.AssignedCharacterId == heirId, cancellationToken);
@@ -58,9 +63,10 @@ public sealed partial class ProfileStore
         var previousReceipt = await database.InheritanceTransitions.AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.OperationId == operationId, cancellationToken);
         var player = await database.Players
-            .Include(candidate => candidate.DepositKnowledge)
             .Include(candidate => candidate.CurrentCharacter)
                 .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.DepositKnowledge)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == steamId, cancellationToken)
             ?? throw new ArgumentException("Player does not exist.");
         if (previousReceipt is not null)
@@ -82,6 +88,7 @@ public sealed partial class ProfileStore
             throw new ArgumentException("No heir is registered.");
         var heirId = player.RegisteredHeirCharacterId.Value;
         var heir = await database.Characters.Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .Include(character => character.ControllingPlayer)
             .SingleOrDefaultAsync(character => character.CharacterId == heirId, cancellationToken)
             ?? throw new ArgumentException("The registered heir no longer exists.");
@@ -100,8 +107,6 @@ public sealed partial class ProfileStore
         player.HeirRegisteredAtUtc = null;
         player.EstateRevision++;
         player.LastSeenAtUtc = DateTime.UtcNow;
-        database.PlayerDepositKnowledge.RemoveRange(player.DepositKnowledge);
-        player.DepositKnowledge.Clear();
         database.InheritanceTransitions.Add(new InheritanceTransitionEntity
         {
             OperationId = operationId,
@@ -110,6 +115,8 @@ public sealed partial class ProfileStore
             HeirCharacterId = heirId,
             CreatedAtUtc = DateTime.UtcNow,
         });
+        await ReplaceCharacterProjectionsAsync(
+            heir.CharacterId, heir.SurvivalJson, cancellationToken);
         await database.SaveChangesAsync(cancellationToken);
         return ToResponse(player, await LoadCurrentMapNotesAsync(player, cancellationToken));
     }
@@ -159,6 +166,10 @@ public sealed partial class ProfileStore
             throw new ArgumentException("The 24 game-hour donation window has ended.");
 
         var heirId = donor.RegisteredHeirCharacterId.Value;
+        if (await database.HeirOffers.AnyAsync(entry =>
+                entry.HeirCharacterId == heirId && entry.Status == 0
+                    && entry.HardExpiresAtUtc > DateTime.UtcNow, cancellationToken))
+            throw new ArgumentException("The heir is already reserved by another offer.");
         var heir = await database.Characters.Include(character => character.ControllingPlayer)
             .SingleOrDefaultAsync(character => character.CharacterId == heirId, cancellationToken)
             ?? throw new ArgumentException("The registered heir no longer exists.");
@@ -235,9 +246,10 @@ public sealed partial class ProfileStore
         var receipt = await database.InheritanceTransitions.AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.OperationId == operationId, cancellationToken);
         var player = await database.Players
-            .Include(candidate => candidate.DepositKnowledge)
             .Include(candidate => candidate.CurrentCharacter)
                 .ThenInclude(character => character!.Items)
+            .Include(candidate => candidate.CurrentCharacter)
+                .ThenInclude(character => character!.DepositKnowledge)
             .SingleOrDefaultAsync(candidate => candidate.SteamId == recipientSteamId,
                 cancellationToken)
             ?? throw new ArgumentException("Recipient does not exist.");
@@ -269,6 +281,7 @@ public sealed partial class ProfileStore
             throw new DbUpdateConcurrencyException("The lost character changed.");
 
         var heir = await database.Characters.Include(character => character.Items)
+            .Include(character => character.DepositKnowledge)
             .Include(character => character.ControllingPlayer)
             .SingleOrDefaultAsync(character => character.CharacterId == offer.HeirCharacterId,
                 cancellationToken)
@@ -289,8 +302,6 @@ public sealed partial class ProfileStore
         player.HeirRegisteredAtUtc = null;
         player.EstateRevision++;
         player.LastSeenAtUtc = DateTime.UtcNow;
-        database.PlayerDepositKnowledge.RemoveRange(player.DepositKnowledge);
-        player.DepositKnowledge.Clear();
         offer.Status = 1;
         offer.AcceptedAtUtc = DateTime.UtcNow;
         var otherOffers = await database.HeirOffers.Where(entry =>
@@ -306,6 +317,8 @@ public sealed partial class ProfileStore
             HeirCharacterId = heir.CharacterId,
             CreatedAtUtc = DateTime.UtcNow,
         });
+        await ReplaceCharacterProjectionsAsync(
+            heir.CharacterId, heir.SurvivalJson, cancellationToken);
         await database.SaveChangesAsync(cancellationToken);
         return ToResponse(player, await LoadCurrentMapNotesAsync(player, cancellationToken));
     }

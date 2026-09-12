@@ -96,6 +96,7 @@ namespace Quieter.Networking
         private float nextPositionSaveAt;
         private double nextNpcArrivalGameSeconds;
         private bool npcArrivalRunning;
+        private bool periodicSaveRunning;
         private string lastRejection = string.Empty;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private bool developmentLootSpawned;
@@ -362,7 +363,7 @@ namespace Quieter.Networking
             if (Time.unscaledTime >= nextPositionSaveAt)
             {
                 nextPositionSaveAt = Time.unscaledTime + QuieterConstants.PositionSaveIntervalSeconds;
-                _ = SaveAllPlayerStateAsync(lifetime.Token);
+                if (!periodicSaveRunning) _ = RunPeriodicSaveAsync(lifetime.Token);
             }
             var weather = FindAnyObjectByType<WorldWeatherService>();
             if (!npcArrivalRunning && nextNpcArrivalGameSeconds > 0d && weather != null
@@ -525,6 +526,18 @@ namespace Quieter.Networking
                     ItemInstanceId = instanceBase.ToString(), LiquidMilliliters = 1200,
                     LiquidKind = (byte)LiquidKind.Water, Cleanliness = 9000 },
             };
+            // Roughly two people in a full 48-NPC world arrive with an old
+            // compass. It remains a physical unique item: a trust reward, theft,
+            // or looting are the current acquisition paths.
+            if (index % 24 == 0)
+                items.Add(new StoredInventorySlot
+                {
+                    SlotIndex = 3,
+                    ItemId = 41,
+                    Quantity = 1,
+                    ItemInstanceId = (instanceBase + 2).ToString(),
+                    Condition = 10000,
+                });
             if (state.Npc.Disposition == NpcDisposition.Aggressive)
                 items.Add(new StoredInventorySlot { SlotIndex = InventoryLayout.FirstHotbarSlot,
                     ItemId = 42, Quantity = 1,
@@ -701,7 +714,8 @@ namespace Quieter.Networking
             inventory.InitializeServer(profile.InventorySlots, profile.PendingItems,
                 profile.SelectedHotbarIndex, profile.SteamId);
             resources.InitializeServer(profile.DepositKnowledge, profile.MapNotes,
-                profile.SteamId, worldDefinition.WorldId, playerRepository);
+                profile.SteamId, profile.Survival.CharacterId,
+                worldDefinition.WorldId, playerRepository);
             var body = new AuthenticatedClient
             {
                 SteamId = profile.SteamId, DisplayName = profile.DisplayName,
@@ -1074,6 +1088,7 @@ namespace Quieter.Networking
                     profile.DepositKnowledge,
                     profile.MapNotes,
                     authentication.SteamId,
+                    profile.Survival.CharacterId,
                     worldDefinition.WorldId,
                     playerRepository);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -1264,6 +1279,20 @@ namespace Quieter.Networking
                         Debug.LogWarning($"Could not save {client.SteamId}: {exception.Message}");
                     }
                 }
+            }
+        }
+
+        private async Task RunPeriodicSaveAsync(CancellationToken cancellationToken)
+        {
+            if (periodicSaveRunning) return;
+            periodicSaveRunning = true;
+            try
+            {
+                await SaveAllPlayerStateAsync(cancellationToken);
+            }
+            finally
+            {
+                periodicSaveRunning = false;
             }
         }
 
@@ -1475,6 +1504,7 @@ namespace Quieter.Networking
                         "На теле ничего доступного или инвентарь заполнен.");
                     return;
                 }
+                source.Survival.ServerWakeFromDanger();
                 if (playerRepository is not IPersistentCharacterRepository repository)
                     throw new InvalidOperationException("Repository cannot commit an inter-body transfer.");
                 var sourceAfter = CapturePlayerSaveSnapshot(source, cancellationToken, true, false);
@@ -1487,6 +1517,8 @@ namespace Quieter.Networking
                 if (destination.ResourceInteraction != null)
                     await destination.ResourceInteraction.FlushKnowledgeAsync(cancellationToken);
                 receiverInventory.ServerSendUseFeedback($"С тела взято: {itemName}.");
+                source.Inventory.ServerSendUseFeedback(
+                    $"Вас обыскивают: пропал предмет «{itemName}».");
             }
             catch (Exception exception)
             {
@@ -1495,14 +1527,16 @@ namespace Quieter.Networking
                     source.Inventory.ServerRestorePersistenceSnapshot(
                         sourceBefore, sourcePendingBefore, sourceSelected, source.SteamId);
                     source.ResourceInteraction?.InitializeServer(sourceKnowledge, sourceMaps,
-                        source.SteamId, worldDefinition.WorldId, playerRepository);
+                        source.SteamId, source.Survival.ServerState.CharacterId,
+                        worldDefinition.WorldId, playerRepository);
                 }
                 if (destinationBefore != null && destination?.Inventory != null)
                 {
                     destination.Inventory.ServerRestorePersistenceSnapshot(
                         destinationBefore, destinationPendingBefore, destinationSelected, destination.SteamId);
                     destination.ResourceInteraction?.InitializeServer(destinationKnowledge, destinationMaps,
-                        destination.SteamId, worldDefinition.WorldId, playerRepository);
+                        destination.SteamId, destination.Survival.ServerState.CharacterId,
+                        worldDefinition.WorldId, playerRepository);
                     destination.Inventory.ServerSendUseFeedback(
                         "Перенос вещи не подтверждён сервером; состояние восстановлено.");
                 }
@@ -2219,7 +2253,8 @@ namespace Quieter.Networking
             inventory.InitializeServer(profile.InventorySlots, profile.PendingItems,
                 profile.SelectedHotbarIndex, steamId);
             resources.InitializeServer(profile.DepositKnowledge, profile.MapNotes,
-                steamId, worldDefinition.WorldId, playerRepository);
+                steamId, profile.Survival.CharacterId,
+                worldDefinition.WorldId, playerRepository);
             var result = new AuthenticatedClient
             {
                 ClientId = clientId, SteamId = steamId, DisplayName = profile.DisplayName,

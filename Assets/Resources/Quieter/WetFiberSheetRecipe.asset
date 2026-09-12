@@ -10,19 +10,19 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8fa5a776831629c45b5a6c3e1801787c, type: 3}
-  m_Name: LinenUndertunicRecipe
+  m_Name: WetFiberSheetRecipe
   m_EditorClassIdentifier: Quieter.Runtime::Quieter.Inventory.CraftingRecipe
-  recipeId: 30
-  displayName: "\u041B\u044C\u043D\u044F\u043D\u0430\u044F \u043D\u0438\u0436\u043D\u044F\u044F
-    \u0440\u0443\u0431\u0430\u0445\u0430"
-  category: 0
+  recipeId: 35
+  displayName: "\u041C\u043E\u043A\u0440\u044B\u0439 \u043B\u0438\u0441\u0442 \u0438\u0437
+    \u0432\u043E\u043B\u043E\u043A\u043E\u043D"
+  category: 1
   ingredients:
-  - Item: {fileID: 11400000, guid: e7076783273e3b54fb739ee406d1c40d, type: 2}
-    Quantity: 2
-  output: {fileID: 11400000, guid: ff215d876171751498a189cabe374ef3, type: 2}
+  - Item: {fileID: 11400000, guid: 08779be56f36c19448712bf5a34cbcd3, type: 2}
+    Quantity: 6
+  output: {fileID: 11400000, guid: 8780553bb9814a147baa7b26d1317542, type: 2}
   outputQuantity: 1
-  workSeconds: 45
+  workSeconds: 30
   requiresBurningHearth: 0
   practiceSkill: 17
-  requiredWaterMilliliters: 0
-  outputWetness: 0
+  requiredWaterMilliliters: 500
+  outputWetness: 10000

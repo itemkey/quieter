@@ -241,6 +241,7 @@ namespace Quieter.Persistence
         [Serializable]
         private sealed class DepositKnowledgeListResponse
         {
+            public string characterId;
             public DepositKnowledgeResponse[] knowledge;
         }
 
@@ -514,6 +515,7 @@ namespace Quieter.Persistence
 
         public async Task SaveDepositKnowledgeAsync(
             ulong steamId,
+            string characterId,
             int worldId,
             IReadOnlyList<StoredDepositKnowledge> knowledge,
             CancellationToken cancellationToken = default)
@@ -536,7 +538,11 @@ namespace Quieter.Persistence
             using var request = CreateJsonRequest(
                 $"{baseUrl}/internal/players/{steamId}/worlds/{worldId}/deposit-knowledge",
                 UnityWebRequest.kHttpVerbPUT,
-                JsonUtility.ToJson(new DepositKnowledgeListResponse { knowledge = entries.ToArray() }));
+                JsonUtility.ToJson(new DepositKnowledgeListResponse
+                {
+                    characterId = characterId,
+                    knowledge = entries.ToArray(),
+                }));
             await SendAsync(request, cancellationToken);
         }
 

@@ -145,6 +145,12 @@ namespace Quieter.UI
             {
                 survival.RequestWashHands();
             }
+            if (!IsCreationOpen && !worldInterfaceOpen
+                && Keyboard.current?.lKey.wasPressedThisFrame == true
+                && survival != null)
+            {
+                survival.RequestReadWeather();
+            }
             Refresh();
         }
 
@@ -290,7 +296,7 @@ namespace Quieter.UI
             workerBookPanel.GetComponent<Image>().color = new Color(0.06f, 0.052f, 0.04f, 0.98f);
             var rect = (RectTransform)workerBookPanel.transform;
             rect.anchorMin = rect.anchorMax = rect.pivot = new Vector2(0.5f, 0.5f);
-            rect.sizeDelta = new Vector2(1040f, 760f);
+            rect.sizeDelta = new Vector2(1040f, 830f);
             var title = InventoryView.CreateText(
                 workerBookPanel.transform,
                 "РАБОЧАЯ КНИГА",
@@ -323,6 +329,7 @@ namespace Quieter.UI
                 ("Рацион +200", WorkerContractAction.IncreaseRation),
                 ("Рацион −200", WorkerContractAction.DecreaseRation),
                 ("Сменить оплату", WorkerContractAction.CyclePayment),
+                ("Провести урок работы", WorkerContractAction.BeginLesson),
             };
             for (var index = 0; index < actions.Length; index++)
             {
@@ -345,11 +352,11 @@ namespace Quieter.UI
             }
             var hint = InventoryView.CreateText(
                 workerBookPanel.transform,
-                "K / Escape — закрыть. Изменения принимает сервер только для вашего работника рядом.",
+                "K / Escape — закрыть. Урок длится две минуты; учитель и работник должны оставаться рядом.",
                 15,
                 FontStyle.Italic,
                 TextAnchor.MiddleCenter);
-            SetTopRect(hint.rectTransform, 35f, -710f, 970f, 28f);
+            SetTopRect(hint.rectTransform, 35f, -780f, 970f, 28f);
             workerBookPanel.SetActive(false);
         }
 
@@ -873,7 +880,10 @@ namespace Quieter.UI
                 sensations += "\n" + survival.ExternalMedicalMessage;
             if (!string.IsNullOrWhiteSpace(survival.FocusedMedicalTargetName))
             {
-                sensations += $"\nЦель: {survival.FocusedMedicalTargetName}. T — осмотр; F1–F7 — лечение; F8 — путы; F9 — перенос; F10 — начать захват в камере.";
+                sensations += $"\nЦель: {survival.FocusedMedicalTargetName}, положение — "
+                    + $"{BodyPostureText(survival.FocusedTargetBodyPosture)}. T — осмотр; "
+                    + "F1–F7 — лечение; F8 — путы; F9 — перенос; Shift+F9 — повернуть; "
+                    + "F10 — начать захват в камере.";
                 if (survival.FocusedTargetLifeState == CharacterLifeState.Dead
                     || survival.FocusedTargetControlKind == CharacterControlKind.ForcedNpc)
                     sensations += " Shift+F12 — безвозвратно предложить ей своего зарегистрированного наследника.";
@@ -882,7 +892,7 @@ namespace Quieter.UI
                 {
                     sensations += $"\nНаблюдение: {NpcActivityName(survival.FocusedTargetActivity)}";
                     if (survival.FocusedTargetControlKind == CharacterControlKind.FreeNpc)
-                        sensations += ". F11 — предложить договор за паёк.";
+                        sensations += ". F11 — переговоры о договоре за паёк; Ctrl+F11 — угроза.";
                     else
                     {
                         sensations += $", работа — {WorkerJobName(survival.FocusedTargetJob)}. K — рабочая книга; F12 — выбрать следующую работу; Shift+F11 — назначить наследником.";
@@ -1234,9 +1244,26 @@ namespace Quieter.UI
         {
             var lines = new List<string>();
             if (state.Sleeping) lines.Add("Вы спите. Z — проснуться.");
-            if (state.Bound) lines.Add("Руки стянуты путами: обычные действия недоступны.");
+            if (state.Bound)
+                lines.Add("Руки стянуты путами: обычные действия недоступны. X — попытаться освободиться.");
+            else if (state.LifeState <= CharacterLifeState.Confused)
+                lines.Add("L — осмотреть небо и прочитать погоду.");
             if (state.Captive)
                 lines.Add("Вы удерживаетесь в запертой камере. Освобождение или открытая дверь прервут захват.");
+            if ((state.Bound || state.Captive)
+                && state.LifeState <= CharacterLifeState.Confused)
+            {
+                if (state.VoluntaryPassingAttemptActive)
+                {
+                    lines.Add(state.VoluntaryPassingStage < 2
+                        ? "Продолжается долгая попытка вымышленного обряда древней тишины."
+                        : "Вы снова пытаетесь завершить вымышленный обряд древней тишины.");
+                }
+                else
+                {
+                    lines.Add("Ctrl+Shift+X — начать долгую попытку вымышленного обряда древней тишины.");
+                }
+            }
             if (state.BeingCarried) lines.Add("Вас переносит другой человек.");
             AddSymptom(lines, state.Symptoms, SymptomFlags.Thirst, "Хочется пить.");
             AddSymptom(lines, state.Symptoms, SymptomFlags.DryMouth, "Во рту совсем сухо.");
@@ -1369,7 +1396,18 @@ namespace Quieter.UI
             DeathCause.Sepsis => "заражение крови",
             DeathCause.Poisoning => "отравление и отказ органов",
             DeathCause.MultipleOrganFailure => "полиорганная недостаточность",
+            DeathCause.VoluntaryPassing => "вымышленный обряд древней тишины",
+            DeathCause.Captured => "утрата этой жизни после завершённого захвата",
             _ => "причина требует осмотра",
+        };
+
+        private static string BodyPostureText(BodyPosture posture) => posture switch
+        {
+            BodyPosture.FaceUp => "на спине",
+            BodyPosture.RightSide => "на правом боку",
+            BodyPosture.FaceDown => "на животе",
+            BodyPosture.LeftSide => "на левом боку",
+            _ => "неясно",
         };
 
         private static string RegionName(BodyRegion region)

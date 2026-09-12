@@ -10,6 +10,183 @@ namespace Quieter.Survival
         public const double RequiredHeirContractGameSeconds = GameSecondsPerDay * 2d;
         public const double CaptureDurationRealSeconds = 3600d;
 
+        public static bool ApplyOfflinePresence(
+            CharacterSurvivalState character,
+            bool offline,
+            float completedSleepQuality = 1f)
+        {
+            if (character == null) return false;
+            character.EnsureInitialized();
+            if (character.Offline == offline) return false;
+
+            character.Offline = offline;
+            character.Physiology.SafeOfflineSeconds = 0f;
+            if (offline)
+            {
+                PhysiologySimulation.BeginSleep(character);
+            }
+            else if (character.Sleeping)
+            {
+                PhysiologySimulation.EndSleep(character, Mathf.Clamp01(completedSleepQuality));
+                character.Physiology.CurrentSleepSeconds = 0f;
+            }
+            return true;
+        }
+
+        public static bool CompleteRestraintEscapeAttempt(
+            CharacterSurvivalState character,
+            out float progressGained)
+        {
+            progressGained = 0f;
+            if (character == null || !character.Bound
+                || character.Physiology?.LifeState > CharacterLifeState.Confused)
+                return false;
+            character.EnsureInitialized();
+            var restraint = character.Restraint;
+            var skill = CharacterProgression.GetSkillLevel(
+                character.Progression, SkillId.RestraintEscape) / 10f;
+            var strength = character.Progression.Attributes[
+                (int)CharacterAttributeId.Strength] / 100f;
+            var fineMotor = character.Progression.Attributes[
+                (int)CharacterAttributeId.FineMotorControl] / 100f;
+            var mobility = character.Progression.Attributes[
+                (int)CharacterAttributeId.Mobility] / 100f;
+            var physical = strength * 0.38f + fineMotor * 0.37f + mobility * 0.25f;
+            var condition = Mathf.Clamp01(
+                character.Physiology.Consciousness
+                * character.Physiology.AcuteStamina
+                * Mathf.Lerp(1f, 0.35f, character.Physiology.Pain)
+                * Mathf.Lerp(1f, 0.55f, character.Physiology.CircadianFatigue));
+            var ropeResistance = Mathf.Lerp(1.12f, 0.58f, restraint.Integrity);
+            progressGained = Mathf.Clamp(
+                (0.035f + skill * 0.095f + physical * 0.07f)
+                    * Mathf.Lerp(0.45f, 1f, condition)
+                    * ropeResistance,
+                0.018f,
+                0.22f);
+            restraint.CompletedEscapeAttempts++;
+            restraint.EscapeProgress = Mathf.Clamp01(
+                restraint.EscapeProgress + progressGained);
+            restraint.Integrity = Mathf.Clamp01(
+                restraint.Integrity - progressGained * (0.12f + skill * 0.08f));
+            restraint.EscapeAttemptRemainingSeconds = 0f;
+            return restraint.EscapeProgress >= 1f;
+        }
+
+        public static void ApplyWorkerResponse(
+            CharacterSurvivalState state,
+            WorkerResponseKind response,
+            long nowUtcTicks)
+        {
+            if (state?.Npc == null || state.WorkerContract == null) return;
+            var npc = state.Npc;
+            var contract = state.WorkerContract;
+            switch (response)
+            {
+                case WorkerResponseKind.Leave:
+                case WorkerResponseKind.Escape:
+                    contract.Active = false;
+                    state.ControlKind = CharacterControlKind.FreeNpc;
+                    npc.EmployerAccountId = string.Empty;
+                    npc.EmployerCharacterId = string.Empty;
+                    npc.Activity = response == WorkerResponseKind.Escape
+                        ? NpcActivityKind.Flee : NpcActivityKind.Wander;
+                    npc.FleeUntilUtcTicks = response == WorkerResponseKind.Escape
+                        ? nowUtcTicks + TimeSpan.FromMinutes(5).Ticks
+                        : 0;
+                    break;
+                case WorkerResponseKind.Sabotage:
+                    npc.PendingSabotageActions = Math.Min(
+                        3, npc.PendingSabotageActions + 1);
+                    npc.Activity = NpcActivityKind.Sabotage;
+                    break;
+                case WorkerResponseKind.Rebel:
+                    contract.Active = false;
+                    npc.Disposition = NpcDisposition.Aggressive;
+                    npc.Activity = NpcActivityKind.Combat;
+                    npc.FleeUntilUtcTicks = 0;
+                    break;
+            }
+        }
+
+        public static bool AdvancePersuasion(
+            CharacterSurvivalState speaker,
+            CharacterSurvivalState listener,
+            RelationshipState relationship,
+            long nowUtcTicks,
+            out float trustGained)
+        {
+            trustGained = 0f;
+            if (speaker == null || listener == null || relationship == null
+                || nowUtcTicks < relationship.NextSocialAttemptUtcTicks)
+                return false;
+            speaker.EnsureInitialized();
+            listener.EnsureInitialized();
+            var skill = CharacterProgression.GetSkillLevel(
+                speaker.Progression, SkillId.Persuasion) / 10f;
+            var speakerAptitude = (speaker.Progression.Attributes[
+                    (int)CharacterAttributeId.Reasoning]
+                + speaker.Progression.Attributes[(int)CharacterAttributeId.Perception]
+                + speaker.Progression.Attributes[(int)CharacterAttributeId.Willpower]) / 300f;
+            var listenerResolve = (listener.Progression.Attributes[
+                    (int)CharacterAttributeId.Willpower]
+                + listener.Progression.Attributes[(int)CharacterAttributeId.Reasoning]) / 200f;
+            var distress = Mathf.Clamp01(listener.Physiology.Stress * 0.65f
+                + listener.Physiology.Pain * 0.35f);
+            trustGained = Mathf.Clamp(
+                0.14f + skill * 0.1f + speakerAptitude * 0.08f
+                    - listenerResolve * 0.055f - distress * 0.04f,
+                0.08f,
+                0.3f);
+            relationship.Trust = Mathf.Clamp01(relationship.Trust + trustGained);
+            relationship.Resentment = Mathf.Clamp01(
+                relationship.Resentment - trustGained * 0.12f);
+            relationship.PersuasionAttempts++;
+            relationship.NextSocialAttemptUtcTicks = nowUtcTicks
+                + TimeSpan.FromSeconds(30).Ticks;
+            return relationship.Trust >= 0.62f && relationship.Resentment < 0.55f;
+        }
+
+        public static bool AdvanceIntimidation(
+            CharacterSurvivalState speaker,
+            CharacterSurvivalState listener,
+            RelationshipState relationship,
+            long nowUtcTicks,
+            out float fearGained)
+        {
+            fearGained = 0f;
+            if (speaker == null || listener == null || relationship == null
+                || nowUtcTicks < relationship.NextSocialAttemptUtcTicks)
+                return false;
+            speaker.EnsureInitialized();
+            listener.EnsureInitialized();
+            var skill = CharacterProgression.GetSkillLevel(
+                speaker.Progression, SkillId.Intimidation) / 10f;
+            var presence = (speaker.Progression.Attributes[
+                    (int)CharacterAttributeId.Strength]
+                + speaker.Progression.Attributes[(int)CharacterAttributeId.Willpower]) / 200f;
+            var resolve = listener.Progression.Attributes[
+                (int)CharacterAttributeId.Willpower] / 100f;
+            var weakened = 1f - Mathf.Clamp01(Mathf.Min(
+                listener.Physiology.BloodVolume,
+                Mathf.Min(listener.Physiology.Consciousness,
+                    listener.Physiology.AcuteStamina)));
+            fearGained = Mathf.Clamp(
+                0.1f + skill * 0.11f + presence * 0.08f + weakened * 0.22f
+                    - resolve * 0.06f,
+                0.06f,
+                0.36f);
+            relationship.Fear = Mathf.Clamp01(relationship.Fear + fearGained);
+            relationship.Resentment = Mathf.Clamp01(
+                relationship.Resentment + 0.055f + fearGained * 0.18f);
+            relationship.Trust = Mathf.Clamp01(relationship.Trust - 0.035f);
+            relationship.IntimidationAttempts++;
+            relationship.NextSocialAttemptUtcTicks = nowUtcTicks
+                + TimeSpan.FromSeconds(20).Ticks;
+            return relationship.Fear >= 0.68f
+                || weakened >= 0.52f && relationship.Fear >= 0.48f;
+        }
+
         public static bool CanRegisterHeir(
             InheritanceEligibility eligibility,
             out string error)
@@ -164,6 +341,38 @@ namespace Quieter.Survival
             var conditions = input.Motivation * input.ToolEfficiency
                 * input.PathEfficiency * input.WeatherEfficiency;
             return Mathf.Max(0f, baseUnits * skill * body * conditions);
+        }
+
+        public static float CalculateLessonQuality(
+            int teachingLevel,
+            int instructorSkillLevel,
+            int studentSkillLevel,
+            bool voluntaryStudent)
+        {
+            var teaching = Mathf.Clamp(teachingLevel, 0, 10);
+            var advantage = Mathf.Clamp(
+                instructorSkillLevel - studentSkillLevel, 0, 10);
+            return Mathf.Clamp01(
+                (0.22f + teaching * 0.055f + advantage * 0.05f)
+                * (voluntaryStudent ? 1f : 0.65f));
+        }
+
+        public static float CalculateLessonChallenge(
+            int instructorSkillLevel,
+            int studentSkillLevel)
+            => Mathf.Clamp01(0.25f + Mathf.Clamp(
+                instructorSkillLevel - studentSkillLevel, 0, 10) * 0.065f);
+
+        public static bool IsBodyRegionAccessible(
+            BodyPosture posture,
+            BodyRegion region)
+        {
+            if (posture != BodyPosture.FaceDown) return true;
+            return region is not BodyRegion.Head
+                and not BodyRegion.Neck
+                and not BodyRegion.Chest
+                and not BodyRegion.Abdomen
+                and not BodyRegion.Pelvis;
         }
 
         public static WorkerResponseKind EvaluateContractDay(
