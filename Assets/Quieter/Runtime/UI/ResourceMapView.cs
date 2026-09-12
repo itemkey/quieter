@@ -16,6 +16,7 @@ namespace Quieter.UI
         private const ushort PhysicalMapItemId = 36;
         private const ushort CompassItemId = 41;
         private readonly Dictionary<ulong, WorldObjectSpawn> depositSpawns = new();
+        private readonly List<MapTrackerMarker> trackerMarkers = new();
         private Canvas canvas;
         private GameObject hudRoot;
         private GameObject mapRoot;
@@ -49,6 +50,7 @@ namespace Quieter.UI
         private DeterministicChunkGenerator mapGenerator;
         private bool mapBuilt;
         private bool markersDirty = true;
+        private float nextTrackerRefreshAt;
         private float depositOpenedAt;
 
         public static ResourceMapView Instance { get; private set; }
@@ -120,6 +122,12 @@ namespace Quieter.UI
                     return;
                 }
                 if (!mapBuilt) BuildMapContent();
+                if (MapTrackerSourceRegistry.RegisteredSourceCount > 0
+                    && Time.unscaledTime >= nextTrackerRefreshAt)
+                {
+                    markersDirty = true;
+                    nextTrackerRefreshAt = Time.unscaledTime + 0.5f;
+                }
                 if (markersDirty) RefreshMarkers();
                 UpdatePlayerMarker();
                 if (noteFeedbackText != null)
@@ -589,6 +597,29 @@ namespace Quieter.UI
                     10, FontStyle.Bold, TextAnchor.UpperCenter);
                 label.supportRichText = false;
                 label.color = new Color(1f, 0.9f, 0.55f);
+                SetAnchored(label.rectTransform, new Vector2(0.5f, 0f),
+                    new Vector2(0f, -12f), new Vector2(180f, 30f));
+            }
+            trackerMarkers.Clear();
+            MapTrackerSourceRegistry.CollectMarkers(
+                new MapTrackerContext(
+                    selectedMapInstanceId,
+                    interaction.transform.position,
+                    inventory != null && inventory.ContainsReplicatedItem(CompassItemId)),
+                trackerMarkers);
+            foreach (var tracker in trackerMarkers)
+            {
+                if (string.IsNullOrWhiteSpace(tracker.TrackerId)) continue;
+                var marker = CreateMarker(markerRoot, tracker.Color, 14f);
+                marker.name = $"MapTracker_{tracker.TrackerId}";
+                marker.anchoredPosition = WorldToMap(tracker.WorldPosition);
+                marker.localRotation = Quaternion.Euler(
+                    0f, 0f, -tracker.HeadingDegrees);
+                if (string.IsNullOrWhiteSpace(tracker.Label)) continue;
+                var label = InventoryView.CreateText(
+                    marker, tracker.Label, 10, FontStyle.Bold, TextAnchor.UpperCenter);
+                label.supportRichText = false;
+                label.color = tracker.Color;
                 SetAnchored(label.rectTransform, new Vector2(0.5f, 0f),
                     new Vector2(0f, -12f), new Vector2(180f, 30f));
             }

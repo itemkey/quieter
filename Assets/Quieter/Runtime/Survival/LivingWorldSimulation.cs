@@ -19,11 +19,12 @@ namespace Quieter.Survival
             character.EnsureInitialized();
             if (character.Offline == offline) return false;
 
+            var wasSleeping = character.Sleeping;
             character.Offline = offline;
             character.Physiology.SafeOfflineSeconds = 0f;
             if (offline)
             {
-                PhysiologySimulation.BeginSleep(character);
+                if (!wasSleeping) PhysiologySimulation.BeginSleep(character);
             }
             else if (character.Sleeping)
             {

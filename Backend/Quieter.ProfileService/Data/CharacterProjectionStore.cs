@@ -64,6 +64,7 @@ public sealed partial class ProfileStore
                 MineralReserve = Float(physiology, "MineralReserve"),
                 SleepDebt = Float(physiology, "SleepDebt"),
                 CircadianFatigue = Float(physiology, "CircadianFatigue"),
+                SleepNoiseBurden = Float(physiology, "SleepNoiseBurden"),
                 CoreTemperatureC = Float(physiology, "CoreTemperatureC", 37f),
                 Pain = Float(physiology, "Pain"),
                 Stress = Float(physiology, "Stress"),

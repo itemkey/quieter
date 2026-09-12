@@ -144,6 +144,44 @@ namespace Quieter.Tests.EditMode
         }
 
         [Test]
+        public void BaselineNeedsReachSymptomsAndDehydrationDeathInDesignedRealTimeWindows()
+        {
+            var character = NewCharacter();
+            var thirstAt = -1f;
+            var hungerAt = -1f;
+            var dryMouthAt = -1f;
+            var fatigueAt = -1f;
+            var elapsed = 0f;
+
+            while (elapsed < 3f * 3600f
+                && character.Physiology.LifeState != CharacterLifeState.Dead)
+            {
+                PhysiologySimulation.Simulate(
+                    character, 60f, SurvivalEnvironment.Temperate, 0.35f);
+                elapsed += 60f;
+                var symptoms = PhysiologySimulation.ObserveSymptoms(character);
+                if (thirstAt < 0f && (symptoms & SymptomFlags.Thirst) != 0)
+                    thirstAt = elapsed;
+                if (hungerAt < 0f && (symptoms & SymptomFlags.Hunger) != 0)
+                    hungerAt = elapsed;
+                if (dryMouthAt < 0f && (symptoms & SymptomFlags.DryMouth) != 0)
+                    dryMouthAt = elapsed;
+                if (fatigueAt < 0f && (symptoms & SymptomFlags.Fatigue) != 0)
+                    fatigueAt = elapsed;
+            }
+
+            Assert.That(thirstAt, Is.InRange(20f * 60f, 30f * 60f));
+            Assert.That(hungerAt, Is.InRange(30f * 60f, 60f * 60f));
+            Assert.That(dryMouthAt, Is.InRange(45f * 60f, 60f * 60f));
+            Assert.That(fatigueAt, Is.InRange(60f * 60f, 90f * 60f));
+            Assert.That(elapsed, Is.InRange(1.5f * 3600f, 2.5f * 3600f));
+            Assert.That(character.Physiology.LifeState,
+                Is.EqualTo(CharacterLifeState.Dead));
+            Assert.That(character.Physiology.DeathCause,
+                Is.EqualTo(DeathCause.Dehydration));
+        }
+
+        [Test]
         public void BloodLoss_ProducesPhysiologicalDeathCause()
         {
             var character = NewCharacter();
@@ -323,6 +361,31 @@ namespace Quieter.Tests.EditMode
                 Is.LessThan(midday.Physiology.SleepDebt));
             Assert.That(PhysiologySimulation.CalculateCircadianSleepPressure(0.125f),
                 Is.GreaterThan(PhysiologySimulation.CalculateCircadianSleepPressure(0.5f)));
+        }
+
+        [Test]
+        public void RepeatedNoiseDegradesSleepAndLoudNoiseRequestsWakeup()
+        {
+            var quiet = NewCharacter();
+            var noisy = NewCharacter();
+            quiet.Physiology.SleepDebt = 0.8f;
+            noisy.Physiology.SleepDebt = 0.8f;
+            PhysiologySimulation.BeginSleep(quiet);
+            PhysiologySimulation.BeginSleep(noisy);
+
+            Assert.That(PhysiologySimulation.ApplySleepNoise(noisy, 0.5f), Is.False);
+            Assert.That(PhysiologySimulation.ApplySleepNoise(noisy, 0.5f), Is.False);
+            var night = new SurvivalEnvironment(
+                18f, 1f, 0.5f, 0f, 0.25f, 0f, true,
+                dayFraction: 0.05f);
+            PhysiologySimulation.Simulate(quiet, 300f, night, 0f);
+            PhysiologySimulation.Simulate(noisy, 300f, night, 0f);
+
+            Assert.That(noisy.Physiology.SleepDebt,
+                Is.GreaterThan(quiet.Physiology.SleepDebt));
+            Assert.That(PhysiologySimulation.ApplySleepNoise(noisy, 0.9f), Is.True);
+            PhysiologySimulation.EndSleep(noisy, 0.5f);
+            Assert.That(noisy.Physiology.SleepNoiseBurden, Is.Zero);
         }
 
         [Test]

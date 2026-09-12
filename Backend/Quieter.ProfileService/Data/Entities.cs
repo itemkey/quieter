@@ -157,6 +157,7 @@ public sealed class CharacterPhysiologyEntity
     public float MineralReserve { get; set; }
     public float SleepDebt { get; set; }
     public float CircadianFatigue { get; set; }
+    public float SleepNoiseBurden { get; set; }
     public float CoreTemperatureC { get; set; }
     public float Pain { get; set; }
     public float Stress { get; set; }

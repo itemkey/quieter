@@ -347,6 +347,7 @@ namespace Quieter.Survival
         public DeathCause CriticalCause;
         public float SafeOfflineSeconds;
         public float CurrentSleepSeconds;
+        [Range(0f, 1f)] public float SleepNoiseBurden;
         public bool SleepCycleConsolidated;
         public CharacterLifeState LifeState = CharacterLifeState.Conscious;
         public DeathCause DeathCause;
@@ -483,6 +484,8 @@ namespace Quieter.Survival
         {
             Traits ??= new List<TraitId>();
             Physiology ??= new PhysiologyState();
+            Physiology.SleepNoiseBurden = Mathf.Clamp01(
+                Physiology.SleepNoiseBurden);
             Anatomy ??= new AnatomyState();
             Anatomy.Wounds ??= new List<WoundState>();
             foreach (var wound in Anatomy.Wounds)

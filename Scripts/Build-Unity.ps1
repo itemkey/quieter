@@ -57,9 +57,25 @@ $method = if ($Target -eq "WindowsClient") {
     "Quieter.Editor.QuieterBuild.BuildLinuxServerFromCommandLine"
 }
 
-& $UnityPath -batchmode -quit -projectPath $projectRoot -executeMethod $method
-if ($LASTEXITCODE -ne 0) {
-    throw "Unity завершил сборку с кодом $LASTEXITCODE. Проверьте Editor.log."
+$unityArguments = @(
+    "-batchmode",
+    "-quit",
+    "-projectPath", ('"{0}"' -f $projectRoot),
+    "-executeMethod", $method
+)
+$unityProcess = Start-Process -FilePath $UnityPath `
+    -ArgumentList $unityArguments -WindowStyle Hidden -Wait -PassThru
+if ($unityProcess.ExitCode -ne 0) {
+    throw "Unity завершил сборку с кодом $($unityProcess.ExitCode). Проверьте Logs/Editor.log."
 }
 
-Write-Host "Сборка готова: $env:QUIETER_BUILD_OUTPUT"
+$expectedArtifact = if ($Target -eq "WindowsClient") {
+    Join-Path $env:QUIETER_BUILD_OUTPUT "WindowsClient\Quieter.exe"
+} else {
+    Join-Path $env:QUIETER_BUILD_OUTPUT "LinuxServer\QuieterServer"
+}
+if (-not (Test-Path -LiteralPath $expectedArtifact)) {
+    throw "Unity сообщил об успехе, но артефакт не найден: $expectedArtifact"
+}
+
+Write-Host "Сборка готова: $expectedArtifact"

@@ -530,6 +530,7 @@ public sealed class ProfileStoreTests
             {
                 LifeState = 0, DeathCause = 0, Hydration = 0.71f,
                 BloodVolume = 0.82f, CoreTemperatureC = 38.4f, Pain = 0.34f,
+                SleepNoiseBurden = 0.27f,
             },
             Conditions = new { FoodborneInfection = 0.23f, ParasiteLoad = 0.12f },
             Anatomy = new
@@ -590,6 +591,7 @@ public sealed class ProfileStoreTests
                 new InventoryRequest(0, []), new SurvivalRequest(firstJson, 1)), default));
 
         Assert.Equal(0.71f, (await database.CharacterPhysiology.SingleAsync()).Hydration);
+        Assert.Equal(0.27f, (await database.CharacterPhysiology.SingleAsync()).SleepNoiseBurden);
         Assert.Equal(2, await database.CharacterTraits.CountAsync());
         Assert.Equal(12, await database.CharacterAttributes.CountAsync());
         Assert.Equal(3, await database.CharacterSkills.CountAsync());

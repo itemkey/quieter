@@ -858,6 +858,27 @@ namespace Quieter.Survival
             ReplicateState();
         }
 
+        public void ServerApplyNearbyNoise(float perceivedIntensity)
+        {
+            if (!IsServer || serverState == null || !serverState.Sleeping
+                || ServerIsDead || perceivedIntensity <= 0f) return;
+            var shouldWake = PhysiologySimulation.ApplySleepNoise(
+                serverState, perceivedIntensity);
+            if (shouldWake && serverState.Offline)
+            {
+                // A disconnected body stays physically present and cannot be
+                // handed control, but loud danger prevents safe slowed sleep.
+                serverState.Physiology.SafeOfflineSeconds = 0f;
+            }
+            else if (shouldWake)
+            {
+                var quality = CalculateSleepQuality(serverState);
+                PhysiologySimulation.EndSleep(serverState, quality);
+                serverState.Physiology.CurrentSleepSeconds = 0f;
+            }
+            ReplicateState();
+        }
+
         private void HandleEliminationAccident(bool bowelAccident)
         {
             inventory?.ServerSoilEquippedClothing(bowelAccident);
@@ -4057,7 +4078,8 @@ namespace Quieter.Survival
                 + p.SystemicInfection * 0.25f
                 + Mathf.Max(0f, p.BladderFill - 0.75f) * 0.7f
                 + Mathf.Max(0f, 36f - p.CoreTemperatureC) * 0.15f
-                + Mathf.Max(0f, 0.2f - p.EnergyReserve) * 0.6f;
+                + Mathf.Max(0f, 0.2f - p.EnergyReserve) * 0.6f
+                + p.SleepNoiseBurden * 0.55f;
             var placedObjects = QuieterRuntimeBootstrap.Instance?.Session?.PlacedObjects;
             if (placedObjects != null && placedObjects.TryGetAssignedBedHygiene(
                     transform.position, character.CharacterId, out var bedHygiene))

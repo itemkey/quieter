@@ -58,6 +58,7 @@ namespace Quieter.Survival
             if (character.Physiology.LifeState <= CharacterLifeState.Confused)
             {
                 character.Sleeping = true;
+                character.Physiology.SleepNoiseBurden = 0f;
                 character.Physiology.SleepCycleConsolidated = false;
             }
         }
@@ -74,9 +75,25 @@ namespace Quieter.Survival
                     character.Physiology.CurrentSleepSeconds));
             character.Sleeping = false;
             character.Physiology.SleepCycleConsolidated = false;
-            return CharacterProgression.ConsolidateSleep(
+            var consolidated = CharacterProgression.ConsolidateSleep(
                 character.Progression,
                 Mathf.Clamp01(quality) * durationQuality);
+            character.Physiology.SleepNoiseBurden = 0f;
+            return consolidated;
+        }
+
+        public static bool ApplySleepNoise(
+            CharacterSurvivalState character,
+            float perceivedIntensity)
+        {
+            if (character == null || !character.Sleeping
+                || character.Physiology?.LifeState == CharacterLifeState.Dead)
+                return false;
+            character.EnsureInitialized();
+            var intensity = Mathf.Clamp01(perceivedIntensity);
+            character.Physiology.SleepNoiseBurden = Mathf.Clamp01(
+                character.Physiology.SleepNoiseBurden + intensity * 0.18f);
+            return intensity >= 0.72f;
         }
 
         /// <summary>
@@ -649,7 +666,7 @@ namespace Quieter.Survival
 
             var metabolism = traits.Metabolism * (1f + exertion * 1.35f);
             p.Hydration -= metabolicSeconds / (9000f / metabolism);
-            p.StomachFullness -= metabolicSeconds / (2700f / metabolism);
+            p.StomachFullness -= metabolicSeconds / (9000f / metabolism);
             p.EnergyReserve -= metabolicSeconds / (72000f / metabolism);
             p.ProteinReserve -= metabolicSeconds / (180000f / metabolism);
             p.FatReserve -= metabolicSeconds / (240000f / metabolism);
@@ -664,7 +681,8 @@ namespace Quieter.Survival
                     p.Pain * 0.5f
                     + Mathf.Max(0f, 36f - p.CoreTemperatureC) * 0.3f
                     + Mathf.Max(0f, p.BladderFill - 0.8f)
-                    + p.SystemicInfection * 0.4f);
+                    + p.SystemicInfection * 0.4f
+                    + p.SleepNoiseBurden * 0.8f);
                 // A personal sleep lasts 5-10 real minutes. Internal metabolism is
                 // accelerated separately, but rest duration stays on real time.
                 p.SleepDebt -= seconds / (420f * traits.SleepNeed)
@@ -674,7 +692,7 @@ namespace Quieter.Survival
             }
             else
             {
-                p.SleepDebt += metabolicSeconds / (14400f / traits.SleepNeed)
+                p.SleepDebt += metabolicSeconds / (12000f / traits.SleepNeed)
                     * (0.62f + p.CircadianFatigue * 0.45f + exertion * 0.3f);
                 p.AcuteStamina += seconds / 42f * (1f - exertion * 1.5f);
                 p.AcuteStamina -= seconds / 22f * exertion;
@@ -763,6 +781,7 @@ namespace Quieter.Survival
             p.DentalInfection = ClampFinite01(p.DentalInfection);
             p.SleepDebt = ClampFinite01(p.SleepDebt);
             p.CircadianFatigue = ClampFinite01(p.CircadianFatigue);
+            p.SleepNoiseBurden = ClampFinite01(p.SleepNoiseBurden);
             p.BladderFill = ClampFinite01(p.BladderFill);
             p.BowelFill = ClampFinite01(p.BowelFill);
             p.BloodVolume = ClampFinite01(p.BloodVolume);

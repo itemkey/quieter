@@ -135,6 +135,7 @@ namespace Quieter.Combat
             PlayerCombat best = null;
             var bestDistance = float.MaxValue;
             var all = FindObjectsByType<PlayerCombat>();
+            EmitCombatNoise(all, weapon, kind, charge);
             foreach (var target in all)
             {
                 if (target == this || !target.IsSpawned || !target.IsServer
@@ -191,6 +192,29 @@ namespace Quieter.Combat
                 inventory.ServerSoilActiveItemWithBlood(active, sourceBiologicalLoad);
             survival.ServerRegisterPractice(weapon.Skill, 2f, impact, 1f, 0f);
             best.survival.ServerRegisterPractice(SkillId.Defence, 1f, impact, guarded ? 1f : 0.2f, 0f);
+        }
+
+        private void EmitCombatNoise(
+            PlayerCombat[] listeners,
+            MeleeWeaponProfile weapon,
+            MeleeAttackKind kind,
+            float charge)
+        {
+            var intensity = Mathf.Clamp01(
+                0.34f + weapon.BaseImpact * 0.46f
+                    + (kind == MeleeAttackKind.Heavy
+                        ? Mathf.Lerp(0.14f, 0.26f, charge)
+                        : 0f));
+            var radius = Mathf.Lerp(6f, 14f, intensity);
+            foreach (var listener in listeners)
+            {
+                if (listener?.survival == null || listener.survival.ServerIsDead) continue;
+                var distance = Vector3.Distance(
+                    transform.position, listener.transform.position);
+                if (distance >= radius) continue;
+                var perceived = intensity * (1f - distance / radius);
+                listener.survival.ServerApplyNearbyNoise(perceived);
+            }
         }
 
         private bool CanAct(bool autonomous) => autonomous

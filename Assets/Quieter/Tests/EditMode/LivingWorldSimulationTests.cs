@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Quieter.Survival;
+using Quieter.UI;
 using UnityEngine;
 
 namespace Quieter.Tests.EditMode
@@ -31,6 +32,22 @@ namespace Quieter.Tests.EditMode
             Assert.That(body.Sleeping, Is.False);
             Assert.That(body.Physiology.SafeOfflineSeconds, Is.Zero);
             Assert.That(body.Physiology.CurrentSleepSeconds, Is.Zero);
+        }
+
+        [Test]
+        public void DisconnectingDuringSleepPreservesAccumulatedNoiseBurden()
+        {
+            var body = new CharacterSurvivalState { Sleeping = true };
+            body.EnsureInitialized();
+            body.Physiology.CurrentSleepSeconds = 180f;
+            body.Physiology.SleepNoiseBurden = 0.34f;
+
+            Assert.That(LivingWorldSimulation.ApplyOfflinePresence(body, true), Is.True);
+
+            Assert.That(body.Offline, Is.True);
+            Assert.That(body.Sleeping, Is.True);
+            Assert.That(body.Physiology.CurrentSleepSeconds, Is.EqualTo(180f));
+            Assert.That(body.Physiology.SleepNoiseBurden, Is.EqualTo(0.34f));
         }
 
         [Test]
@@ -437,6 +454,121 @@ namespace Quieter.Tests.EditMode
             Assert.That(merged.ItemInstanceId, Is.EqualTo(99));
             Assert.That(merged.Marks, Has.Count.EqualTo(1));
             Assert.That(merged.Marks[0].Text, Is.EqualTo("железо"));
+        }
+
+        [Test]
+        public void FutureMapTrackersAreOptInAndDisabledSourcesRevealNothing()
+        {
+            var disabled = new TestTrackerSource(false, "disabled");
+            var enabled = new TestTrackerSource(true, "enabled");
+            Assert.That(MapTrackerSourceRegistry.Register(disabled), Is.True);
+            Assert.That(MapTrackerSourceRegistry.Register(enabled), Is.True);
+            Assert.That(MapTrackerSourceRegistry.Register(enabled), Is.False);
+            try
+            {
+                var markers = new List<MapTrackerMarker>();
+                MapTrackerSourceRegistry.CollectMarkers(
+                    new MapTrackerContext(42, Vector3.zero, false), markers);
+
+                Assert.That(markers, Has.Count.EqualTo(1));
+                Assert.That(markers[0].TrackerId, Is.EqualTo("enabled"));
+                Assert.That(enabled.LastMapItemInstanceId, Is.EqualTo(42));
+                Assert.That(enabled.ObserverHadCompass, Is.False);
+            }
+            finally
+            {
+                MapTrackerSourceRegistry.Unregister(disabled);
+                MapTrackerSourceRegistry.Unregister(enabled);
+            }
+        }
+
+        [Test]
+        public void SixtyFourCharacterCohortKeepsPhysiologyFiniteAndCausal()
+        {
+            const int playerCount = 16;
+            const int npcCount = 48;
+            var cohort = new List<CharacterSurvivalState>(playerCount + npcCount);
+            for (var index = 0; index < playerCount + npcCount; index++)
+            {
+                var state = new CharacterSurvivalState
+                {
+                    CharacterId = $"stress-{index}",
+                    ControlKind = index < playerCount
+                        ? CharacterControlKind.Player
+                        : CharacterControlKind.FreeNpc,
+                };
+                state.EnsureInitialized();
+                state.Physiology.Hydration = 0.72f + index % 5 * 0.03f;
+                state.Physiology.EnergyReserve = 0.66f + index % 4 * 0.04f;
+                if (index % 9 == 0)
+                {
+                    PhysiologySimulation.AddInjury(
+                        state, BodyRegion.LeftForearm, DamageKind.Edged,
+                        0.24f, 0.18f);
+                }
+                cohort.Add(state);
+            }
+
+            var environment = new SurvivalEnvironment(
+                7f, 5f, 0.82f, 0.35f, 0.42f, 0f, false,
+                smokeConcentration: 0.04f, dayFraction: 0.78f);
+            // Twenty minutes of a busy world, advanced with the same bounded
+            // server-authoritative physiology path used in live sessions.
+            for (var minute = 0; minute < 20; minute++)
+            {
+                foreach (var state in cohort)
+                {
+                    PhysiologySimulation.Simulate(
+                        state, 60f, environment,
+                        state.ControlKind == CharacterControlKind.Player ? 0.45f : 0.3f);
+                }
+            }
+
+            Assert.That(cohort, Has.Count.EqualTo(64));
+            foreach (var state in cohort)
+            {
+                AssertFiniteAndNormalized(state.Physiology.Hydration);
+                AssertFiniteAndNormalized(state.Physiology.BloodVolume);
+                AssertFiniteAndNormalized(state.Physiology.Oxygenation);
+                AssertFiniteAndNormalized(state.Physiology.Consciousness);
+                Assert.That(float.IsNaN(state.Physiology.CoreTemperatureC), Is.False);
+                Assert.That(float.IsInfinity(state.Physiology.CoreTemperatureC), Is.False);
+                if (state.Physiology.LifeState == CharacterLifeState.Dead)
+                    Assert.That(state.Physiology.DeathCause, Is.Not.EqualTo(DeathCause.None));
+            }
+        }
+
+        private static void AssertFiniteAndNormalized(float value)
+        {
+            Assert.That(float.IsNaN(value), Is.False);
+            Assert.That(float.IsInfinity(value), Is.False);
+            Assert.That(value, Is.InRange(0f, 1f));
+        }
+
+        private sealed class TestTrackerSource : IMapTrackerSource
+        {
+            private readonly string trackerId;
+
+            public TestTrackerSource(bool enabled, string trackerId)
+            {
+                IsEnabled = enabled;
+                this.trackerId = trackerId;
+            }
+
+            public bool IsEnabled { get; }
+            public ulong LastMapItemInstanceId { get; private set; }
+            public bool ObserverHadCompass { get; private set; }
+
+            public void CollectMarkers(
+                MapTrackerContext context,
+                ICollection<MapTrackerMarker> destination)
+            {
+                LastMapItemInstanceId = context.MapItemInstanceId;
+                ObserverHadCompass = context.ObserverHasCompass;
+                destination.Add(new MapTrackerMarker(
+                    trackerId, new Vector3(4f, 0f, 8f), 90f,
+                    "след", Color.cyan));
+            }
         }
     }
 }
